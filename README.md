@@ -63,12 +63,54 @@ python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_message_by_u
 | `--maxThreads` | `200`            | Maximum number of threads to sync                                         |
 | `--userId`     | `None`           | User ID for `fetch_message_by_user` action                                |
 
-### Database Schema (FrankenSQLite)
+## 🔧 Facebook Comment Fetcher (`tools/fetch_comments.py`)
 
-- **`threads`**: `id`, `page_id`, `thread_name`, `last_synced_time`
-- **`messages`**: `thread_id`, `sender`, `content`, `message_timestamp` (UNIQUE)
-- **`users`**: `thread_id`, `thread_name`, `phone`, `email`, `fb_url`, `city`, `last_interaction`
-- **`fetch_log`**: `page_id`, `timestamp`, `threads_count`, `messages_count`
+A Playwright-based CLI tool that fetches public comments from Facebook Page posts.
+
+### How It Works
+
+1. **Opens FB Business Inbox** (Post view) via saved CDP credentials
+2. **Scrolls the post sidebar** to load all posts within date range
+3. **Clicks each post thread** and extracts comments (dual JS strategy)
+4. **Saves to FrankenSQLite** — `posts`, `comments`, `comment_users` tables
+5. **Date filtering** — stops when posts exceed `--time_range`
+
+### Usage
+
+```bash
+# Fetch comments from the last 90 days
+python tools/fetch_comments.py --pageId <PAGE_ID> --credential <CRED_NAME> --time_range 90d --action fetch_comments
+
+# List all comments for a specific post
+python tools/fetch_comments.py --pageId <PAGE_ID> --action get_comments_by_post --postId <POST_ID>
+
+# List unique commenters
+python tools/fetch_comments.py --pageId <PAGE_ID> --action get_comment_users --time_range 30d
+```
+
+### Comment Database Schema
+
+- **`posts`**: `id`, `page_id`, `post_name`, `post_url`, `last_synced_time`
+- **`comments`**: `post_id`, `commenter_name`, `comment_text`, `fb_profile_url`, `fb_user_id`, `is_reply`, `comment_date`
+- **`comment_users`**: `post_id`, `commenter_name`, `fb_user_id`, `fb_profile_url`, `phone`, `email`, `city`, `lead_stage`
+- **`comment_fetch_log`**: `page_id`, `fetched_at`, `posts_found`, `comments_found`
+
+## 📊 Data Model: Social Network → Customer Journey
+
+```
+Page (page_id = 1548373332058326)
+├── Post (post_id) ← ads, video, image, text
+│   ├── Comment (by UserID) ← public touch-point
+│   │   └── Reply (by PageID) ← our response
+│   └── comment_users CRM table
+├── Thread (thread_id) ← private DM touch-point
+│   ├── Message (by UserID or PageID)
+│   └── users CRM table
+└── Unified User Identity (fb_user_id + fb_profile_url)
+    └── Customer Journey: Intake → Engaged → Registered → Attending
+```
+
+Every interaction (comment, message, reply) is a **touch-point** in the seeker's journey. The AI Agent uses these touch-points to personalize responses and maximize engagement at each funnel stage.
 
 ## 🔑 Universal IDs and Security
 
