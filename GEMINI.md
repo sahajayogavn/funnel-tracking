@@ -35,7 +35,7 @@ To prevent accidentally leaking sensitive keys to Git, the system utilizes an en
 All actionable rules for the AI Agents are stored in the `.agents/rules/` directory for modularity and easy reference.
 
 - **[Git Operations Rules](.agents/rules/git-operations.md)**: Guidelines for committing and pushing.
-- **[Tool Writing Rules](.agents/rules/tool-writing.md)**: Standards for creating Python tools as CLI applications.
+- **[Tool Writing Rules](.agents/rules/tool-writing.md)**: Standards for creating Python tools as CLI applications and explicitly defining database structure using FrankenSQLite.
 - **[DevOps, QA & Testing Rules](.agents/rules/devops-qa.md)**: Rules for writing unit tests, QA, E2E testing, code coverage, and pre-commit checks.
 
 ## 5. Universal ID System

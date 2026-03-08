@@ -1,40 +1,91 @@
 # Chat Bot for Seeker Care (Sahaja Yoga Vietnam)
 
-Welcome to the **Funnel Tracking** repository. This project aims to build an AI Agents group dedicated to storing and managing the list of seekers (new learners) of Sahaja Yoga Vietnam. The main objective is to provide a Chat Bot that serves to care for new seekers when they send inquiry messages to the Facebook Fanpage, and automatically notifies the Telegram group for convenient and timely responses.
+Welcome to the **Funnel Tracking** repository. This project builds AI Agents to store and manage seekers (new learners) of Sahaja Yoga Vietnam. The main objective is a Chat Bot that cares for new seekers when they message the Facebook Fanpage, and automatically notifies the Telegram group for timely responses.
 
 ## 🌟 Key Features
 
-1. **Facebook Fanpage Integration**: Automatically process and respond to messages from new seekers.
+1. **Facebook Fanpage Integration**: Automatically fetch and process inbox messages from seekers.
 2. **Telegram Notification**: Forward inquiries to a designated Telegram group.
-3. **Seeker Information Storage**: Store and manage seeker data primarily by phone number (converted to the `0xxxxxxxxx` format for Vietnamese phone numbers, but adjustable for other countries).
-4. **Agent Memory**: Utilize a `memory/agent/` directory consisting of Markdown documents (such as `lop-hoc.md`, `su-kien.md`) to provide the conversational agents with context about current courses and events.
+3. **Seeker Information Storage**: Store and manage seeker data (phone, email, city, FB URL) in FrankenSQLite.
+4. **Agent Memory**: Utilize `memory/agent_memory/` Markdown documents (`lop-hoc.md`, `su-kien.md`) for conversational context.
 
 ## 🏗 Project Architecture & Rules
 
-This project is initialized according to the Agile XP methodology tailored for AI Agents. All core operational guidelines are consolidated in [`GEMINI.md`](GEMINI.md).
+Initialized according to Agile XP methodology for AI Agents. All core guidelines are in [`GEMINI.md`](GEMINI.md).
 
-- **`.agents/rules/`**: Rules governing the behavior and boundaries of the AI agents (e.g., Git Operations, Tool Writing, DevOps QA).
-- **`.agents/workflows/`**: Workflow configurations defining the steps agents take to accomplish tasks.
-- **`.agents/skills/`**: Specific capabilities that agents can utilize.
-- **`tools/`**: Python 3.13 scripts and utilities acting as CLIs (`webhook_comments.py`, `env_manager.py`).
-- **`memory/agent_memory/`**: The knowledge base of the agents, storing course lists, event details, and seeker logs.
-- **`logs/`**: Directory for iteration handover reports and execution logs.
+| Directory              | Purpose                                                                     |
+| ---------------------- | --------------------------------------------------------------------------- |
+| `.agents/rules/`       | Rules governing AI agent behavior (Git Operations, Tool Writing, DevOps QA) |
+| `.agents/workflows/`   | Workflow configurations for agent tasks                                     |
+| `.agents/skills/`      | Agent capabilities and skills                                               |
+| `tools/`               | Python 3.13 CLI scripts (`fetch_fb_messages.py`, `env_manager.py`)          |
+| `tests/`               | Unit tests for all tools                                                    |
+| `memory/agent_memory/` | Knowledge base — course lists, events, seeker logs, FrankenSQLite DB        |
+| `logs/`                | Iteration handover reports and execution logs                               |
+
+## 🔧 Facebook Message Fetcher (`tools/fetch_fb_messages.py`)
+
+A Playwright-based CLI tool that fetches messages from Facebook Business Inbox.
+
+### How It Works
+
+1. **Opens FB Business Inbox** via saved CDP credentials
+2. **Scrolls the thread sidebar** using `mouse.wheel()` to trigger FB's React infinite scroll
+3. **Clicks each visible thread** and extracts messages, ad context, timestamps
+4. **Saves to FrankenSQLite** — `threads`, `messages`, `users` tables
+5. **Date filtering** — stops when threads exceed `--time_range`
+
+### Usage
+
+```bash
+# Fetch messages from the last 7 days
+python tools/fetch_fb_messages.py --pageId <PAGE_ID> --credential <CRED_NAME> --time_range 7d --action fetch_messages
+
+# Force refresh (bypass 1-hour cache)
+python tools/fetch_fb_messages.py --pageId <PAGE_ID> --credential <CRED_NAME> --action fetch_messages --refresh
+
+# List unique users sorted by last interaction
+python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action get_list_unique_user --time_range 7d
+
+# Fetch messages for a specific user
+python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_message_by_user --userId <THREAD_ID>
+```
+
+### CLI Arguments
+
+| Argument       | Default          | Description                                                               |
+| -------------- | ---------------- | ------------------------------------------------------------------------- |
+| `--pageId`     | _required_       | Facebook Page ID                                                          |
+| `--credential` | `default`        | CDP credential name                                                       |
+| `--time_range` | `7d`             | Time range: `1d`, `7d`, `30d`, `90d`                                      |
+| `--action`     | `fetch_messages` | Action: `fetch_messages`, `get_list_unique_user`, `fetch_message_by_user` |
+| `--refresh`    | `false`          | Force fresh fetch, bypass 1-hour cache                                    |
+| `--maxThreads` | `200`            | Maximum number of threads to sync                                         |
+| `--userId`     | `None`           | User ID for `fetch_message_by_user` action                                |
+
+### Database Schema (FrankenSQLite)
+
+- **`threads`**: `id`, `page_id`, `thread_name`, `last_synced_time`
+- **`messages`**: `thread_id`, `sender`, `content`, `message_timestamp` (UNIQUE)
+- **`users`**: `thread_id`, `thread_name`, `phone`, `email`, `fb_url`, `city`, `last_interaction`
+- **`fetch_log`**: `page_id`, `timestamp`, `threads_count`, `messages_count`
 
 ## 🔑 Universal IDs and Security
 
-- **Universal ID**: Every component must be assigned a Universal ID following the `<type>:<section-name-XXX>[:<component_name-YYY>]` format.
-- **Security Check**: Secure API keys and tokens are stored in the `.env` file but must be encoded/decoded using `tools/env_manager.py` to prevent Git leaks.
-
-## 📖 English and Vietnamese Documentation
-
-We provide documentation in both [English (README.md)](README.md) and [Vietnamese (README-vi.md)](README-vi.md) to facilitate open-source contributions.
+- **Universal ID**: Every component follows `<type>:<section-name-XXX>[:<component_name-YYY>]` format.
+- **Security**: API keys stored in `.env`, encoded/decoded via `tools/env_manager.py`.
 
 ## 🛠 Getting Started
 
 1. Clone the repository.
-2. Install Python dependencies (Wait for `requirements.txt`).
-3. Set up the environment variables for Facebook Webhooks and Telegram Bot tokens.
-4. Run the API endpoints to start listening for events.
+2. Create Python 3.13 virtual environment: `python3.13 -m venv .venv && source .venv/bin/activate`
+3. Install dependencies: `pip install playwright && playwright install chromium`
+4. Set up credentials: `python tools/env_manager.py`
+5. Run: `python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_messages`
+
+## 📖 Documentation
+
+- [English (README.md)](README.md) | [Tiếng Việt (README-vi.md)](README-vi.md)
 
 ---
 

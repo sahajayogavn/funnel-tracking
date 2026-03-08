@@ -52,5 +52,5 @@ This workflow provides step-by-step instructions for writing Python scripts for 
    python -m unittest tests/test_my_new_tool.py
    ```
 
-6. **Log Execution**:
-   Make sure to output logs to `./logs/` and include Universal ID in debug prints.
+6. **Log Execution & Ralph Loop**:
+   Make sure to output logs to `./logs/` and include Universal ID in debug prints. For complex browser automation (e.g., Playwright CDP port 9222), you must store extensive diagnostics to `./logs/diagnostic/iteration-XXXX/` including `consoleLog`, script logs, and `DOM` states. Because we are working dynamically, you have to try multiple times (implement a "ralph loop" retry mechanism) until you can reach the exact target intent.
