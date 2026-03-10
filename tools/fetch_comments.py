@@ -311,7 +311,7 @@ def fetch_comments(page_input: str, credential_id: str, time_range: str = "7d",
                 page.wait_for_timeout(2000)
 
                 # Parse time_range into days
-                range_map = {"1d": 1, "7d": 7, "30d": 30, "90d": 90}
+                range_map = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "180d": 180, "365d": 365}
                 max_days = range_map.get(time_range, 7)
 
                 processed_names = set()
@@ -786,7 +786,7 @@ def get_comments_by_post(page_id: str, post_id: str = None) -> dict:
 
 def get_comment_users(page_id: str, time_range: str = "7d") -> dict:
     """List unique commenters sorted by last interaction, filtered by time range."""
-    range_map = {"1d": "-1 day", "7d": "-7 days", "30d": "-30 days", "90d": "-90 days"}
+    range_map = {"1d": "-1 day", "7d": "-7 days", "30d": "-30 days", "90d": "-90 days", "180d": "-180 days", "365d": "-365 days"}
     sql_range = range_map.get(time_range, "-7 days")
 
     conn = get_db_connection()

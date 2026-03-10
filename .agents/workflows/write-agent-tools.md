@@ -75,8 +75,9 @@ This workflow provides step-by-step instructions for writing Python scripts for 
    - **Page**: We manage only 1 Facebook Business Page (`page_id`). All data is scoped to this page.
    - **Post**: Any content published by the Page — ads, videos, images, text posts. Identified by `post_id` (from `selected_item_id` in FB inbox URL).
    - **Comment**: A public interaction on a Post. Can be by a **UserID** (seeker) or a reply by the **PageID** (our response). Each comment captures: `commenter_name`, `comment_text`, `fb_user_id`, `fb_profile_url`, `is_reply`, `comment_date`.
-   - **Thread/Message**: A private DM conversation. Each thread has a `thread_id` and contains messages from the User or the Page.
+   - **Thread/Message**: A private DM conversation. Each thread has a `thread_id` and contains messages from the User or the Page. **IMPORTANT: Facebook lazy-loads older messages. When scraping, you MUST scroll UP in the message container to load ALL messages before extraction. Without scroll-up, only the most recent messages are captured.**
    - **User**: A unified identity across channels. The **same user** can message AND comment. Tools must track `fb_user_id` and `fb_profile_url` for cross-channel recognition.
+   - **Ad ID Tracking**: Users who interact via ads have `ad_id` labels (e.g., `ad_id.6930299765389`) in their thread detail panel. These must be extracted and stored in `user_ad_ids` for permanent tracking.
    - **Customer Journey**: A user's progression through multiple touch-points (first comment → reply → DM → registration → class attendance). Each touch-point is an opportunity for **personalized action**.
    - **Touch-point**: Every `INSERT` into the database is a potential touch-point. Tools must treat each interaction as data to inform the AI agent's next action (auto-reply, notify Telegram, suggest follow-up).
 
@@ -87,6 +88,8 @@ This workflow provides step-by-step instructions for writing Python scripts for 
    - `threads` table: DM conversations with `thread_name`, `last_synced_time`
    - `messages` table: individual messages per thread
    - `users` table: CRM data per DM user (phone, email, city, fb_url)
+   - `user_ad_ids` table: junction table linking thread_id ↔ ad_id (many-to-many)
+   - `ad_posts` table: mapping ad_id → post_id, ad_content, city
    - All tools share the same `frankensqlite.db` in `memory/agent_memory/`
 
    **Data Flow:**
@@ -98,6 +101,23 @@ This workflow provides step-by-step instructions for writing Python scripts for 
    **Existing Tools:**
    | Tool | Channel | Entity | Actions |
    |---|---|---|---|
-   | `fetch_fb_messages.py` | DM | Threads → Messages → Users | `fetch_messages`, `get_list_unique_user`, `fetch_message_by_user` |
+   | `fetch_fb_messages.py` | DM | Threads → Messages → Users → Ad IDs | `fetch_messages`, `get_list_unique_user`, `fetch_message_by_user`, `get_user_ad_ids`, `resolve_ad_posts` |
    | `fetch_comments.py` | Public | Posts → Comments → Comment Users | `fetch_comments`, `get_comments_by_post`, `get_comment_users` |
    | `telegram_send_notify_to_group.py` | Notification | — | Send alerts to Telegram group |
+
+8. **Full-Stack Web Development** (Next.js):
+   When building or modifying the web dashboard in `web/`:
+   - Follow rules in `.agents/rules/fullstack-rules.md`
+   - Never import `better-sqlite3` or `db.ts` from client components — use `types.ts` for types
+   - All DB-accessing pages MUST export `dynamic = 'force-dynamic'`
+   - Use `react-force-graph-2d` for graph visualization, `@xyflow/react` for journey workflow
+   - Tag components with Universal IDs: `// code:web-<entity>-NNN:<component>`
+   - Test with `cd web && npm run build` before committing
+
+   ```bash
+   # Development server
+   cd web && npm run dev
+
+   # Production build
+   cd web && npm run build
+   ```
