@@ -1432,6 +1432,99 @@ def _ralph_loop_insights_page(page, page_id: str, unresolved_ads: list,
     return resolved
 
 
+# --- Action: propagate_city (DB-only batch update) ---
+# code:tool-fbmessages-004:propagate-city
+
+def propagate_city_from_ads(page_id: str) -> dict:
+    """Batch-update users.city from resolved ad_posts data.
+    
+    Strategy 1: For each user with city='Unknown' who has ad_id in user_ad_ids,
+                check ad_posts for that ad_id's resolved city.
+    Strategy 2: Scan Page-sent messages for city keywords as a fallback.
+    
+    This enables city-based grouping in the network graph for users
+    who interacted via Facebook ads.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Strategy 1: Propagate city from ad_posts → users via user_ad_ids
+    # Find users with Unknown city who have resolved ad associations
+    cursor.execute('''
+        SELECT DISTINCT u.thread_id, u.thread_name, ap.city, ap.ad_id
+        FROM users u
+        JOIN user_ad_ids uai ON uai.thread_id = u.thread_id
+        JOIN ad_posts ap ON ap.ad_id = uai.ad_id
+        JOIN threads t ON t.id = u.thread_id
+        WHERE u.city = 'Unknown'
+        AND ap.city IS NOT NULL AND ap.city != 'Unknown'
+        AND t.page_id = ?
+    ''', (page_id,))
+    
+    ad_updates = cursor.fetchall()
+    ad_updated_count = 0
+    ad_updated_details = []
+    
+    for row in ad_updates:
+        cursor.execute('''
+            UPDATE users SET city = ? WHERE thread_id = ? AND city = 'Unknown'
+        ''', (row["city"], row["thread_id"]))
+        if cursor.rowcount > 0:
+            ad_updated_count += 1
+            ad_updated_details.append({
+                "user": row["thread_name"],
+                "city": row["city"],
+                "ad_id": row["ad_id"]
+            })
+            logger.info(f"Propagated city '{row['city']}' to user '{row['thread_name']}' via ad_id {row['ad_id']}.")
+    
+    conn.commit()
+    
+    # Strategy 2: Scan Page messages for city keywords (fallback for users without ad data)
+    cursor.execute('''
+        SELECT u.thread_id, u.thread_name
+        FROM users u
+        JOIN threads t ON t.id = u.thread_id
+        WHERE u.city = 'Unknown' AND t.page_id = ?
+    ''', (page_id,))
+    
+    still_unknown = cursor.fetchall()
+    msg_updated_count = 0
+    
+    for user_row in still_unknown:
+        # Get Page-sent messages for this thread
+        cursor.execute('''
+            SELECT content FROM messages
+            WHERE thread_id = ? AND sender = 'Page'
+        ''', (user_row["thread_id"],))
+        page_messages = [{"sender": "Page", "content": r["content"]} for r in cursor.fetchall()]
+        
+        if page_messages:
+            detected = detect_city("", page_messages)
+            if detected != "Unknown":
+                cursor.execute('''
+                    UPDATE users SET city = ? WHERE thread_id = ? AND city = 'Unknown'
+                ''', (detected, user_row["thread_id"]))
+                if cursor.rowcount > 0:
+                    msg_updated_count += 1
+                    logger.info(f"Detected city '{detected}' from Page messages for user '{user_row['thread_name']}'.")
+    
+    conn.commit()
+    conn.close()
+    
+    total = ad_updated_count + msg_updated_count
+    logger.info(f"propagate_city: Updated {total} user(s) total ({ad_updated_count} from ads, {msg_updated_count} from messages).")
+    
+    return {
+        "success": True,
+        "action": "propagate_city",
+        "total_updated": total,
+        "from_ads": ad_updated_count,
+        "from_messages": msg_updated_count,
+        "ad_details": ad_updated_details[:20],  # Limit output size
+    }
+
+
 # --- CLI Entry Point ---
 
 def main():
@@ -1442,7 +1535,7 @@ def main():
     parser.add_argument("--headless", action="store_true", help="Launch the browser invisibly (headless).")
     parser.add_argument("--action", default="fetch_messages",
                         choices=["fetch_messages", "get_list_unique_user", "fetch_message_by_user",
-                                 "get_user_ad_ids", "resolve_ad_posts"],
+                                 "get_user_ad_ids", "resolve_ad_posts", "propagate_city"],
                         help="Action to perform.")
     parser.add_argument("--refresh", action="store_true", help="Force a fresh fetch, bypassing 1-hour cache.")
     parser.add_argument("--userId", default=None, help="User ID (thread_id, phone, or email) for fetch_message_by_user.")
@@ -1471,6 +1564,8 @@ def main():
         result = get_user_ad_ids(page_id)
     elif args.action == "resolve_ad_posts":
         result = resolve_ad_posts(page_id, use_cdp=args.cdp)
+    elif args.action == "propagate_city":
+        result = propagate_city_from_ads(page_id)
     else:
         result = {"success": False, "error": f"Unknown action: {args.action}"}
     

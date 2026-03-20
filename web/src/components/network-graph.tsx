@@ -13,7 +13,7 @@ const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
 interface GraphNode {
   id: string;
   name: string;
-  type: 'page' | 'city' | 'post' | 'user';
+  type: 'page' | 'city' | 'post' | 'ad' | 'user';
   val: number;
   color: string;
   fbUrl?: string;
@@ -33,10 +33,64 @@ interface GraphData {
   links: GraphLink[];
 }
 
+interface HoveredNodeDetails {
+  profile?: Record<string, any>;
+  messages?: { sender: string; content: string; message_timestamp: string }[];
+  post?: { post_name: string; post_url: string; created_at: string; last_synced_time: string; is_orphan?: boolean };
+  stats?: { total: number; unique_users: number };
+  comments?: { commenter_name: string; comment_text: string; comment_timestamp: string; is_reply: number }[];
+}
+
 export function NetworkGraph() {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
-  const fgRef = useRef<{ d3Force: (name: string) => { strength: (s: number) => void } }>(null);
+  const [hoveredNodeDetails, setHoveredNodeDetails] = useState<HoveredNodeDetails | null>(null);
+  const fgRef = useRef<{ d3Force: (name: string) => { strength: (s: number) => void } | undefined }>(null);
+  const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Fetch detailed data when hovering over a node for more than 400ms
+  const fetchNodeDetails = useCallback(async (node: GraphNode) => {
+    try {
+      const typeParam = node.type;
+      let idParam = node.id;
+      
+      // Clean up graph node ID prefixes so API gets clean IDs
+      if (node.type === 'user') {
+        idParam = node.name; // Use the actual name for thread lookup since id is 'dm-user-...'
+      } else if (node.type === 'ad' || node.type === 'post') {
+        idParam = node.id.replace(/^(ad|post)\-/i, '');
+      }
+
+      // City/Page don't have detail streams yet
+      if (node.type === 'city' || node.type === 'page') return;
+
+      const res = await fetch(`/api/graph/details?id=${encodeURIComponent(idParam)}&type=${typeParam}`);
+      if (!res.ok) throw new Error('Failed to fetch details');
+      const data = await res.json();
+      setHoveredNodeDetails(data);
+    } catch (err) {
+      console.error(err);
+    }
+  }, []);
+
+  const handleNodeHover = useCallback((node: GraphNode | null) => {
+    // Clear existing timeout
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+    }
+
+    setHoveredNode(node);
+    
+    // Reset details immediately if user un-hovers or moves to a new node
+    setHoveredNodeDetails(null);
+
+    // If hovering a real node, start a 400ms timer before fetching its huge history
+    if (node) {
+      hoverTimeoutRef.current = setTimeout(() => {
+        fetchNodeDetails(node);
+      }, 400);
+    }
+  }, [fetchNodeDetails]);
 
   useEffect(() => {
     fetch('/api/graph')
@@ -92,7 +146,8 @@ export function NetworkGraph() {
     // Emoji icons
     const emoji = node.type === 'page' ? '🪷' :
       node.type === 'city' ? '🏙️' :
-        node.type === 'post' ? '📝' : '👤';
+        node.type === 'post' ? '📝' : 
+          node.type === 'ad' ? '📣' : '👤';
     ctx.font = `${radius * 1.2}px serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -121,7 +176,7 @@ export function NetworkGraph() {
           }}
           linkColor={() => 'rgba(99, 102, 241, 0.2)'}
           linkWidth={1.5}
-          onNodeHover={(node: GraphNode | null) => setHoveredNode(node)}
+          onNodeHover={handleNodeHover}
           onNodeClick={(node: GraphNode) => {
             if (node.type === 'user' && node.dbId) {
               // Navigate to seeker detail page with clean numeric ID
@@ -139,7 +194,6 @@ export function NetworkGraph() {
         />
       </div>
 
-      {/* Hover tooltip */}
       {hoveredNode && (
         <div
           style={{
@@ -150,34 +204,108 @@ export function NetworkGraph() {
             border: '1px solid var(--border-glow)',
             borderRadius: '12px',
             padding: '16px',
-            minWidth: '220px',
+            minWidth: '280px',
+            maxWidth: '380px',
             boxShadow: 'var(--shadow-glow)',
             zIndex: 10,
+            maxHeight: 'calc(100vh - 250px)',
+            overflowY: 'auto',
           }}
         >
-          <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted)', marginBottom: '4px' }}>
-            {hoveredNode.type}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+            <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted)' }}>
+              {hoveredNode.type.toUpperCase()}
+            </div>
+            {hoveredNodeDetails && (
+              <div style={{ fontSize: '10px', background: 'rgba(16, 185, 129, 0.2)', color: '#10b981', padding: '2px 6px', borderRadius: '4px' }}>
+                LIVE DATA
+              </div>
+            )}
           </div>
-          <div style={{ fontSize: '15px', fontWeight: 700, color: hoveredNode.color }}>
+          
+          <div style={{ fontSize: '15px', fontWeight: 700, color: hoveredNode.color, marginBottom: '8px', lineHeight: 1.4 }}>
             {hoveredNode.name}
           </div>
-          {hoveredNode.fbUrl && (
-            <div style={{ marginTop: '8px' }}>
-              <a href={hoveredNode.fbUrl.startsWith('http') ? hoveredNode.fbUrl : `https://facebook.com/${hoveredNode.fbUrl}`} target="_blank" rel="noopener noreferrer" className="fb-link" style={{ fontSize: '12px' }}>
+
+          {/* BASE INFO */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '12px' }}>
+            {hoveredNode.phone && (
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                📞 {hoveredNode.phone}
+              </div>
+            )}
+            {hoveredNode.type === 'user' && hoveredNode.dbId && (
+              <a href={`/seekers/${hoveredNode.dbId}`} className="fb-link" style={{ fontSize: '12px', color: '#818cf8', display: 'block' }}>
+                View CRM Profile →
+              </a>
+            )}
+            {hoveredNode.fbUrl && (
+              <a href={hoveredNode.fbUrl.startsWith('http') ? hoveredNode.fbUrl : `https://facebook.com/${hoveredNode.fbUrl}`} target="_blank" rel="noopener noreferrer" className="fb-link" style={{ fontSize: '12px', display: 'block' }}>
                 Facebook Profile ↗
               </a>
+            )}
+          </div>
+
+          {/* FETCHED DETAILS STATES */}
+          {!hoveredNodeDetails && (hoveredNode.type === 'user' || hoveredNode.type === 'ad' || hoveredNode.type === 'post') && (
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontStyle: 'italic', marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '12px' }}>
+              Hover to load history...
             </div>
           )}
-          {hoveredNode.type === 'user' && hoveredNode.dbId && (
-            <div style={{ marginTop: '4px' }}>
-              <a href={`/seekers/${hoveredNode.dbId}`} className="fb-link" style={{ fontSize: '12px', color: '#818cf8' }}>
-                View Seeker Details →
-              </a>
+
+          {/* USER CHAT HISTORY */}
+          {hoveredNodeDetails && hoveredNode.type === 'user' && (
+            <div style={{ marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '12px' }}>
+              <div style={{ fontSize: '12px', fontWeight: 600, color: '#e2e8f0', marginBottom: '8px' }}>Chat History</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {Array.isArray(hoveredNodeDetails.messages) && hoveredNodeDetails.messages.length > 0 ? (
+                  hoveredNodeDetails.messages.map((msg: Record<string, any>, i: number) => {
+                    const isPage = msg.sender === '1548373332058326';
+                    return (
+                      <div key={i} style={{
+                        alignSelf: isPage ? 'flex-end' : 'flex-start',
+                        background: isPage ? 'rgba(99, 102, 241, 0.2)' : 'rgba(255,255,255,0.05)',
+                        padding: '6px 10px',
+                        borderRadius: '8px',
+                        fontSize: '12px',
+                        color: 'var(--text-secondary)',
+                        maxWidth: '90%',
+                        wordBreak: 'break-word'
+                      }}>
+                        {msg.content}
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>No messages found.</div>
+                )}
+              </div>
             </div>
           )}
-          {hoveredNode.phone && (
-            <div style={{ marginTop: '4px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-              📞 {hoveredNode.phone}
+
+          {/* POST / AD DETAILS */}
+          {hoveredNodeDetails && (hoveredNode.type === 'post' || hoveredNode.type === 'ad') && (
+            <div style={{ marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '12px' }}>
+              {hoveredNodeDetails.post?.post_name && hoveredNodeDetails.post.post_name !== hoveredNode.name && (
+                <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '12px', lineHeight: 1.5, background: 'rgba(0,0,0,0.2)', padding: '8px', borderRadius: '6px' }}>
+                  {hoveredNodeDetails.post.post_name}
+                </div>
+              )}
+              
+              <div style={{ display: 'flex', gap: '12px', marginBottom: '12px', fontSize: '12px' }}>
+                <span style={{ color: '#10b981' }}>💬 {hoveredNodeDetails.stats?.total || 0} Comments</span>
+                <span style={{ color: '#8b5cf6' }}>👥 {hoveredNodeDetails.stats?.unique_users || 0} Users</span>
+              </div>
+
+              <div style={{ fontSize: '12px', fontWeight: 600, color: '#e2e8f0', marginBottom: '8px' }}>Recent Comments</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {Array.isArray(hoveredNodeDetails.comments) && hoveredNodeDetails.comments.slice(0, 10).map((c: Record<string, any>, i: number) => (
+                  <div key={i} style={{ fontSize: '12px', background: 'rgba(255,255,255,0.03)', padding: '6px 8px', borderRadius: '6px' }}>
+                    <div style={{ color: '#cbd5e1', fontWeight: 600, marginBottom: '2px' }}>{c.commenter_name}</div>
+                    <div style={{ color: 'var(--text-muted)' }}>{c.comment_text}</div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -201,6 +329,7 @@ export function NetworkGraph() {
           { emoji: '🪷', label: 'Page', color: '#10b981' },
           { emoji: '🏙️', label: 'City', color: '#3b82f6' },
           { emoji: '📝', label: 'Post', color: '#f59e0b' },
+          { emoji: '📣', label: 'Ad', color: '#f97316' },
           { emoji: '👤', label: 'User', color: '#8b5cf6' },
         ].map(item => (
           <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>

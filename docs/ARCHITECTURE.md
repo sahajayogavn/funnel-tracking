@@ -4,38 +4,35 @@
 
 ## Overview
 
-The platform combines **Python agent tools** (data fetching) with a **Next.js web dashboard** (data visualization & CRM), sharing a single **FrankenSQLite** database.
+The platform is a **monorepo** with three pillars sharing a single **FrankenSQLite** database:
+
+1. **Tools** (`tools/`) — Python CLI scripts for data collection via CDP
+2. **Web UI** (`web/`) — Next.js 16 dashboard for visualization & CRM
+3. **Agent Software** (`adk_agents/`) — Google ADK multi-agent system for automated inbox handling
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Data Collection Layer (Python 3.13 CLI Tools)          │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐│
-│  │fetch_comments │ │fetch_messages│ │telegram_notify   ││
-│  └──────┬───────┘ └──────┬───────┘ └──────────────────┘│
-│         │                │                              │
-│         ▼                ▼                              │
-│  ┌──────────────────────────────────────────┐           │
-│  │   FrankenSQLite (memory/agent_memory/)   │           │
-│  │   threads│messages│users│posts│comments  │           │
-│  └──────────────────┬───────────────────────┘           │
-│                     │ (readonly)                        │
-│         ┌───────────┴───────────┐                       │
-│  ┌──────▼──────┐ ┌──────────────▼─────────────────┐    │
-│  │ API Routes  │ │ Server Components (SSR)         │    │
-│  │ /api/seekers│ │ Dashboard, Seekers, Journey     │    │
-│  │ /api/graph  │ │                                 │    │
-│  │ /api/stats  │ │                                 │    │
-│  └──────┬──────┘ └──────────────┬─────────────────┘    │
-│         │                       │                       │
-│  ┌──────▼───────────────────────▼─────────────────┐    │
-│  │  Client Components (React, Canvas, WebGL)       │    │
-│  │  ┌──────────┐ ┌────────────┐ ┌────────────────┐│    │
-│  │  │Seekers   │ │Network     │ │Journey Flow    ││    │
-│  │  │Table     │ │Graph (2D)  │ │(React Flow)    ││    │
-│  │  └──────────┘ └────────────┘ └────────────────┘│    │
-│  └────────────────────────────────────────────────┘    │
-│                Next.js 16 (web/)                        │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    funnel-tracking (Monorepo)                 │
+│                                                              │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────────────┐  │
+│  │   Web UI    │  │    Tools     │  │  Agent Software    │  │
+│  │  (web/)     │  │  (tools/)    │  │  (adk_agents/)     │  │
+│  │             │  │              │  │                    │  │
+│  │ Next.js 16  │  │ Python CLI   │  │ Google ADK         │  │
+│  │ React 19    │  │ Playwright   │  │ Gemini / GPT       │  │
+│  │ Tailwind    │  │ CDP:9222     │  │ SequentialAgent    │  │
+│  │ Port 9994   │  │ argparse     │  │ adk run/adk web    │  │
+│  └──────┬──────┘  └──────┬───────┘  └─────────┬──────────┘  │
+│         │                │                     │             │
+│         └────────────────┼─────────────────────┘             │
+│                          ▼                                   │
+│              ┌───────────────────────┐                       │
+│              │   FrankenSQLite DB    │                       │
+│              │  (memory/agent_memory)│                       │
+│              │  threads│messages│    │                       │
+│              │  users│posts│comments │                       │
+│              └───────────────────────┘                       │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Data Model
@@ -71,6 +68,7 @@ Page (page_id = 1548373332058326)
 | Layer               | Technology                            |
 | ------------------- | ------------------------------------- |
 | Data Collection     | Python 3.13, Playwright, argparse     |
+| Agent Software      | Google ADK, Gemini/GPT via LiteLLM    |
 | Database            | SQLite (FrankenSQLite)                |
 | Backend             | Next.js 16 API Routes, better-sqlite3 |
 | Frontend            | React 19, Tailwind CSS, Canvas2D      |

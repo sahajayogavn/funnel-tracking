@@ -10,6 +10,7 @@ The repository is structured to support Agile XP methodologies for AI Agents, en
 - **`.agents/rules/`**: Rules governing the behavior and boundaries of the AI agents.
 - **`.agents/workflows/`**: Workflow configurations defining the steps agents take to accomplish tasks.
 - **`.agents/skills/`**: Specific capabilities that agents can utilize (symlinked from `~/duyhunghd6/agent-skills/skills`).
+- **`adk_agents/`**: Google ADK multi-agent system package (Receptionist, Guide, Supervisor). Run with `adk run adk_agents/` or `adk web adk_agents/`.
 - **`tools/`**: Python scripts and utilities for external integrations (`webhook_comments.py`, etc.).
 - **`web/`**: Next.js 16 full-stack web application (Dashboard, Seekers CRM, Network Graph, Journey Workflow).
 - **`memory/agent_memory/`**: The knowledge base of the agents, storing course lists, event details, seeker logs, and FrankenSQLite DB.
@@ -49,6 +50,7 @@ All actionable rules for the AI Agents are stored in the `.agents/rules/` direct
 - **[Tool Writing Rules](.agents/rules/tool-writing.md)**: Standards for creating Python tools as CLI applications and explicitly defining database structure using FrankenSQLite.
 - **[DevOps, QA & Testing Rules](.agents/rules/devops-qa.md)**: Rules for writing unit tests, QA, E2E testing, code coverage, and pre-commit checks.
 - **[Full-Stack Web Rules](.agents/rules/fullstack-rules.md)**: Rules for Next.js web app development (server/client boundary, Tailwind, React Flow, graph visualization).
+- **[ADK Agent Rules](.agents/rules/adk-agent-rules.md)**: Rules for Google ADK multi-agent system development (`adk_agents/` package structure, tool conventions, state keys).
 
 ## 6. Universal ID System
 

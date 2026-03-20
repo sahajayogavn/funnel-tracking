@@ -12,7 +12,8 @@ from tools.fetch_fb_messages import (
     parse_page_id, fetch_messages, should_fetch, extract_user_info,
     detect_city, get_list_unique_user, fetch_message_by_user,
     setup_database, get_db_connection, _scrape_inbox,
-    parse_ad_ids, get_user_ad_ids, resolve_ad_posts
+    parse_ad_ids, get_user_ad_ids, resolve_ad_posts,
+    propagate_city_from_ads
 )
 
 
@@ -645,6 +646,141 @@ class TestFetchMessageByUser(unittest.TestCase):
         self._patch_db()
         result = fetch_message_by_user("page1", "nonexistent")
         self.assertFalse(result["success"])
+
+
+class TestPropagateCityFromAds(unittest.TestCase):
+    """Tests for the propagate_city_from_ads batch action."""
+    
+    def setUp(self):
+        self._tmp_dir = tempfile.mkdtemp()
+    
+    def tearDown(self):
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
+    
+    def _patch_db(self):
+        tmp_db = os.path.join(self._tmp_dir, "frankensqlite.db")
+        original_connect = sqlite3.connect
+        def patched_connect(path, *args, **kwargs):
+            if "frankensqlite" in str(path):
+                return original_connect(tmp_db, *args, **kwargs)
+            return original_connect(path, *args, **kwargs)
+        patcher = patch('tools.fetch_fb_messages.sqlite3.connect', side_effect=patched_connect)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return tmp_db, original_connect
+    
+    def test_propagate_from_resolved_ad(self):
+        """Users with resolved ad city get updated."""
+        tmp_db, orig_connect = self._patch_db()
+        conn = orig_connect(tmp_db)
+        conn.row_factory = sqlite3.Row
+        setup_database(conn)
+        conn.execute("INSERT INTO threads VALUES ('t1', 'page1', 'User A', 'x', datetime('now'))")
+        conn.execute("INSERT INTO users (thread_id, thread_name, city) VALUES ('t1', 'User A', 'Unknown')")
+        conn.execute("INSERT INTO user_ad_ids (thread_id, ad_id) VALUES ('t1', '111111')")
+        conn.execute("INSERT INTO ad_posts (ad_id, ad_content, city) VALUES ('111111', 'Lớp thiền tại Đà Nẵng', 'Đà Nẵng')")
+        conn.commit()
+        conn.close()
+        
+        from tools.fetch_fb_messages import propagate_city_from_ads
+        result = propagate_city_from_ads("page1")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["from_ads"], 1)
+        
+        # Verify DB was updated
+        conn2 = orig_connect(tmp_db)
+        conn2.row_factory = sqlite3.Row
+        row = conn2.execute("SELECT city FROM users WHERE thread_id = 't1'").fetchone()
+        self.assertEqual(row["city"], "Đà Nẵng")
+        conn2.close()
+    
+    def test_unknown_ad_city_not_updated(self):
+        """Users with 'Unknown' ad city remain unchanged."""
+        tmp_db, orig_connect = self._patch_db()
+        conn = orig_connect(tmp_db)
+        conn.row_factory = sqlite3.Row
+        setup_database(conn)
+        conn.execute("INSERT INTO threads VALUES ('t1', 'page1', 'User A', 'x', datetime('now'))")
+        conn.execute("INSERT INTO users (thread_id, thread_name, city) VALUES ('t1', 'User A', 'Unknown')")
+        conn.execute("INSERT INTO user_ad_ids (thread_id, ad_id) VALUES ('t1', '222222')")
+        conn.execute("INSERT INTO ad_posts (ad_id, ad_content, city) VALUES ('222222', 'Generic ad', 'Unknown')")
+        conn.commit()
+        conn.close()
+        
+        from tools.fetch_fb_messages import propagate_city_from_ads
+        result = propagate_city_from_ads("page1")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["from_ads"], 0)
+    
+    def test_no_ad_association_unchanged(self):
+        """Users without ad associations remain unchanged."""
+        tmp_db, orig_connect = self._patch_db()
+        conn = orig_connect(tmp_db)
+        conn.row_factory = sqlite3.Row
+        setup_database(conn)
+        conn.execute("INSERT INTO threads VALUES ('t1', 'page1', 'User A', 'x', datetime('now'))")
+        conn.execute("INSERT INTO users (thread_id, thread_name, city) VALUES ('t1', 'User A', 'Unknown')")
+        conn.commit()
+        conn.close()
+        
+        from tools.fetch_fb_messages import propagate_city_from_ads
+        result = propagate_city_from_ads("page1")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["from_ads"], 0)
+        self.assertEqual(result["total_updated"], 0)
+    
+    def test_multiple_users_same_ad(self):
+        """Multiple users sharing the same ad_id all get updated."""
+        tmp_db, orig_connect = self._patch_db()
+        conn = orig_connect(tmp_db)
+        conn.row_factory = sqlite3.Row
+        setup_database(conn)
+        conn.execute("INSERT INTO threads VALUES ('t1', 'page1', 'User A', 'x', datetime('now'))")
+        conn.execute("INSERT INTO threads VALUES ('t2', 'page1', 'User B', 'y', datetime('now'))")
+        conn.execute("INSERT INTO users (thread_id, thread_name, city) VALUES ('t1', 'User A', 'Unknown')")
+        conn.execute("INSERT INTO users (thread_id, thread_name, city) VALUES ('t2', 'User B', 'Unknown')")
+        conn.execute("INSERT INTO user_ad_ids (thread_id, ad_id) VALUES ('t1', '333333')")
+        conn.execute("INSERT INTO user_ad_ids (thread_id, ad_id) VALUES ('t2', '333333')")
+        conn.execute("INSERT INTO ad_posts (ad_id, ad_content, city) VALUES ('333333', 'Thiền tại Hà Nội', 'Hà Nội')")
+        conn.commit()
+        conn.close()
+        
+        from tools.fetch_fb_messages import propagate_city_from_ads
+        result = propagate_city_from_ads("page1")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["from_ads"], 2)
+        
+        # Verify both users updated
+        conn2 = orig_connect(tmp_db)
+        conn2.row_factory = sqlite3.Row
+        rows = conn2.execute("SELECT city FROM users ORDER BY thread_id").fetchall()
+        self.assertEqual(rows[0]["city"], "Hà Nội")
+        self.assertEqual(rows[1]["city"], "Hà Nội")
+        conn2.close()
+    
+    def test_fallback_message_city_detection(self):
+        """Strategy 2: Detect city from Page messages when no ad data."""
+        tmp_db, orig_connect = self._patch_db()
+        conn = orig_connect(tmp_db)
+        conn.row_factory = sqlite3.Row
+        setup_database(conn)
+        conn.execute("INSERT INTO threads VALUES ('t1', 'page1', 'User A', 'x', datetime('now'))")
+        conn.execute("INSERT INTO users (thread_id, thread_name, city) VALUES ('t1', 'User A', 'Unknown')")
+        conn.execute("INSERT INTO messages (thread_id, sender, content, message_timestamp) VALUES ('t1', 'Page', 'Địa chỉ: 02 Xô Viết Nghệ Tĩnh, Bình Thạnh', 'Today')")
+        conn.commit()
+        conn.close()
+        
+        from tools.fetch_fb_messages import propagate_city_from_ads
+        result = propagate_city_from_ads("page1")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["from_messages"], 1)
+        
+        # Verify city detected from message
+        conn2 = orig_connect(tmp_db)
+        conn2.row_factory = sqlite3.Row
+        row = conn2.execute("SELECT city FROM users WHERE thread_id = 't1'").fetchone()
+        self.assertEqual(row["city"], "TP. Hồ Chí Minh")
+        conn2.close()
 
 
 if __name__ == '__main__':

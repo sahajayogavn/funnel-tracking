@@ -63,6 +63,7 @@ env.bak/
 venv.bak/
 
 # Project specifics
+node_modules/
 logs/
 .agents/memory/agent_memory/*.tmp
 memory/agent_memory/fb_credential_*.json

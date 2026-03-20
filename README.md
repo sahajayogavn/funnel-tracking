@@ -8,7 +8,8 @@ Welcome to the **Funnel Tracking** repository. This project builds AI Agents to 
 2. **Telegram Notification**: Forward inquiries to a designated Telegram group.
 3. **Seeker Information Storage**: Store and manage seeker data (phone, email, city, FB URL) in FrankenSQLite.
 4. **Agent Memory**: Utilize `memory/agent_memory/` Markdown documents (`lop-hoc.md`, `su-kien.md`) for conversational context.
-5. **Web Dashboard**: Next.js 16 full-stack application with:
+5. **AI Agent Software (ADK)**: Google ADK multi-agent system that auto-classifies and replies to Facebook inbox messages.
+6. **Web Dashboard**: Next.js 16 full-stack application with:
    - 📊 **Dashboard**: Stats overview of all seekers, posts, messages
    - 👥 **Seekers CRM**: Sortable table with GitHub-style activity histogram, city badges, hover journey tooltip
    - 🕸️ **Network Graph**: WebGL-accelerated graph (Page → 7 Cities → Posts → Users)
@@ -20,9 +21,10 @@ Initialized according to Agile XP methodology for AI Agents. All core guidelines
 
 | Directory              | Purpose                                                                                 |
 | ---------------------- | --------------------------------------------------------------------------------------- |
-| `.agents/rules/`       | Rules governing AI agent behavior (Git Operations, Tool Writing, Full-Stack, DevOps QA) |
+| `.agents/rules/`       | Rules governing AI agent behavior (Git Operations, Tool Writing, Full-Stack, ADK, DevOps QA) |
 | `.agents/workflows/`   | Workflow configurations for agent tasks                                                 |
 | `.agents/skills/`      | Agent capabilities and skills (7 symlinked skills)                                      |
+| `adk_agents/`          | Google ADK multi-agent system (Receptionist, Guide, Supervisor)                         |
 | `tools/`               | Python 3.13 CLI scripts (`fetch_fb_messages.py`, `fetch_comments.py`)                   |
 | `web/`                 | Next.js 16 full-stack web application                                                   |
 | `tests/`               | Unit tests for all tools                                                                |
@@ -127,7 +129,7 @@ A Next.js 16 full-stack application that visualizes seeker data from FrankenSQLi
 
 ```bash
 cd web && npm install && npm run dev
-# Open http://localhost:3000
+# Open http://localhost:9994
 ```
 
 ### Pages
@@ -165,10 +167,12 @@ The journey engine in `web/src/lib/journey-engine.ts` defines all transition rul
 
 1. Clone the repository.
 2. Create Python 3.13 virtual environment: `python3.13 -m venv .venv && source .venv/bin/activate`
-3. Install dependencies: `pip install playwright && playwright install chromium`
-4. Set up credentials: `python tools/env_manager.py`
-5. Run Python tools: `python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_messages`
-6. Run Web Dashboard: `cd web && npm install && npm run dev`
+3. Install Python dependencies: `pip install -e .` (uses `pyproject.toml`)
+4. Install Playwright browser: `playwright install chromium`
+5. Set up credentials: `python tools/env_manager.py`
+6. Run Python tools: `python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_messages`
+7. Run ADK agents: `adk run adk_agents/` (CLI) or `adk web adk_agents/` (Web UI)
+8. Run Web Dashboard: `cd web && npm install && npm run dev`
 
 ## 📖 Documentation
 

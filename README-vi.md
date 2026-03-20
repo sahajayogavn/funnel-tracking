@@ -8,6 +8,8 @@ Chào mừng bạn đến với repo **Funnel Tracking**. Mục tiêu của dự
 2. **Telegram Notification**: Forward tin nhắn sang nhóm Telegram chỉ định.
 3. **Lưu trữ thông tin Seekers**: Lưu trữ dữ liệu seekers (SĐT, email, thành phố, FB URL) trong FrankenSQLite.
 4. **Agent Memory**: Thư mục `memory/agent_memory/` lưu file Markdown (`lop-hoc.md`, `su-kien.md`) làm ngữ cảnh cho bot.
+5. **AI Agent Software (ADK)**: Hệ thống đa tác tử Google ADK tự động phân loại và trả lời tin nhắn Facebook inbox.
+6. **Web Dashboard**: Ứng dụng Next.js 16 với Dashboard, Seekers CRM, Network Graph, Journey Workflow.
 
 ## 🏗 Kiến trúc dự án & Quy tắc
 
@@ -15,13 +17,16 @@ Dự án được khởi tạo theo phương pháp Agile XP dành cho AI Agents.
 
 | Thư mục                | Mục đích                                                                |
 | ---------------------- | ----------------------------------------------------------------------- |
-| `.agents/rules/`       | Quy tắc hành vi của AI Agents (Git Operations, Tool Writing, DevOps QA) |
+| `.agents/rules/`       | Quy tắc hành vi của AI Agents (Git Operations, Tool Writing, ADK, DevOps QA) |
 | `.agents/workflows/`   | Quy trình làm việc của agents                                           |
 | `.agents/skills/`      | Kĩ năng (skills) mà agents có thể sử dụng                               |
+| `adk_agents/`          | Hệ thống đa tác tử Google ADK (Receptionist, Guide, Supervisor)         |
 | `tools/`               | Script Python 3.13 CLI (`fetch_fb_messages.py`, `env_manager.py`)       |
+| `web/`                 | Ứng dụng web Next.js 16 (Dashboard, Seekers CRM, Graph, Journey)        |
 | `tests/`               | Unit tests cho tất cả tools                                             |
 | `memory/agent_memory/` | Kiến thức — khóa học, sự kiện, log seekers, FrankenSQLite DB            |
 | `logs/`                | Báo cáo chuyển giao và logs                                             |
+| `docs/`                | Tài liệu kiến trúc (`ARCHITECTURE.md`)                                   |
 
 ## 🔧 Công cụ Fetch Tin Nhắn Facebook (`tools/fetch_fb_messages.py`)
 
@@ -79,9 +84,12 @@ python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_message_by_u
 
 1. Clone repo.
 2. Tạo môi trường Python 3.13: `python3.13 -m venv .venv && source .venv/bin/activate`
-3. Cài đặt: `pip install playwright && playwright install chromium`
-4. Cấu hình credentials: `python tools/env_manager.py`
-5. Chạy: `python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_messages`
+3. Cài đặt Python: `pip install -e .` (dùng `pyproject.toml`)
+4. Cài đặt trình duyệt: `playwright install chromium`
+5. Cấu hình credentials: `python tools/env_manager.py`
+6. Chạy tools: `python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_messages`
+7. Chạy ADK agents: `adk run adk_agents/` (CLI) hoặc `adk web adk_agents/` (Web UI)
+8. Chạy Web Dashboard: `cd web && npm install && npm run dev`
 
 ## 📖 Tài liệu
 
