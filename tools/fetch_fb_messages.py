@@ -350,19 +350,19 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
         logger.info("Thread list pagelet not found within 10s, proceeding with fallback...")
 
     # Wait for thread items to actually render (FB SPA hydration may be slow in new tabs)
-    _ikh_found = False
+    _thread_items_found = False
     for wait_attempt in range(1, 6):
         try:
-            page.wait_for_selector('div._ikh', timeout=5000)
-            _ikh_found = True
-            logger.info(f"Thread items (_ikh) appeared after wait attempt {wait_attempt}.")
+            page.wait_for_selector('div._5_n1', timeout=5000)
+            _thread_items_found = True
+            logger.info(f"Thread items (_5_n1) appeared after wait attempt {wait_attempt}.")
             break
         except Exception:
-            logger.info(f"Wait attempt {wait_attempt}/5: _ikh not visible yet, retrying in 3s...")
+            logger.info(f"Wait attempt {wait_attempt}/5: _5_n1 not visible yet, retrying in 3s...")
             page.wait_for_timeout(3000)
     
-    if not _ikh_found:
-        logger.warning("Thread items (_ikh) never appeared after 5 attempts. Will proceed but may find 0 threads.")
+    if not _thread_items_found:
+        logger.warning("Thread items (_5_n1) never appeared after 5 attempts. Will proceed but may find 0 threads.")
     
     page.wait_for_timeout(1000)
 
@@ -400,9 +400,9 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
             logger.info(f"Reached max threads ({max_threads}). Stopping.")
             break
 
-        # Get currently visible _ikh threads
+        # Get currently visible _5_n1 threads
         visible_threads = page.evaluate('''() => {
-            let items = document.querySelectorAll('._ikh');
+            let items = document.querySelectorAll('._5_n1');
             return Array.from(items).map((el, idx) => {
                 let text = el.innerText || '';
                 let lines = text.split('\\n').map(l => l.trim()).filter(l => l);
@@ -416,7 +416,7 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
         }''')
 
         if not visible_threads:
-            logger.info(f"Round {scroll_round}: no _ikh items visible.")
+            logger.info(f"Round {scroll_round}: no _5_n1 items visible.")
             break
 
         new_in_round = 0
@@ -477,7 +477,7 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
             # Click this thread — it's in the visible DOM right now
             dom_index = vt.get("domIndex", 0)
             try:
-                thread_el = page.locator('div._ikh').nth(dom_index)
+                thread_el = page.locator('div._5_n1').nth(dom_index)
                 thread_el.click(force=True, timeout=5000)
             except Exception as e:
                 logger.warning(f"Could not click thread '{name}': {e}. Skipping.")
@@ -564,10 +564,11 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
                         'div[role="region"][aria-label*="message"]'
                     );
                     if (!region) return {count: 0, scrollHeight: 0, scrollTop: 0};
-                    let messageArea = region.querySelector('div.x1yrsyyn') || region;
+                    // Dynamically find messageArea: parent of .x1fqp7bg bubbles
+                    let bubble = region.querySelector('.x1fqp7bg');
+                    let messageArea = bubble ? bubble.parentElement : (region.querySelector('div.x1yrsyyn') || region);
                     let count = 0;
                     for (let div of messageArea.children) {
-                        // Count ALL child divs to detect any new content loaded
                         count++;
                     }
                     // Find the actual scrollable parent
@@ -655,7 +656,9 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
                 let results = [];
                 let currentTimestamp = "";
                 
-                let messageArea = region.querySelector('div.x1yrsyyn') || region;
+                // Dynamically find messageArea: parent of .x1fqp7bg bubbles
+                let bubble = region.querySelector('.x1fqp7bg');
+                let messageArea = bubble ? bubble.parentElement : (region.querySelector('div.x1yrsyyn') || region);
                 let topDivs = messageArea.children;
                 
                 for (let div of topDivs) {
