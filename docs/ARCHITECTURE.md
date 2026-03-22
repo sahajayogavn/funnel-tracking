@@ -6,8 +6,8 @@
 
 The platform is a monorepo with four runtime pillars sharing a single FrankenSQLite database:
 
-1. **Pipeline package** (`fb_pipeline/`) — shared Facebook ingestion, normalization, persistence, and session/bootstrap logic
-2. **Tools** (`tools/`) — thin CLI wrappers and operator entry points around the shared package
+1. **Pipeline package** (`fb_pipeline/`) — shared Facebook ingestion, normalization, persistence, browser/bootstrap, and contracts
+2. **Tools** (`tools/`) — L5 CLI wrappers; canonical implementations live in `l5_*` files while old filenames remain compatibility shims
 3. **Agent Software** (`adk_agents/`) — Google ADK multi-agent workflows that consume persisted inbox data and MAS handoff context
 4. **Web UI** (`web/`) — Next.js dashboard and CRM over the same SQLite store
 
@@ -18,8 +18,8 @@ The platform is a monorepo with four runtime pillars sharing a single FrankenSQL
 │  ┌────────────────┐   ┌────────────────┐   ┌──────────────────────┐   │
 │  │   Tools/CLI    │   │  fb_pipeline   │   │     adk_agents       │   │
 │  │   tools/       │──▶│ shared package │──▶│ MAS / auto-reply     │   │
-│  │ thin wrappers  │   │ session/inbox  │   │ orchestration        │   │
-│  │ operator UX    │   │ comments/store │   │                      │   │
+│  │ l5_* + shims   │   │ l1→l4 layers   │   │ orchestration        │   │
+│  │ operator UX    │   │ session/store  │   │                      │   │
 │  └────────┬───────┘   └────────┬───────┘   └──────────┬───────────┘   │
 │           │                    │                      │               │
 │           └────────────────────┼──────────────────────┘               │
@@ -40,149 +40,328 @@ The platform is a monorepo with four runtime pillars sharing a single FrankenSQL
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
+## L1–L5 Hierarchy
+
+The hierarchy now expresses itself directly in the canonical filenames. Prefixed files are the implementation paths; old unprefixed modules remain compatibility shims.
+
+```text
+L5  tools/l5_*.py + adk_agents/tools/l5_*.py
+    operator entrypoints, ADK wrappers, stable CLI surface via legacy shims
+ ↓
+L4  fb_pipeline/persistence/l4_sqlite_store.py
+    FrankenSQLite schema, cache, DB connections
+ ↓
+L3  fb_pipeline/inbox/l3_pipeline.py
+    fb_pipeline/comments/l3_pipeline.py
+    fb_pipeline/browser/l3_inbox.py
+    fb_pipeline/browser/l3_comments.py
+    parsing, enrichment, and DOM-backed scrape pipelines
+ ↓
+L2  fb_pipeline/session/l2_bootstrap.py
+    fb_pipeline/browser/l2_actions.py
+    CDP 9222 attach, authorization, click/navigate/type actions
+ ↓
+L1  fb_pipeline/contracts/l1_session.py
+    fb_pipeline/contracts/l1_inbox.py
+    fb_pipeline/contracts/l1_comments.py
+    fb_pipeline/comments/l1_helpers.py
+    data contracts, pure helpers, and parsing utilities
+```
+
+Acceptance intent for the hierarchy:
+- prefixed files are the canonical implementation paths
+- unprefixed modules remain thin re-export shims for CLI/test compatibility
+- information should flow downward through shared boundaries, never sideways through wrapper modules
+- reusable Facebook logic belongs in `fb_pipeline/`, while `tools/` remains a thin compatibility and operator layer
+- tests should prove both wrapper compatibility and import direction
+
 ## Shared Package Boundaries
 
-`fb_pipeline/` is the architectural center of the Facebook ingestion stack.
-
-### `fb_pipeline.contracts`
+### L1 — contracts and pure helpers
 
 Shared typed records and pure helpers for normalization and enrichment.
 
-- `contracts/inbox.py`
+- `fb_pipeline/contracts/l1_session.py`
+  - `AuthorizedSession`
+  - `FacebookAuthorizationError`
+  - `PageAccessError`
+  - `CDPConnectionError`
+- `fb_pipeline/contracts/l1_inbox.py`
   - `InboxMessage`
   - `ThreadRecord`
   - `EnrichedThreadRecord`
   - `SeekerInfo`
   - `MasHandoff`
   - helpers such as `parse_page_id`, `extract_user_info`, `parse_ad_ids`, `detect_city`
-- `contracts/comments.py`
+- `fb_pipeline/contracts/l1_comments.py`
   - `CommentRecord`
   - `PostRecord`
   - `EnrichedPostRecord`
+- `fb_pipeline/comments/l1_helpers.py`
+  - `parse_page_id`
+  - `parse_post_id`
+  - `extract_user_info`
+  - `detect_city`
 
-These modules define the data shapes that flow between scraping, enrichment, persistence, and MAS orchestration.
+These modules define the data shapes and pure helper behavior that flow between scraping, enrichment, persistence, and MAS orchestration.
 
-### `fb_pipeline.session`
+### L2 — browser bootstrap and UI actions
 
-Reusable browser bootstrap and authorization checks.
+Reusable browser bootstrap, authorization checks, and DOM actions.
 
-- `session/bootstrap.py`
+- `fb_pipeline/session/l2_bootstrap.py`
   - CDP attach on `http://127.0.0.1:9222`
   - Facebook authorization verification
   - target `asset_id` access verification
   - `AuthorizedSession` lifecycle for reused or newly created tabs
   - storage-state sanitization for saved cookies
+- `fb_pipeline/browser/l2_actions.py`
+  - `navigate_to_thread(...)`
+  - `send_reply_via_cdp(...)`
 
 All Facebook browser entry points should attach through this layer rather than embedding CDP logic in CLI tools.
 
-### `fb_pipeline.inbox`
+### L3 — DOM-backed scrape pipelines and normalization
 
-Private-message pipeline for Facebook inbox threads.
+This layer turns visible Facebook DOM state into normalized records and persistence payloads.
 
-- `build_thread_record(...)`
-- `enrich_thread_record(...)`
-- `persist_thread_record(...)`
-- `scrape_inbox(...)`
+- `fb_pipeline/browser/l3_inbox.py`
+  - `scrape_inbox_ui(...)`
+  - `extract_ad_id_labels(...)`
+- `fb_pipeline/browser/l3_comments.py`
+  - `scrape_comments_ui(...)`
+- `fb_pipeline/inbox/l3_pipeline.py`
+  - `build_thread_record(...)`
+  - `enrich_thread_record(...)`
+  - `persist_thread_record(...)`
+  - `scrape_inbox(...)`
+- `fb_pipeline/comments/l3_pipeline.py`
+  - `build_post_record(...)`
+  - `enrich_post_record(...)`
+  - `persist_post_record(...)`
 
-This layer turns visible thread rows and scraped message payloads into normalized records, derives seeker/contact context, builds MAS handoff payloads, and persists the final result.
+This layer builds normalized records, derives seeker/contact context, builds MAS handoff payloads for inbox, and prepares persistence inputs.
 
-### `fb_pipeline.comments`
-
-Comment-ingestion pipeline with parity to the inbox layering.
-
-- `build_post_record(...)`
-- `enrich_post_record(...)`
-- `persist_post_record(...)`
-
-Comments now follow the same high-level shape as inbox ingestion:
-
-1. capture visible Facebook unit
-2. normalize into a record
-3. enrich with contact/city context
-4. persist into SQLite tables
-
-Comments do not currently produce a MAS handoff payload; the parity here is on extraction and persistence boundaries.
-
-### `fb_pipeline.persistence`
+### L4 — persistence
 
 Shared SQLite access and schema bootstrapping.
 
-- `persistence/sqlite_store.py`
+- `fb_pipeline/persistence/l4_sqlite_store.py`
   - `get_db_connection(...)`
+  - `get_comment_db_connection(...)`
   - `setup_database(...)`
-  - cache helpers such as `should_fetch(...)` and `record_fetch(...)`
+  - `setup_comment_database(...)`
+  - cache helpers such as `should_fetch(...)`, `record_fetch(...)`, `should_fetch_comments(...)`
 
-This module owns shared inbox-side schema initialization for `threads`, `messages`, `users`, `user_ad_ids`, `ad_posts`, and fetch-log state.
+This module owns shared inbox-side and comments-side schema initialization for `threads`, `messages`, `users`, `user_ad_ids`, `ad_posts`, `posts`, `comments`, `comment_users`, and fetch-log state.
+
+### L5 — wrappers and operator surfaces
+
+Canonical operator-facing wrappers now live in prefixed files:
+
+- `tools/l5_fetch_fb_messages.py`
+- `tools/l5_fetch_comments.py`
+- `tools/l5_inbox_mas_runner.py`
+- `tools/l5_fb_browser_bootstrap.py`
+- `adk_agents/tools/l5_facebook_tools.py`
+- `adk_agents/tools/l5_seeker_tools.py`
+
+Legacy filenames remain supported as compatibility shims:
+
+- `tools/fetch_fb_messages.py`
+- `tools/fetch_comments.py`
+- `tools/inbox_mas_runner.py`
+- `tools/fb_browser_bootstrap.py`
+- `adk_agents/tools/facebook_tools.py`
+- `adk_agents/tools/seeker_tools.py`
 
 ## Import Direction
 
 The intended dependency direction is:
 
 ```text
-tools/, adk_agents/, tests/
-        ↓
-   fb_pipeline.session / inbox / comments / persistence
-        ↓
-        fb_pipeline.contracts
+legacy tools/*.py shims, tests/
+          ↓
+canonical L5 wrappers
+          ↓
+L4 / L3 / L2 fb_pipeline modules
+          ↓
+L1 contracts and helpers
 ```
 
 Rules:
 
-- `tools/` should be wrappers and operator-facing CLIs, not the home of reusable ingestion logic.
-- `adk_agents/` should consume persisted data and shared DB/session helpers, not reimplement scraping internals.
-- shared pipeline modules may depend on `fb_pipeline.contracts`.
-- contracts stay free of Playwright and CLI concerns.
+- canonical code should import prefixed modules directly
+- unprefixed shim files should only re-export from canonical modules
+- L5 `tools/` should be wrappers and operator-facing CLIs, not the home of reusable ingestion logic
+- L5 `adk_agents/` should consume persisted data and shared DB/session helpers, not reimplement scraping internals
+- L4/L3/L2 shared pipeline modules may depend on lower `fb_pipeline` layers only
+- L1 contracts stay free of Playwright and CLI concerns
+
+## Operational Hierarchy
+
+The runtime hierarchy for inbox automation is:
+
+```text
+USER / OPERATOR
+    |
+    v
++--------------------------------------------------+
+| L5 WRAPPERS / OPERATOR ENTRYPOINTS               |
+|--------------------------------------------------|
+| tools/l5_fetch_fb_messages.py                    |
+| tools/l5_inbox_mas_runner.py                     |
+| legacy shims: tools/fetch_fb_messages.py         |
+|               tools/inbox_mas_runner.py          |
++--------------------------------------------------+
+    |
+    v
++--------------------------------------------------+
+| L2 CDP 9222 / BROWSER BOOTSTRAP                  |
+|--------------------------------------------------|
+| fb_pipeline/session/l2_bootstrap.py              |
+|  - connect_to_cdp_browser()                      |
+|  - attach_to_authorized_session()                |
+|  - ensure_facebook_authorized()                  |
+|  - ensure_page_access()                          |
+|                                                  |
+| output: AuthorizedSession { browser, context,    |
+|                             page }               |
++--------------------------------------------------+
+    |
+    v
++--------------------------------------------------+
+| L2/L3 FACEBOOK DOM HANDLER                       |
+|--------------------------------------------------|
+| A) Crawl / scrape DOM                            |
+|    fb_pipeline/browser/l3_inbox.py               |
+|     - scrape_inbox_ui()                          |
+|                                                  |
+| B) Click / navigate / type into UI               |
+|    fb_pipeline/browser/l2_actions.py             |
+|    adk_agents/tools/l5_facebook_tools.py         |
+|     - navigate_to_thread()                       |
+|     - send_reply_via_cdp()                       |
+|       dry_run=True => type only, NO Enter/SEND   |
++--------------------------------------------------+
+    |
+    v
++--------------------------------------------------+
+| L1/L3 PARSER / NORMALIZER / ENRICHER             |
+|--------------------------------------------------|
+| fb_pipeline/inbox/l3_pipeline.py                 |
+|  - build_thread_record()                         |
+|  - enrich_thread_record()                        |
+|                                                  |
+| fb_pipeline/contracts/l1_inbox.py                |
+|  - extract_user_info()                           |
+|  - detect_city()                                 |
+|  - parse_ad_ids()                                |
+|                                                  |
+| output:                                          |
+|  - ThreadRecord                                  |
+|  - EnrichedThreadRecord                          |
+|  - SeekerInfo                                    |
+|  - MasHandoff                                    |
++--------------------------------------------------+
+    |
+    v
++--------------------------------------------------+
+| L4 PERSISTENCE / CRM STATE                       |
+|--------------------------------------------------|
+| fb_pipeline/inbox/l3_pipeline.py                 |
+|  - persist_thread_record()                       |
+|                                                  |
+| fb_pipeline/persistence/l4_sqlite_store.py       |
+|  - get_db_connection()                           |
+|  - setup_database()                              |
+|                                                  |
+| writes: threads / messages / users /             |
+|         user_ad_ids / ad_posts                   |
++--------------------------------------------------+
+    |
+    v
++--------------------------------------------------+
+| L5 SEEKER LOOKUP / MAS ORCHESTRATION             |
+|--------------------------------------------------|
+| adk_agents/tools/l5_seeker_tools.py              |
+|  - lookup_seeker()                               |
+|  - get_thread_messages()                         |
+|                                                  |
+| tools/l5_inbox_mas_runner.py                     |
+|  - run_inbox_cycle()                             |
+|                                                  |
+| flow:                                            |
+|  DB messages + seeker profile -> ADK reply       |
+|  -> navigate to thread -> type reply             |
+|  -> optionally send                              |
++--------------------------------------------------+
+```
+
+In short:
+
+```text
+L2 CDP9222 / browser handle
+    -> L2/L3 Facebook DOM handler
+       -> crawl / click / navigate / type (dry-run = no SEND)
+          -> L1/L3 parser for seeker/customer info
+             -> L4 persistence / CRM lookup
+                -> L5 MAS reply flow
+```
 
 ## End-to-End Data Flow
 
 ### Inbox flow: Facebook ingestion → analysis → persistence → MAS
 
-1. Operator runs a tool wrapper such as `tools/fetch_fb_messages.py` or `tools/inbox_mas_runner.py`
-2. Wrapper parses input and opens an authorized browser via `fb_pipeline.session.bootstrap.attach_to_authorized_session(...)`
-3. `fb_pipeline.inbox.pipeline.scrape_inbox(...)` scrolls the inbox and captures visible thread/message payloads
-4. `build_thread_record(...)` normalizes thread metadata
-5. `enrich_thread_record(...)` derives contact info, city, ad IDs, and builds a `MasHandoff`
-6. `persist_thread_record(...)` writes `threads`, `messages`, `users`, `user_ad_ids`, and `ad_posts`
-7. `tools/inbox_mas_runner.py` and `adk_agents/` consume the persisted thread data plus MAS handoff context to classify and draft/send replies
+1. Operator runs a stable command such as `tools/fetch_fb_messages.py` or the canonical wrapper `tools/l5_fetch_fb_messages.py`
+2. Wrapper parses input and opens an authorized browser via `fb_pipeline.session.l2_bootstrap.attach_to_authorized_session(...)`
+3. `fb_pipeline.browser.l3_inbox.scrape_inbox_ui(...)` scrolls the inbox and captures visible thread/message payloads
+4. `fb_pipeline.inbox.l3_pipeline.build_thread_record(...)` normalizes thread metadata
+5. `fb_pipeline.inbox.l3_pipeline.enrich_thread_record(...)` derives contact info, city, ad IDs, and builds a `MasHandoff`
+6. `fb_pipeline.inbox.l3_pipeline.persist_thread_record(...)` writes `threads`, `messages`, `users`, `user_ad_ids`, and `ad_posts`
+7. `tools/l5_inbox_mas_runner.py` and `adk_agents/tools/l5_*` consume the persisted thread data plus MAS handoff context to classify and draft/send replies
 
 ### Comment flow: Facebook ingestion → enrichment → persistence
 
-1. Operator runs `tools/fetch_comments.py`
-2. Wrapper opens an authorized browser through the shared session bootstrap
-3. Comment scraping collects visible posts and extracted comment payloads
-4. `build_post_record(...)` normalizes post metadata
-5. `enrich_post_record(...)` derives commenter contact info and city
-6. `persist_post_record(...)` writes `posts`, `comments`, and `comment_users`
+1. Operator runs `tools/fetch_comments.py` or the canonical wrapper `tools/l5_fetch_comments.py`
+2. Wrapper opens an authorized browser through `fb_pipeline.session.l2_bootstrap`
+3. `fb_pipeline.browser.l3_comments.scrape_comments_ui(...)` collects visible posts and extracted comment payloads
+4. `fb_pipeline.comments.l3_pipeline.build_post_record(...)` normalizes post metadata
+5. `fb_pipeline.comments.l3_pipeline.enrich_post_record(...)` derives commenter contact info and city
+6. `fb_pipeline.comments.l3_pipeline.persist_post_record(...)` writes `posts`, `comments`, and `comment_users`
 
-The comment path now matches the same layered pattern as inbox ingestion for normalization and persistence, but MAS orchestration is still inbox-driven.
+The comment path matches the same layered pattern as inbox ingestion for normalization and persistence, but MAS orchestration is still inbox-driven.
 
 ## Tool Wrapper Role
 
 `tools/` remains the operational surface area for humans and scripts.
 
-Current wrappers and operators:
+Stable operator commands remain:
 
 - `tools/fetch_fb_messages.py`
-  - inbox fetch, cache checks, credential capture, DB lookup helpers
-  - delegates shared pipeline/session/storage logic to `fb_pipeline/`
 - `tools/fetch_comments.py`
-  - comment fetch and DB lookup helpers
-  - delegates record construction/persistence to `fb_pipeline.comments`
 - `tools/inbox_mas_runner.py`
-  - end-to-end operator command for fetch → unreplied lookup → ADK pipeline → CDP reply
 - `tools/dedup_users.py`
-  - maintenance utility for de-duplicating users that share the same Facebook profile URL
+
+Canonical implementation files for wrapper logic are now:
+
+- `tools/l5_fetch_fb_messages.py`
+- `tools/l5_fetch_comments.py`
+- `tools/l5_inbox_mas_runner.py`
+- `tools/l5_fb_browser_bootstrap.py`
+
+Reusable Facebook logic should go into `fb_pipeline/`, not the legacy wrapper shims.
 
 ## MAS Boundary
 
 The MAS boundary is currently defined at the inbox enrichment layer and consumed by the runner/agents.
 
-- `fb_pipeline.contracts.inbox.MasHandoff` is the normalized payload for agent-side processing
-- `fb_pipeline.inbox.pipeline.enrich_thread_record(...)` constructs that payload
-- `tools/inbox_mas_runner.py` is the operator entry point for automated cycles
-- `adk_agents/` consumes persisted thread data and shared DB helpers to classify, respond, and log auto-replies
+- `fb_pipeline.contracts.l1_inbox.MasHandoff` is the normalized payload for agent-side processing
+- `fb_pipeline.inbox.l3_pipeline.enrich_thread_record(...)` constructs that payload
+- `tools/l5_inbox_mas_runner.py` is the canonical operator entry point for automated cycles
+- `adk_agents/tools/l5_seeker_tools.py` and `adk_agents/tools/l5_facebook_tools.py` consume persisted thread data and shared helpers to classify, respond, and log auto-replies
 
-This means the MAS layer depends on the shared pipeline contracts and stored inbox state, not on raw DOM scraping details.
+This means the MAS layer depends on shared pipeline contracts and stored inbox state, not on raw DOM scraping details.
 
 ## Operational Entry Points
 
@@ -194,16 +373,23 @@ This means the MAS layer depends on the shared pipeline contracts and stored inb
 - Live auto-reply mode: `python tools/inbox_mas_runner.py --page-id <asset_id> --once --live`
 - User dedup maintenance: `python tools/dedup_users.py --dry-run` or `--execute`
 
+The legacy command surface remains stable even though the canonical implementation files are now `tools/l5_*.py`.
+
 ### Developer entry points
 
 Primary shared modules:
 
-- `fb_pipeline/contracts/inbox.py`
-- `fb_pipeline/contracts/comments.py`
-- `fb_pipeline/session/bootstrap.py`
-- `fb_pipeline/inbox/pipeline.py`
-- `fb_pipeline/comments/pipeline.py`
-- `fb_pipeline/persistence/sqlite_store.py`
+- `fb_pipeline/contracts/l1_session.py`
+- `fb_pipeline/contracts/l1_inbox.py`
+- `fb_pipeline/contracts/l1_comments.py`
+- `fb_pipeline/comments/l1_helpers.py`
+- `fb_pipeline/session/l2_bootstrap.py`
+- `fb_pipeline/browser/l2_actions.py`
+- `fb_pipeline/browser/l3_inbox.py`
+- `fb_pipeline/browser/l3_comments.py`
+- `fb_pipeline/inbox/l3_pipeline.py`
+- `fb_pipeline/comments/l3_pipeline.py`
+- `fb_pipeline/persistence/l4_sqlite_store.py`
 
 These are the preferred extension points for future Facebook ingestion work.
 
