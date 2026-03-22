@@ -19,7 +19,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from tools.fetch_fb_messages import get_db_connection
+from fb_pipeline.persistence.sqlite_store import get_db_connection
 
 
 def lookup_seeker(thread_id: str) -> dict:

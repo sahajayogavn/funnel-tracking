@@ -19,7 +19,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from tools.fetch_fb_messages import get_db_connection
+from fb_pipeline.persistence.sqlite_store import get_db_connection
 
 
 # code:agent-mas-001:send-reply-cdp
@@ -94,11 +94,11 @@ def navigate_to_thread(page, page_id: str, thread_name: str) -> bool:
             page.wait_for_timeout(3000)
 
         # Wait for thread list
-        page.wait_for_selector('div._ikh', timeout=10000)
+        page.wait_for_selector('div._5_n1', timeout=10000)
         page.wait_for_timeout(1000)
 
         # Find and click the thread by name
-        thread_el = page.locator('div._ikh').filter(has_text=thread_name).first
+        thread_el = page.locator('div._5_n1').filter(has_text=thread_name).first
         if thread_el:
             thread_el.click(force=True, timeout=5000)
             page.wait_for_timeout(2000)

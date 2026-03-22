@@ -13,8 +13,10 @@ from tools.fetch_fb_messages import (
     detect_city, get_list_unique_user, fetch_message_by_user,
     setup_database, get_db_connection, _scrape_inbox,
     parse_ad_ids, get_user_ad_ids, resolve_ad_posts,
-    propagate_city_from_ads
+    propagate_city_from_ads, build_thread_record, enrich_thread_record,
+    persist_thread_record
 )
+from tools.fb_browser_bootstrap import AuthorizedSession
 
 
 class TestParsePageId(unittest.TestCase):
@@ -324,29 +326,34 @@ class TestResolveAdPosts(unittest.TestCase):
 class TestFetchMessagesCDP(unittest.TestCase):
     """Tests for the CDP credential capture flow."""
 
+    @patch('tools.fetch_fb_messages.attach_to_authorized_session')
     @patch('tools.fetch_fb_messages.os.path.exists')
     @patch('tools.fetch_fb_messages.sync_playwright')
-    def test_fetch_messages_cdp_flow(self, mock_sync_playwright, mock_exists):
+    def test_fetch_messages_cdp_flow(self, mock_sync_playwright, mock_exists, mock_attach):
         mock_exists.return_value = False
-        
+
         mock_p = MagicMock()
         mock_sync_playwright.return_value.__enter__.return_value = mock_p
-        
+
         mock_browser = MagicMock()
-        mock_p.chromium.connect_over_cdp.return_value = mock_browser
-        
         mock_context = MagicMock()
-        mock_browser.contexts = [mock_context]
-        
         mock_page = MagicMock()
-        mock_context.pages = [] 
-        mock_context.new_page.return_value = mock_page
         mock_page.content.return_value = "<html>Mock DOM</html>"
-        
+        mock_attach.return_value = AuthorizedSession(
+            browser=mock_browser,
+            context=mock_context,
+            page=mock_page,
+            cdp_url="http://127.0.0.1:9222",
+            page_id="123",
+            inbox_url="https://business.facebook.com/latest/inbox/all?asset_id=123",
+            created_tab=True,
+        )
+
         result = fetch_messages("123", "test_cred")
-        
+
         self.assertEqual(result["success"], True)
         self.assertEqual(result["method"], "cdp_capture")
+        mock_attach.assert_called_once()
 
 
 class TestFetchMessagesCDPDirect(unittest.TestCase):
@@ -370,8 +377,9 @@ class TestFetchMessagesCDPDirect(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     @patch('tools.fetch_fb_messages._scrape_inbox')
+    @patch('tools.fetch_fb_messages.attach_to_authorized_session')
     @patch('tools.fetch_fb_messages.sync_playwright')
-    def test_cdp_direct_calls_scrape_inbox(self, mock_sync_playwright, mock_scrape):
+    def test_cdp_direct_calls_scrape_inbox(self, mock_sync_playwright, mock_attach, mock_scrape):
         """CDP direct mode connects via CDP and calls _scrape_inbox."""
         self._patch_sqlite()
         mock_scrape.return_value = {"new_threads": 3, "new_messages": 10, "skipped_threads": 0}
@@ -379,10 +387,17 @@ class TestFetchMessagesCDPDirect(unittest.TestCase):
         mock_p = MagicMock()
         mock_sync_playwright.return_value.__enter__.return_value = mock_p
         mock_browser = MagicMock()
-        mock_p.chromium.connect_over_cdp.return_value = mock_browser
         mock_context = MagicMock()
-        mock_browser.contexts = [mock_context]
         mock_page = MagicMock()
+        mock_attach.return_value = AuthorizedSession(
+            browser=mock_browser,
+            context=mock_context,
+            page=mock_page,
+            cdp_url="http://127.0.0.1:9222",
+            page_id="123",
+            inbox_url="https://business.facebook.com/latest/inbox/all?asset_id=123",
+            created_tab=True,
+        )
         mock_context.pages = [mock_page]
 
         result = fetch_messages("123", "test_cred", time_range="7d",
@@ -392,6 +407,7 @@ class TestFetchMessagesCDPDirect(unittest.TestCase):
         self.assertEqual(result["method"], "cdp_direct")
         mock_scrape.assert_called_once()
         mock_browser.close.assert_not_called()
+        mock_attach.assert_called_once()
 
     @patch('tools.fetch_fb_messages._scrape_inbox')
     @patch('tools.fetch_fb_messages.sync_playwright')
@@ -447,56 +463,75 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         mock_browser.new_context.return_value = mock_context
         mock_page = MagicMock()
         mock_context.new_page.return_value = mock_page
-        mock_page.url = "https://business.facebook.com/latest/inbox/all?asset_id=123&selected_item_id=9876"
+        # URL starts without selected_item_id, changes after click
+        url_state = {"url": "https://business.facebook.com/latest/inbox/all?asset_id=123"}
+        type(mock_page).url = property(lambda self: url_state["url"])
         mock_page.frames = [MagicMock()]
         mock_page.content.return_value = "<html>Mock DOM</html>"
-        
+
         mock_thread_locator = MagicMock()
         mock_thread = MagicMock()
         mock_thread.inner_text.return_value = thread_text
         mock_thread_locator.count.return_value = 1
         mock_thread_locator.nth.return_value = mock_thread
         mock_page.locator.return_value = mock_thread_locator
-        
+
         if js_messages is None:
             js_messages = [
                 {"sender": "Customer", "text": "Lớp học có mất phí không?", "timestamp": "Sat 7:19 PM"},
                 {"sender": "Page", "text": "Dạ hoàn toàn miễn phí ạ", "timestamp": "Sat 7:19 PM"},
             ]
-        
+
         mock_thread_data = [{
             "index": 0,
             "name": thread_text.split('\n')[0].strip(),
             "text": thread_text,
             "lines": [l.strip() for l in thread_text.split('\n') if l.strip()] + ["Today"]
         }]
-        
+
         mock_mouse = MagicMock()
         mock_page.mouse = mock_mouse
-        
-        call_count = {"collect": 0}
-        
+
+        call_count = {"collect": 0, "fingerprint": 0, "scroll_info": 0}
+
         def evaluate_side_effect(script, args=None):
             if isinstance(args, dict) and "name" in args:
                 return True
             if isinstance(args, str):
                 return True
-            if "Message list container" in script:
+            # Anti-contamination: text fingerprint before/after click
+            if "innerText" in script and "substring(0, 200)" in script:
+                call_count["fingerprint"] += 1
+                if call_count["fingerprint"] <= 1:
+                    return ""  # pre-click: empty panel
+                return "New thread messages here"  # post-click: different text
+            # Scroll-up info
+            if "scrollHeight" in script and "scrollableTag" in script:
+                return {"count": len(js_messages), "scrollHeight": 500, "scrollTop": 0, "scrollableTag": "DIV"}
+            # Scroll-up action
+            if "scrollTop" in script and "dispatchEvent" in script:
+                return None
+            if "Message list container" in script and "x1y1aw1k" in script:
                 return js_messages
             elif "Xem bài viết" in script:
                 return ad_context
             elif "ad_id" in script and "innerText" in script:
                 return ""
-            elif "_ikh" in script and "innerText" in script and "lines" in script:
+            elif "_5_n1" in script and "innerText" in script and "lines" in script:
                 call_count["collect"] += 1
                 if call_count["collect"] <= 1:
                     return mock_thread_data
                 return []
-            elif "scrollTop" in script and "c.scrollTop = 0" in script:
-                return None
             return ""
         mock_page.evaluate.side_effect = evaluate_side_effect
-        
+
+        # Simulate click changing the URL
+        original_click = mock_thread.click
+        def click_side_effect(*args, **kwargs):
+            url_state["url"] = "https://business.facebook.com/latest/inbox/all?asset_id=123&selected_item_id=9876"
+            return original_click(*args, **kwargs)
+        mock_thread.click = click_side_effect
+
         return mock_p, mock_page
 
     @patch('tools.fetch_fb_messages.os.path.exists')
@@ -781,6 +816,82 @@ class TestPropagateCityFromAds(unittest.TestCase):
         row = conn2.execute("SELECT city FROM users WHERE thread_id = 't1'").fetchone()
         self.assertEqual(row["city"], "TP. Hồ Chí Minh")
         conn2.close()
+
+
+class TestInboxContracts(unittest.TestCase):
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        setup_database(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_build_thread_record_parses_visible_thread(self):
+        record = build_thread_record("page1", {
+            "domIndex": 3,
+            "name": " User A ",
+            "text": " User A \nHello there\nToday ",
+        })
+        self.assertEqual(record["page_id"], "page1")
+        self.assertEqual(record["thread_name"], "User A")
+        self.assertEqual(record["preview_text"], "Hello there Today")
+        self.assertEqual(record["dom_index"], 3)
+        self.assertTrue(record["thread_id"].startswith("page1_"))
+
+    def test_enrich_thread_record_builds_mas_payload(self):
+        thread_record = build_thread_record("page1", {
+            "name": "User A",
+            "text": "User A\nPreview",
+        })
+        enriched = enrich_thread_record(
+            thread_record,
+            [
+                {"sender": "Customer", "text": "0912345678", "timestamp": "Today"},
+                {"sender": "Page", "text": "Lớp tại Hà Nội", "timestamp": "Today"},
+                {"sender": "Customer", "text": "", "timestamp": "Today"},
+            ],
+            ad_context="Thiền miễn phí tại Hà Nội",
+            fb_url="selected123",
+            ad_ids=["ad_1"],
+        )
+        self.assertEqual(enriched["user_info"]["phone"], "0912345678")
+        self.assertEqual(enriched["city"], "Hà Nội")
+        self.assertEqual(len(enriched["messages"]), 2)
+        self.assertEqual(enriched["messages"][0]["seq"], 0)
+        self.assertEqual(enriched["mas_handoff"]["fb_url"], "selected123")
+        self.assertEqual(enriched["mas_handoff"]["seeker"]["city"], "Hà Nội")
+        self.assertEqual(enriched["mas_handoff"]["ad_ids"], ["ad_1"])
+
+    def test_persist_thread_record_writes_all_boundaries(self):
+        thread_record = enrich_thread_record(
+            build_thread_record("page1", {"name": "User A", "text": "User A\nPreview"}),
+            [
+                {"sender": "Customer", "text": "Xin chào", "timestamp": "Today"},
+                {"sender": "Page", "text": "Địa chỉ: 40 Vương Thừa Vũ", "timestamp": "Today"},
+            ],
+            ad_context="Thiền miễn phí tại Hà Nội",
+            fb_url="selected456",
+            ad_ids=["6930299765389"],
+        )
+        result = persist_thread_record(self.conn, thread_record)
+        self.assertEqual(result["messages_added"], 2)
+        self.assertEqual(result["ad_ids_count"], 1)
+        self.assertEqual(result["city"], "Hà Nội")
+
+        thread = self.conn.execute("SELECT * FROM threads WHERE id = ?", (thread_record["thread_id"],)).fetchone()
+        self.assertEqual(thread["page_id"], "page1")
+
+        user = self.conn.execute("SELECT * FROM users WHERE thread_id = ?", (thread_record["thread_id"],)).fetchone()
+        self.assertEqual(user["fb_url"], "selected456")
+        self.assertEqual(user["city"], "Hà Nội")
+
+        ad = self.conn.execute("SELECT * FROM ad_posts WHERE ad_id = '6930299765389'").fetchone()
+        self.assertEqual(ad["city"], "Hà Nội")
+
+        msgs = self.conn.execute("SELECT content, seq FROM messages WHERE thread_id = ? ORDER BY seq", (thread_record["thread_id"],)).fetchall()
+        self.assertIn("--- [AD SOURCE]: Thiền miễn phí tại Hà Nội ---", msgs[0]["content"])
+        self.assertEqual(msgs[1]["seq"], 1)
 
 
 if __name__ == '__main__':

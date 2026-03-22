@@ -30,6 +30,11 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from playwright.sync_api import sync_playwright
 
+from fb_pipeline.contracts.inbox import parse_page_id
+from fb_pipeline.inbox.pipeline import scrape_inbox
+from fb_pipeline.persistence.sqlite_store import get_db_connection
+from fb_pipeline.session.bootstrap import attach_to_authorized_session
+
 # Setup logging
 os.makedirs(os.path.join(PROJECT_ROOT, 'logs'), exist_ok=True)
 logging.basicConfig(
@@ -218,16 +223,16 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
         dict: Summary of the cycle.
     """
     from adk_agents.tools.seeker_tools import find_unreplied_threads
-    from tools.fetch_fb_messages import _scrape_inbox, get_db_connection
 
     results = []
 
     with sync_playwright() as p:
+        session = None
         try:
-            browser = p.chromium.connect_over_cdp(CDP_URL)
-            default_context = browser.contexts[0]
-            cdp_page = default_context.new_page()
-            logger.info(f"Connected to CDP. Opened new tab.")
+            inbox_url = f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}"
+            session = attach_to_authorized_session(p, page_id, inbox_url)
+            cdp_page = session.page
+            logger.info("Connected to CDP. Opened new tab.")
         except Exception as e:
             logger.error(f"CDP connection failed: {e}")
             return {"status": "error", "error": f"CDP connection failed: {e}"}
@@ -237,7 +242,7 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
 
             # Step 1: Fetch new inbox messages
             logger.info(f"Step 1: Fetching inbox for page {page_id}...")
-            scrape_stats = _scrape_inbox(cdp_page, page_id, "1d", 50, conn)
+            scrape_stats = scrape_inbox(cdp_page, page_id, "1d", 50, conn)
             logger.info(f"Scrape stats: {scrape_stats}")
 
             conn.close()
@@ -267,10 +272,10 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                                     "thread_name": thread["thread_name"]})
 
         finally:
-            # Close only OUR tab, never the browser
             try:
-                cdp_page.close()
-                logger.info("Closed CDP tab.")
+                if session:
+                    session.close_page()
+                    logger.info("Closed CDP tab.")
             except Exception:
                 pass
 
@@ -315,7 +320,6 @@ def main():
     dry_run = not args.live
 
     # Parse page_id from URL if needed
-    from tools.fetch_fb_messages import parse_page_id
     page_id = parse_page_id(args.page_id)
 
     # Setup LLM environment

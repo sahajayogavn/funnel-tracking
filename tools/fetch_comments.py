@@ -9,6 +9,9 @@ from urllib.parse import urlparse, parse_qs
 from playwright.sync_api import sync_playwright
 import sqlite3
 
+from fb_pipeline.comments.pipeline import build_post_record, enrich_post_record, persist_post_record
+from tools.fb_browser_bootstrap import attach_to_authorized_session, sanitize_storage_state_file
+
 # Ensure logs directory exists
 os.makedirs('./logs/', exist_ok=True)
 logging.basicConfig(
@@ -308,10 +311,9 @@ def _scrape_comments(page, page_id: str, time_range: str, max_posts: int, conn) 
             new_in_round += 1
             post_counter += 1
 
-            post_text_full = vp.get("text", "")
-            post_lines = [l.strip() for l in post_text_full.split('\n') if l.strip()]
-            preview_text = " ".join(post_lines[1:]) if len(post_lines) > 1 else ""
-            post_id = f"{page_id}_{abs(hash(name))}"
+            post_record = build_post_record(page_id, vp)
+            post_id = post_record.post_id
+            preview_text = post_record.preview_text
 
             cursor.execute("SELECT last_synced_time FROM posts WHERE id = ?", (post_id,))
             row = cursor.fetchone()
@@ -322,6 +324,16 @@ def _scrape_comments(page, page_id: str, time_range: str, max_posts: int, conn) 
                 continue
 
             logger.info(f"Syncing post '{name}' (#{post_counter})...")
+
+            # ================================================================
+            # ANTI-CONTAMINATION: Capture pre-click URL state
+            # ================================================================
+            prev_post_url = ""
+            try:
+                prev_qs = parse_qs(urlparse(page.url).query)
+                prev_post_url = prev_qs.get('selected_item_id', [''])[0]
+            except Exception:
+                pass
 
             # Click this post thread
             dom_index = vp.get("domIndex", 0)
@@ -336,19 +348,37 @@ def _scrape_comments(page, page_id: str, time_range: str, max_posts: int, conn) 
             comment_region_selector = 'div[aria-label*="Comment"], div[role="complementary"], div[data-pagelet*="Comment"]'
             try:
                 page.wait_for_selector(comment_region_selector, timeout=10000)
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1000)
             except Exception:
                 logger.warning(f"Comment region not found within 10s for post '{name}'. Falling back to timeout.")
                 page.wait_for_timeout(4000)
 
-            # Extract post URL from current page URL
+            # ================================================================
+            # ANTI-CONTAMINATION: Poll until selected_item_id changes in URL
+            # ================================================================
             post_url = ""
-            try:
-                current_qs = parse_qs(urlparse(page.url).query)
-                if 'selected_item_id' in current_qs:
-                    post_url = current_qs['selected_item_id'][0]
-            except Exception:
-                pass
+            url_changed = False
+            for _poll in range(20):  # up to 10 seconds
+                try:
+                    current_qs = parse_qs(urlparse(page.url).query)
+                    candidate = current_qs.get('selected_item_id', [''])[0]
+                    if candidate and candidate != prev_post_url:
+                        post_url = candidate
+                        url_changed = True
+                        break
+                except Exception:
+                    pass
+                page.wait_for_timeout(500)
+
+            if not url_changed:
+                try:
+                    current_qs = parse_qs(urlparse(page.url).query)
+                    post_url = current_qs.get('selected_item_id', [''])[0]
+                except Exception:
+                    post_url = ""
+                if post_url == prev_post_url:
+                    logger.warning(f"URL selected_item_id did NOT change after clicking post '{name}' (still {post_url}). Setting post_url to empty.")
+                    post_url = ""
 
             # --- Extract Comments ---
             # code:tool-fbcomments-001:extract-comments
@@ -496,82 +526,17 @@ def _scrape_comments(page, page_id: str, time_range: str, max_posts: int, conn) 
             comment_count = len(js_comments)
             if comment_count == 0:
                 logger.warning(f"No comments found for post '{name}'.")
-                cursor.execute('''
-                    INSERT INTO posts (id, page_id, post_name, post_url, last_synced_time) 
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET 
-                        last_synced_time=excluded.last_synced_time
-                ''', (post_id, page_id, name, post_url, preview_text))
-                conn.commit()
-                if row is None:
+                persist_result = persist_post_record(conn, enrich_post_record(post_record, [], extract_user_info, detect_city, post_url=post_url))
+                if persist_result["is_new_post"]:
                     stats["new_posts"] += 1
                 continue
 
-            comments_added_this_post = 0
             logger.info(f"Found {comment_count} comments for post '{name}'.")
-
-            for cmt in js_comments:
-                commenter = cmt.get("commenter_name", "Unknown").strip()
-                text = cmt.get("comment_text", "").strip()
-                cmt_ts = cmt.get("timestamp", "")
-                profile_url = cmt.get("profile_url", "")
-                fb_user_id = cmt.get("fb_user_id", "")
-                is_reply = 1 if cmt.get("is_reply", False) else 0
-                comment_date = cmt_ts
-
-                if not text:
-                    continue
-
-                try:
-                    cursor.execute(
-                        "INSERT OR IGNORE INTO comments (post_id, commenter_name, comment_text, comment_timestamp, fb_profile_url, fb_user_id, is_reply, comment_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (post_id, commenter, text, cmt_ts, profile_url, fb_user_id, is_reply, comment_date)
-                    )
-                    if cursor.rowcount > 0:
-                        comments_added_this_post += 1
-                        stats["new_comments"] += 1
-                except Exception as e:
-                    logger.debug(f"Duplicate or error inserting comment: {e}")
-
-            # Upsert Post record
-            cursor.execute('''
-                INSERT INTO posts (id, page_id, post_name, post_url, last_synced_time) 
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET 
-                    last_synced_time=excluded.last_synced_time
-            ''', (post_id, page_id, name, post_url, preview_text))
-
-            conn.commit()
-            if row is None:
+            enriched_post_record = enrich_post_record(post_record, js_comments, extract_user_info, detect_city, post_url=post_url)
+            persist_result = persist_post_record(conn, enriched_post_record, logger=logger)
+            stats["new_comments"] += persist_result["comments_added"]
+            if persist_result["is_new_post"]:
                 stats["new_posts"] += 1
-
-            # Upsert comment_users record
-            db_cmts = [{"comment_text": c.get("comment_text", "")} for c in js_comments]
-            user_info = extract_user_info(db_cmts)
-            all_comment_text = " ".join([c.get("comment_text", "") for c in js_comments])
-            city = detect_city(all_comment_text)
-
-            for cmt in js_comments:
-                commenter = cmt.get("commenter_name", "Unknown").strip()
-                if commenter in ("Page", "Unknown", ""):
-                    continue
-                cmt_profile_url = cmt.get("profile_url", "")
-                cmt_user_id = cmt.get("fb_user_id", "")
-                try:
-                    cursor.execute('''
-                        INSERT INTO comment_users (post_id, commenter_name, fb_user_id, fb_profile_url, phone, email, city, last_interaction)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                        ON CONFLICT(post_id, commenter_name) DO UPDATE SET
-                            fb_user_id = COALESCE(excluded.fb_user_id, comment_users.fb_user_id),
-                            fb_profile_url = COALESCE(excluded.fb_profile_url, comment_users.fb_profile_url),
-                            phone = COALESCE(excluded.phone, comment_users.phone),
-                            email = COALESCE(excluded.email, comment_users.email),
-                            city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE comment_users.city END,
-                            last_interaction = datetime('now')
-                    ''', (post_id, commenter, cmt_user_id, cmt_profile_url, user_info["phone"], user_info["email"], city))
-                except Exception as e:
-                    logger.debug(f"Error upserting comment_user: {e}")
-            conn.commit()
 
         # End of inner for loop — log round results
         logger.info(f"Round {scroll_round}: {new_in_round} new posts processed (total: {post_counter}).")
@@ -643,29 +608,22 @@ def fetch_comments(page_input: str, credential_id: str, time_range: str = "7d",
             }
 
         with sync_playwright() as p:
+            session = None
             try:
-                browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
-                default_context = browser.contexts[0]
-                cdp_page = default_context.new_page()
-                logger.info(f"Connected to CDP session. Opened new tab (total tabs: {len(default_context.pages)}).")
+                session = attach_to_authorized_session(p, page_id, inbox_url)
+                logger.info(f"Connected to CDP session. Opened new tab (total tabs: {len(session.context.pages)}).")
 
-                logger.info(f"Navigating to {inbox_url}")
-                cdp_page.goto(inbox_url, wait_until="networkidle", timeout=60000)
-                cdp_page.wait_for_timeout(3000)
-
-                stats = _scrape_comments(cdp_page, page_id, time_range, max_posts, conn)
-
-                try:
-                    cdp_page.close()
-                except Exception:
-                    pass
+                stats = _scrape_comments(session.page, page_id, time_range, max_posts, conn)
 
                 conn.close()
+                session.close_page()
                 logger.info(f"CDP Direct: Saved to FrankenSQLite. Stats: {stats}")
                 return {"success": True, "method": "cdp_direct", "data": {"stats": stats}}
             except Exception as e:
                 logger.error(f"CDP Direct comment scrape failed: {e}")
                 conn.close()
+                if session:
+                    session.close_page()
                 return {"success": False, "error": str(e)}
 
     with sync_playwright() as p:
@@ -673,52 +631,36 @@ def fetch_comments(page_input: str, credential_id: str, time_range: str = "7d",
             logger.info(f"Credential '{credential_id}' not found at {credential_path}.")
             logger.info("Attempting to connect to existing Chrome instance via CDP at http://127.0.0.1:9222")
 
-            # Ralph loop: retry CDP capture
             max_attempts = 3
             for attempt in range(1, max_attempts + 1):
+                session = None
                 try:
-                    browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
-                    default_context = browser.contexts[0]
-                    page = default_context.pages[0] if default_context.pages else default_context.new_page()
-
-                    logger.info(f"Navigating to {inbox_url} to ensure authenticated state is captured properly...")
-                    page.goto(inbox_url)
-                    page.wait_for_timeout(5000)
+                    session = attach_to_authorized_session(p, page_id, inbox_url, prefer_new_tab=False)
 
                     diagnostic_dir = f"./logs/diagnostic/iteration-0001"
                     os.makedirs(diagnostic_dir, exist_ok=True)
                     with open(os.path.join(diagnostic_dir, "consoleLog.txt"), "a") as f:
                         f.write(f"Attempt {attempt}: Navigated to {inbox_url}\n")
                     with open(os.path.join(diagnostic_dir, "DOM.txt"), "w") as f:
-                        f.write(page.content())
+                        f.write(session.page.content())
 
                     logger.info(f"Saving browser state to {credential_path}")
-                    default_context.storage_state(path=credential_path)
+                    session.context.storage_state(path=credential_path)
 
-                    # Sanitize cookies
                     try:
-                        with open(credential_path, 'r') as f:
-                            state_data = json.load(f)
-                        if "cookies" in state_data:
-                            fb_cookies = []
-                            for cookie in state_data["cookies"]:
-                                domain = cookie.get("domain", "")
-                                if "facebook.com" in domain or "messenger.com" in domain:
-                                    if "expires" in cookie and cookie["expires"] < 0:
-                                        del cookie["expires"]
-                                    fb_cookies.append(cookie)
-                            state_data["cookies"] = fb_cookies
-                        with open(credential_path, 'w') as f:
-                            json.dump(state_data, f, indent=2)
+                        sanitize_storage_state_file(credential_path)
                         logger.info("Successfully sanitized saved CDP state.")
                     except Exception as ex:
                         logger.warning(f"Failed to sanitize cookie state: {ex}")
 
                     logger.info("Successfully fetched and saved authenticated browser state via CDP session.")
-                    browser.close()
+                    session.close_page()
+                    session.browser.close()
                     return {"success": True, "method": "cdp_capture", "message": "Authenticated state saved. Run again to fetch headless."}
                 except Exception as e:
                     logger.warning(f"Attempt {attempt} failed: {e}. Retrying Ralph loop...")
+                    if session:
+                        session.close_page()
                     if attempt == max_attempts:
                         logger.error(f"Failed to connect via CDP after {max_attempts} attempts.")
                         logger.error("Make sure Chrome is running with --remote-debugging-port=9222")

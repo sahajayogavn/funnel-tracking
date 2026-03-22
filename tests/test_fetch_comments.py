@@ -8,11 +8,13 @@ import shutil
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from fb_pipeline.comments.pipeline import build_post_record, enrich_post_record, persist_post_record
 from tools.fetch_comments import (
     parse_page_id, parse_post_id, fetch_comments, should_fetch, extract_user_info,
     detect_city, get_comments_by_post, get_comment_users,
-    setup_comment_database, get_db_connection
+    setup_comment_database, get_db_connection,
 )
+from tools.fb_browser_bootstrap import AuthorizedSession
 
 
 class TestParsePageId(unittest.TestCase):
@@ -119,32 +121,104 @@ class TestDetectCityComments(unittest.TestCase):
         self.assertEqual(detect_city("Tôi muốn tham gia"), "Unknown")
 
 
+class TestCommentContracts(unittest.TestCase):
+    def setUp(self):
+        self._tmp_dir = tempfile.mkdtemp()
+        self.conn = sqlite3.connect(":memory:")
+        setup_comment_database(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
+
+    def test_build_post_record_parses_visible_post(self):
+        post = build_post_record("page123", {
+            "domIndex": 4,
+            "name": "Post Title",
+            "text": "Post Title\nPreview line\nToday",
+        })
+        self.assertEqual(post.page_id, "page123")
+        self.assertEqual(post.post_name, "Post Title")
+        self.assertEqual(post.preview_text, "Preview line Today")
+        self.assertEqual(post.dom_index, 4)
+
+    def test_enrich_post_record_builds_normalized_comments(self):
+        post = build_post_record("page123", {
+            "domIndex": 0,
+            "name": "Post Title",
+            "text": "Post Title\nPreview",
+        })
+        enriched = enrich_post_record(post, [
+            {"commenter_name": "Nguyễn Văn A", "comment_text": "Cho mình đăng ký ở Hà Nội, SĐT 0912345678", "timestamp": "2d", "profile_url": "https://facebook.com/nguyenvana", "fb_user_id": "nguyenvana", "is_reply": False},
+            {"commenter_name": "", "comment_text": "   ", "timestamp": "1d", "profile_url": "", "fb_user_id": "", "is_reply": False},
+        ], extract_user_info, detect_city, post_url="post-456")
+        self.assertEqual(enriched.post_url, "post-456")
+        self.assertEqual(enriched.city, "Hà Nội")
+        self.assertEqual(enriched.user_info["phone"], "0912345678")
+        self.assertEqual(len(enriched.comments), 1)
+        self.assertEqual(enriched.comments[0].comment_timestamp, "2d")
+        self.assertEqual(enriched.comments[0].is_reply, 0)
+
+    def test_persist_post_record_writes_all_boundaries(self):
+        post = enrich_post_record(
+            build_post_record("page123", {"domIndex": 0, "name": "Post Title", "text": "Post Title\nPreview"}),
+            [
+                {"commenter_name": "Nguyễn Văn A", "comment_text": "Mình ở Đà Nẵng, email a@test.com", "timestamp": "Today", "profile_url": "https://facebook.com/nguyenvana", "fb_user_id": "nguyenvana", "is_reply": False},
+                {"commenter_name": "Page", "comment_text": "Chào bạn", "timestamp": "Today", "profile_url": "", "fb_user_id": "", "is_reply": False},
+            ],
+            extract_user_info,
+            detect_city,
+            post_url="post-789",
+        )
+        result = persist_post_record(self.conn, post)
+        self.assertEqual(result["comments_added"], 2)
+        self.assertTrue(result["is_new_post"])
+
+        post_row = self.conn.execute("SELECT page_id, post_name, post_url FROM posts WHERE id = ?", (post.post_id,)).fetchone()
+        self.assertEqual(post_row[0], "page123")
+        self.assertEqual(post_row[1], "Post Title")
+        self.assertEqual(post_row[2], "post-789")
+
+        comment_count = self.conn.execute("SELECT COUNT(*) FROM comments WHERE post_id = ?", (post.post_id,)).fetchone()[0]
+        self.assertEqual(comment_count, 2)
+
+        user_row = self.conn.execute("SELECT commenter_name, email, city FROM comment_users WHERE post_id = ?", (post.post_id,)).fetchone()
+        self.assertEqual(user_row[0], "Nguyễn Văn A")
+        self.assertEqual(user_row[1], "a@test.com")
+        self.assertEqual(user_row[2], "Đà Nẵng")
+
+
 class TestFetchCommentsCDP(unittest.TestCase):
     """Tests for the CDP credential capture flow."""
 
+    @patch('tools.fetch_comments.attach_to_authorized_session')
     @patch('tools.fetch_comments.os.path.exists')
     @patch('tools.fetch_comments.sync_playwright')
-    def test_fetch_comments_cdp_flow(self, mock_sync_playwright, mock_exists):
+    def test_fetch_comments_cdp_flow(self, mock_sync_playwright, mock_exists, mock_attach):
         mock_exists.return_value = False
 
         mock_p = MagicMock()
         mock_sync_playwright.return_value.__enter__.return_value = mock_p
 
         mock_browser = MagicMock()
-        mock_p.chromium.connect_over_cdp.return_value = mock_browser
-
         mock_context = MagicMock()
-        mock_browser.contexts = [mock_context]
-
         mock_page = MagicMock()
-        mock_context.pages = []
-        mock_context.new_page.return_value = mock_page
         mock_page.content.return_value = "<html>Mock DOM</html>"
+        mock_attach.return_value = AuthorizedSession(
+            browser=mock_browser,
+            context=mock_context,
+            page=mock_page,
+            cdp_url="http://127.0.0.1:9222",
+            page_id="123",
+            inbox_url="https://business.facebook.com/latest/inbox/facebook?asset_id=123&thread_type=FB_PAGE_POST",
+            created_tab=True,
+        )
 
         result = fetch_comments("123", "test_cred")
 
         self.assertEqual(result["success"], True)
         self.assertEqual(result["method"], "cdp_capture")
+        mock_attach.assert_called_once()
 
 
 class TestFetchCommentsHeadless(unittest.TestCase):
@@ -211,14 +285,12 @@ class TestFetchCommentsHeadless(unittest.TestCase):
         call_count = {"collect": 0}
 
         def evaluate_side_effect(script, args=None):
-            if "_ikh" in script and "innerText" in script and "lines" in script:
-                # Collect-visible call in scroll loop
+            if "._5_n1" in script and "innerText" in script and "lines" in script:
                 call_count["collect"] += 1
                 if call_count["collect"] <= 1:
                     return mock_post_data
-                return []  # no more posts on subsequent rounds
+                return []
             elif "role" in script and "article" in script:
-                # Comment extraction JS
                 return js_comments
             return ""
         mock_page.evaluate.side_effect = evaluate_side_effect
