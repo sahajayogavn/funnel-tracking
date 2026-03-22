@@ -61,7 +61,7 @@ CITY_KEYWORDS = {
                 "Thanh Xuân", "Cầu Giấy", "Đống Đa", "Ba Đình", "Hoàn Kiếm",
                 "Hai Bà Trưng", "Long Biên", "Hà nội"],
     "TP. Hồ Chí Minh": ["Hồ Chí Minh", "TP.HCM", "TPHCM", "Sài Gòn", "Saigon",
-                         "Xô Viết Nghệ Tĩnh", "Bình Thạnh", "Quận 1", "Quận 3",
+                         "Bình Thạnh", "Quận 1", "Quận 3",
                          "Quận 7", "Thủ Đức", "Gò Vấp", "Tân Bình", "HCM"],
     "Đà Nẵng": ["Đà Nẵng", "Da Nang", "Đà nẵng"],
     "Huế": ["Huế", "Hue"],
