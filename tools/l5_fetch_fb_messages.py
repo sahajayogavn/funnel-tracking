@@ -40,6 +40,7 @@ from fb_pipeline.persistence.l4_sqlite_store import (
     should_fetch as shared_should_fetch,
 )
 from fb_pipeline.session.l2_bootstrap import attach_to_authorized_session, sanitize_storage_state_file
+from fb_pipeline.contracts.l1_city_llm import detect_city_llm, gather_signals_for_user
 
 # Ensure logs directory exists
 os.makedirs('./logs/', exist_ok=True)
@@ -228,6 +229,91 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
     )
 
 
+# --- Post-scrape LLM city classification ---
+# code:tool-citydetect-001:post-scrape-integration
+
+def _get_llm_config_safe() -> dict | None:
+    """Try to load LLM config. Returns None if credentials unavailable."""
+    try:
+        from tools.env_manager import load_credentials
+        creds = load_credentials()
+        api_base = creds.get("OPENAI_COMPATIBLE_URL") or os.environ.get("OPENAI_API_BASE", "")
+        api_key = creds.get("OPENAI_COMPATIBLE_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        model = creds.get("OPENAI_COMPATIBLE_MODELS") or os.environ.get("ADK_MODEL", "gpt-5.4")
+        if not api_base or not api_key:
+            return None
+        return {"api_base": api_base, "api_key": api_key, "model": model}
+    except Exception as e:
+        logger.debug(f"LLM config not available: {e}")
+        return None
+
+
+def _post_scrape_llm_city_classify(conn, page_id: str) -> dict:
+    """Run LLM city classification on all users for this page after scraping.
+
+    Classifies users whose city is 'Unknown' or was set by keyword matching.
+    Gracefully skips if LLM credentials are not available.
+    """
+    import time
+
+    llm_config = _get_llm_config_safe()
+    if not llm_config:
+        logger.info("LLM city classification skipped: no LLM credentials available.")
+        return {"llm_city_classify": "skipped", "reason": "no_credentials"}
+
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT u.thread_id, u.thread_name, u.city FROM users u
+        JOIN threads t ON u.thread_id = t.id
+        WHERE t.page_id = ?
+        ORDER BY u.last_interaction DESC
+    """, (page_id,))
+    users = cursor.fetchall()
+
+    if not users:
+        return {"llm_city_classify": "done", "total": 0, "updated": 0}
+
+    logger.info(f"LLM city classification: processing {len(users)} users for page {page_id}")
+    updated = 0
+    errors = 0
+
+    for i, user_row in enumerate(users):
+        thread_id = user_row["thread_id"]
+        old_city = user_row["city"]
+        try:
+            signals = gather_signals_for_user(conn, thread_id)
+            result = detect_city_llm(
+                thread_name=signals["thread_name"],
+                customer_messages=signals["customer_messages"],
+                page_messages=signals["page_messages"],
+                ad_content=signals["ad_content"],
+                api_base=llm_config["api_base"],
+                api_key=llm_config["api_key"],
+                model=llm_config["model"],
+            )
+            new_city = result["city"]
+            if new_city != "Unknown" and new_city != old_city:
+                cursor.execute(
+                    "UPDATE users SET city = ? WHERE thread_id = ?",
+                    (new_city, thread_id)
+                )
+                updated += 1
+                logger.info(
+                    f"LLM city [{i+1}/{len(users)}] {user_row['thread_name']}: "
+                    f"{old_city} → {new_city} [{result['confidence']}] {result['reasoning']}"
+                )
+            # Rate limiting
+            if i < len(users) - 1:
+                time.sleep(0.3)
+        except Exception as e:
+            logger.warning(f"LLM city error for {thread_id}: {e}")
+            errors += 1
+
+    conn.commit()
+    logger.info(f"LLM city classification done: {updated} updated, {errors} errors out of {len(users)} users.")
+    return {"llm_city_classify": "done", "total": len(users), "updated": updated, "errors": errors}
+
+
 # --- Action: fetch_messages (Playwright browser fetch) ---
 # code:tool-fbmessages-001:main
 
@@ -273,6 +359,10 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
 
                 logger.info("Starting direct scrape...")
                 stats = _scrape_inbox(session.page, page_id, time_range, max_threads, conn)
+
+                # Post-scrape LLM city classification
+                llm_stats = _post_scrape_llm_city_classify(conn, page_id)
+                stats["llm_city"] = llm_stats
 
                 with open(os.path.join(diag_dir, f"run_{run_ts}.log"), "w") as f:
                     f.write(f"CDP Direct Scrape: {run_ts}\n")
@@ -370,6 +460,10 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
                 page = context.new_page()
 
                 stats = _scrape_inbox(page, page_id, time_range, max_threads, conn)
+
+                # Post-scrape LLM city classification
+                llm_stats = _post_scrape_llm_city_classify(conn, page_id)
+                stats["llm_city"] = llm_stats
 
                 conn.close()
                 logger.info(f"Storage: Saved output to FrankenSQLite DB. Stats: {stats}")
@@ -885,7 +979,8 @@ def main():
     parser.add_argument("--headless", action="store_true", help="Launch the browser invisibly (headless).")
     parser.add_argument("--action", default="fetch_messages",
                         choices=["fetch_messages", "get_list_unique_user", "fetch_message_by_user",
-                                 "get_user_ad_ids", "resolve_ad_posts", "propagate_city"],
+                                 "get_user_ad_ids", "resolve_ad_posts", "propagate_city",
+                                 "classify_city_llm"],
                         help="Action to perform.")
     parser.add_argument("--refresh", action="store_true", help="Force a fresh fetch, bypassing 1-hour cache.")
     parser.add_argument("--userId", default=None, help="User ID (thread_id, phone, or email) for fetch_message_by_user.")
@@ -916,6 +1011,11 @@ def main():
         result = resolve_ad_posts(page_id, use_cdp=args.cdp)
     elif args.action == "propagate_city":
         result = propagate_city_from_ads(page_id)
+    elif args.action == "classify_city_llm":
+        conn = get_db_connection()
+        llm_result = _post_scrape_llm_city_classify(conn, page_id)
+        conn.close()
+        result = {"success": True, "action": "classify_city_llm", **llm_result}
     else:
         result = {"success": False, "error": f"Unknown action: {args.action}"}
     
