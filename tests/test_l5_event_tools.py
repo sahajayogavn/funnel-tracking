@@ -142,10 +142,19 @@ class TestFindTargetSeekers:
         from adk_agents.tools.l5_event_tools import (
             find_target_seekers_for_event, log_event_campaign
         )
-        log_event_campaign(1, "thread_hn1", "Hà Nội User 1", "Test message")
+        log_event_campaign(1, "thread_hn1", "Hà Nội User 1", "Test message", dry_run=False)
         result = find_target_seekers_for_event(event_id=1, city="Hà Nội")
         thread_ids = [s["thread_id"] for s in result["seekers"]]
         assert "thread_hn1" not in thread_ids
+
+    def test_dry_run_event_does_not_suppress_live_targeting(self, seeded_db):
+        from adk_agents.tools.l5_event_tools import (
+            find_target_seekers_for_event, log_event_campaign
+        )
+        log_event_campaign(1, "thread_hn1", "Hà Nội User 1", "Test message", dry_run=True)
+        result = find_target_seekers_for_event(event_id=1, city="Hà Nội")
+        thread_ids = [s["thread_id"] for s in result["seekers"]]
+        assert "thread_hn1" in thread_ids
 
     def test_wrong_city_returns_empty(self, seeded_db):
         from adk_agents.tools.l5_event_tools import find_target_seekers_for_event

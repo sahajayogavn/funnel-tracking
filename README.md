@@ -97,11 +97,19 @@ python tools/fetch_comments.py --pageId <PAGE_ID> --action get_comments_by_post 
 python tools/fetch_comments.py --pageId <PAGE_ID> --action get_comment_users --time_range 30d
 ```
 
+### Inbox Database Schema
+
+- **`threads`**: `id`, `page_id`, `thread_name`, `last_synced_time`
+- **`messages`**: `thread_id`, `sender`, `content`, `message_timestamp`, `seq` (UNIQUE with sender/content/timestamp)
+- **`users`**: `thread_id`, `thread_name`, `phone`, `email`, `fb_url`, `city`, `last_interaction`, `last_synced_at`
+- **`auto_replies`**: inbox reply audit log with `dry_run` support
+- **`fetch_log`**: `page_id`, `timestamp`, `threads_count`, `messages_count`
+
 ### Comment Database Schema
 
 - **`posts`**: `id`, `page_id`, `post_name`, `post_url`, `last_synced_time`
 - **`comments`**: `post_id`, `commenter_name`, `comment_text`, `fb_profile_url`, `fb_user_id`, `is_reply`, `comment_date`
-- **`comment_users`**: `post_id`, `commenter_name`, `fb_user_id`, `fb_profile_url`, `phone`, `email`, `city`, `lead_stage`
+- **`comment_users`**: `post_id`, `commenter_name`, `fb_user_id`, `fb_profile_url`, `phone`, `email`, `city`, `lead_stage`, `last_interaction`, `last_synced_at`
 - **`comment_fetch_log`**: `page_id`, `fetched_at`, `posts_found`, `comments_found`
 
 ## 📊 Data Model: Social Network → Customer Journey

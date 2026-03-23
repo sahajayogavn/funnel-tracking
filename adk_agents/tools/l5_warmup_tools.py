@@ -152,7 +152,7 @@ def was_recently_warmed_up(thread_id: str, days: int = 7) -> bool:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         row = conn.execute(
             "SELECT COUNT(*) as cnt FROM warmup_campaigns "
-            "WHERE thread_id = ? AND sent_at > ?",
+            "WHERE thread_id = ? AND sent_at > ? AND COALESCE(dry_run, 1) = 0",
             (thread_id, cutoff)
         ).fetchone()
         conn.close()

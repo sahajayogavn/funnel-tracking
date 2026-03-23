@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 from datetime import datetime
@@ -27,6 +28,14 @@ def record_fetch(page_id: str, threads_found: int, messages_found: int, conn: sq
         (page_id, datetime.now().isoformat(), threads_found, messages_found)
     )
     conn.commit()
+
+
+
+def _ensure_column(cursor: sqlite3.Cursor, table_name: str, column_name: str, column_ddl: str):
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    cols = [row[1] for row in cursor.fetchall()]
+    if column_name not in cols:
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_ddl}")
 
 
 
@@ -111,9 +120,15 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             city TEXT DEFAULT 'Unknown',
             lead_stage TEXT DEFAULT 'Intake',
             first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-            last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP
+            last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    _ensure_column(cursor, "users", "last_synced_at", "last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+    _ensure_column(cursor, "users", "temperature", "temperature TEXT DEFAULT 'warm'")
+    _ensure_column(cursor, "users", "last_warmup_at", "last_warmup_at DATETIME")
+    _ensure_column(cursor, "users", "warmup_count", "warmup_count INTEGER DEFAULT 0")
+    _ensure_column(cursor, "users", "cool_step", "cool_step INTEGER DEFAULT 0")
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_ad_ids (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,9 +157,40 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             reaction_type TEXT NOT NULL,
             agent_name TEXT DEFAULT 'reactor',
             dry_run BOOLEAN DEFAULT 1,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(item_type, item_id)
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
+    ''')
+    try:
+        cursor.execute("SELECT sql FROM sqlite_master WHERE name='reactions'")
+        table_sql = cursor.fetchone()
+        if table_sql and table_sql[0] and 'UNIQUE(item_type,item_id)' in table_sql[0].replace(' ', ''):
+            cursor.execute("ALTER TABLE reactions RENAME TO reactions_old")
+            cursor.execute('''
+                CREATE TABLE reactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_type TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    reaction_type TEXT NOT NULL,
+                    agent_name TEXT DEFAULT 'reactor',
+                    dry_run BOOLEAN DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                INSERT INTO reactions (id, item_type, item_id, reaction_type, agent_name, dry_run, created_at)
+                SELECT id, item_type, item_id, reaction_type, agent_name, COALESCE(dry_run, 1), created_at
+                FROM reactions_old
+            ''')
+            cursor.execute("DROP TABLE reactions_old")
+            if logger:
+                logger.info("Migrated reactions table: removed global UNIQUE(item_type, item_id) for dry-run-safe logging.")
+    except Exception as e:
+        if logger:
+            logger.debug(f"Reactions table migration check: {e}")
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_reactions_live_unique
+        ON reactions(item_type, item_id)
+        WHERE dry_run = 0
     ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS warmup_campaigns (
@@ -181,6 +227,37 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             dry_run BOOLEAN DEFAULT 1,
             FOREIGN KEY (event_id) REFERENCES events(id)
         )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS auto_replies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            reply_text TEXT NOT NULL,
+            agent_name TEXT DEFAULT 'responder',
+            confidence REAL DEFAULT 1.0,
+            escalated BOOLEAN DEFAULT 0,
+            dry_run BOOLEAN DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    _ensure_column(cursor, "auto_replies", "dry_run", "dry_run BOOLEAN DEFAULT 1")
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mas_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            page_id TEXT,
+            route TEXT NOT NULL,
+            subject_type TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            reason TEXT,
+            dry_run BOOLEAN DEFAULT 1,
+            payload_json TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_mas_decisions_subject_route_created
+        ON mas_decisions(subject_type, subject_id, route, created_at)
     ''')
     conn.commit()
 
@@ -234,9 +311,11 @@ def setup_comment_database(conn: sqlite3.Connection):
             lead_stage TEXT DEFAULT 'Intake',
             first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
             last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(post_id, commenter_name)
         )
     ''')
+    _ensure_column(cursor, "comment_users", "last_synced_at", "last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP")
     conn.commit()
 
 
@@ -282,3 +361,31 @@ def get_comment_db_connection(memory_dir: str = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     setup_comment_database(conn)
     return conn
+
+
+def log_mas_decision(
+    page_id: str | None,
+    route: str,
+    subject_type: str,
+    subject_id: str,
+    decision: str,
+    reason: str | None = None,
+    dry_run: bool = True,
+    payload: dict | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict:
+    owns_connection = conn is None
+    try:
+        if conn is None:
+            conn = get_db_connection()
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True) if payload is not None else None
+        cursor = conn.execute(
+            "INSERT INTO mas_decisions (page_id, route, subject_type, subject_id, decision, reason, dry_run, payload_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (page_id, route, subject_type, subject_id, decision, reason, dry_run, payload_json),
+        )
+        conn.commit()
+        return {"status": "logged", "decision_id": cursor.lastrowid}
+    finally:
+        if owns_connection and conn is not None:
+            conn.close()

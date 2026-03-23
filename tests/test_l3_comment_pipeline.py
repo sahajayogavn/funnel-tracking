@@ -73,10 +73,49 @@ class TestCommentContracts(unittest.TestCase):
         comment_count = self.conn.execute("SELECT COUNT(*) FROM comments WHERE post_id = ?", (post.post_id,)).fetchone()[0]
         self.assertEqual(comment_count, 2)
 
-        user_row = self.conn.execute("SELECT commenter_name, email, city FROM comment_users WHERE post_id = ?", (post.post_id,)).fetchone()
+        user_row = self.conn.execute("SELECT commenter_name, email, city, last_synced_at FROM comment_users WHERE post_id = ?", (post.post_id,)).fetchone()
         self.assertEqual(user_row[0], "Nguyễn Văn A")
         self.assertEqual(user_row[1], "a@test.com")
         self.assertEqual(user_row[2], "Đà Nẵng")
+        self.assertIsNotNone(user_row[3])
+
+    def test_persist_post_record_only_refreshes_last_synced_at_without_new_comment(self):
+        post = enrich_post_record(
+            build_post_record("page123", {"domIndex": 0, "name": "Post Title", "text": "Post Title\nPreview"}),
+            [
+                {"commenter_name": "Nguyễn Văn A", "comment_text": "Mình ở Đà Nẵng, email a@test.com", "timestamp": "Today", "profile_url": "https://facebook.com/nguyenvana", "fb_user_id": "nguyenvana", "is_reply": False},
+            ],
+            extract_user_info,
+            detect_city,
+            post_url="post-789",
+        )
+        persist_post_record(self.conn, post)
+
+        stale_interaction = "2000-01-01 00:00:00"
+        stale_synced = "2000-01-01 00:00:00"
+        self.conn.execute(
+            "UPDATE comment_users SET last_interaction = ?, last_synced_at = ? WHERE post_id = ? AND commenter_name = ?",
+            (stale_interaction, stale_synced, post.post_id, "Nguyễn Văn A"),
+        )
+        self.conn.commit()
+
+        resynced_post = enrich_post_record(
+            build_post_record("page123", {"domIndex": 0, "name": "Post Title", "text": "Post Title\nPreview"}),
+            [
+                {"commenter_name": "Nguyễn Văn A", "comment_text": "Mình ở Đà Nẵng, email a@test.com", "timestamp": "Today", "profile_url": "https://facebook.com/nguyenvana", "fb_user_id": "nguyenvana", "is_reply": False},
+            ],
+            extract_user_info,
+            detect_city,
+            post_url="post-789",
+        )
+        persist_post_record(self.conn, resynced_post)
+
+        user_row = self.conn.execute(
+            "SELECT last_interaction, last_synced_at FROM comment_users WHERE post_id = ? AND commenter_name = ?",
+            (post.post_id, "Nguyễn Văn A"),
+        ).fetchone()
+        self.assertEqual(user_row[0], stale_interaction)
+        self.assertNotEqual(user_row[1], stale_synced)
 
 
 if __name__ == '__main__':

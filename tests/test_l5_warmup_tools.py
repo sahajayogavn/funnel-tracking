@@ -85,8 +85,13 @@ class TestWasRecentlyWarmedUp:
 
     def test_recently_warmed_up(self, seeded_db):
         from adk_agents.tools.l5_warmup_tools import log_warmup_campaign, was_recently_warmed_up
-        log_warmup_campaign("thread_dormant_5d", "Dormant 5d", "gentle_reminder", "Hello!")
+        log_warmup_campaign("thread_dormant_5d", "Dormant 5d", "gentle_reminder", "Hello!", dry_run=False)
         assert was_recently_warmed_up("thread_dormant_5d", days=7) is True
+
+    def test_dry_run_warmup_does_not_block_live_eligibility(self, seeded_db):
+        from adk_agents.tools.l5_warmup_tools import log_warmup_campaign, was_recently_warmed_up
+        log_warmup_campaign("thread_dormant_5d", "Dormant 5d", "gentle_reminder", "Hello!", dry_run=True)
+        assert was_recently_warmed_up("thread_dormant_5d", days=7) is False
 
 
 class TestSelectWarmupStrategy:

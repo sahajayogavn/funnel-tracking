@@ -61,6 +61,7 @@ def persist_post_record(conn, post_record: EnrichedPostRecord, logger=None) -> d
     existing_post = cursor.fetchone()
 
     comments_added = 0
+    new_commenter_names = set()
     for comment in post_record.comments:
         try:
             cursor.execute(
@@ -78,6 +79,9 @@ def persist_post_record(conn, post_record: EnrichedPostRecord, logger=None) -> d
             )
             if cursor.rowcount > 0:
                 comments_added += 1
+                commenter_name = (comment.commenter_name or "").strip()
+                if commenter_name and commenter_name not in ("Page", "Unknown"):
+                    new_commenter_names.add(commenter_name)
         except Exception as e:
             if logger:
                 logger.debug(f"Duplicate or error inserting comment: {e}")
@@ -104,28 +108,53 @@ def persist_post_record(conn, post_record: EnrichedPostRecord, logger=None) -> d
         if commenter in ("Page", "Unknown", ""):
             continue
         try:
-            cursor.execute(
-                '''
-                INSERT INTO comment_users (post_id, commenter_name, fb_user_id, fb_profile_url, phone, email, city, last_interaction)
-                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                ON CONFLICT(post_id, commenter_name) DO UPDATE SET
-                    fb_user_id = COALESCE(excluded.fb_user_id, comment_users.fb_user_id),
-                    fb_profile_url = COALESCE(excluded.fb_profile_url, comment_users.fb_profile_url),
-                    phone = COALESCE(excluded.phone, comment_users.phone),
-                    email = COALESCE(excluded.email, comment_users.email),
-                    city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE comment_users.city END,
-                    last_interaction = datetime('now')
-                ''',
-                (
-                    post_record.post_id,
-                    commenter,
-                    comment.fb_user_id,
-                    comment.fb_profile_url,
-                    post_record.user_info["phone"],
-                    post_record.user_info["email"],
-                    post_record.city,
+            if commenter in new_commenter_names:
+                cursor.execute(
+                    '''
+                    INSERT INTO comment_users (post_id, commenter_name, fb_user_id, fb_profile_url, phone, email, city, last_interaction, last_synced_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    ON CONFLICT(post_id, commenter_name) DO UPDATE SET
+                        fb_user_id = COALESCE(excluded.fb_user_id, comment_users.fb_user_id),
+                        fb_profile_url = COALESCE(excluded.fb_profile_url, comment_users.fb_profile_url),
+                        phone = COALESCE(excluded.phone, comment_users.phone),
+                        email = COALESCE(excluded.email, comment_users.email),
+                        city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE comment_users.city END,
+                        last_interaction = datetime('now'),
+                        last_synced_at = datetime('now')
+                    ''',
+                    (
+                        post_record.post_id,
+                        commenter,
+                        comment.fb_user_id,
+                        comment.fb_profile_url,
+                        post_record.user_info["phone"],
+                        post_record.user_info["email"],
+                        post_record.city,
+                    )
                 )
-            )
+            else:
+                cursor.execute(
+                    '''
+                    INSERT INTO comment_users (post_id, commenter_name, fb_user_id, fb_profile_url, phone, email, city, last_synced_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    ON CONFLICT(post_id, commenter_name) DO UPDATE SET
+                        fb_user_id = COALESCE(excluded.fb_user_id, comment_users.fb_user_id),
+                        fb_profile_url = COALESCE(excluded.fb_profile_url, comment_users.fb_profile_url),
+                        phone = COALESCE(excluded.phone, comment_users.phone),
+                        email = COALESCE(excluded.email, comment_users.email),
+                        city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE comment_users.city END,
+                        last_synced_at = datetime('now')
+                    ''',
+                    (
+                        post_record.post_id,
+                        commenter,
+                        comment.fb_user_id,
+                        comment.fb_profile_url,
+                        post_record.user_info["phone"],
+                        post_record.user_info["email"],
+                        post_record.city,
+                    )
+                )
         except Exception as e:
             if logger:
                 logger.debug(f"Error upserting comment_user: {e}")

@@ -405,7 +405,7 @@ Pipeline: persisted thread data → `run_adk_pipeline()` session state injection
 | Runtime implementation | Scheduler currently uses `_select_reaction_heuristic()` in `tools/l5_scheduler.py` |
 | ADK status | `Reactor` is defined in `adk_agents/agent.py` but is not wired into the scheduler yet |
 | Action | Logs reaction decisions to `reactions`; live CDP clicking is still a stub in `apply_reaction_via_cdp()` |
-| Dry-run | Default `dry_run=True` — logs decision only |
+| Dry-run | Default `dry_run=True` — dry-run rows do not suppress later live reactions |
 
 Pipeline: `find_unreacted_items()` → `_select_reaction_heuristic()` → `log_reaction()`
 
@@ -418,7 +418,7 @@ Pipeline: `find_unreacted_items()` → `_select_reaction_heuristic()` → `log_r
 | Runtime implementation | Scheduler uses `find_dormant_seekers()`, `was_recently_warmed_up()`, and `select_warmup_strategy()` |
 | ADK status | `WarmUpComposer` is defined in `adk_agents/agent.py` but is not wired into the scheduler yet |
 | Action | Generates template-based message text and logs the attempt to `warmup_campaigns`; CDP delivery is not wired yet |
-| Constraints | Max 1 warmup per seeker per 7 days; never warmup spam/unsubscribed |
+| Constraints | Max 1 live warmup per seeker per 7 days; never warmup spam/unsubscribed |
 
 Pipeline: `find_dormant_seekers()` → `was_recently_warmed_up()` → `select_warmup_strategy()` → template message → `log_warmup_campaign()`
 
@@ -432,6 +432,7 @@ Pipeline: `find_dormant_seekers()` → `was_recently_warmed_up()` → `select_wa
 | ADK status | `EventAdvertiser` is defined in `adk_agents/agent.py` but is not wired into the scheduler yet |
 | Action | Logs candidate notifications to `event_campaigns`; CDP sending is not wired yet |
 | Strategy | `find_target_seekers_for_event()` normalizes stage aliases and prioritizes `Registered` / `Public Program Seeker` before generic `Seeker` |
+| Dry-run | Dry-run campaign rows do not suppress later live event targeting |
 
 Pipeline: `get_upcoming_events()` → `find_target_seekers_for_event()` → inline scheduler template → `log_event_campaign()`
 
@@ -446,9 +447,12 @@ CREATE TABLE IF NOT EXISTS reactions (
     reaction_type TEXT NOT NULL,   -- 'like', 'love', 'care', 'haha', 'wow', 'sad', 'angry'
     agent_name TEXT DEFAULT 'reactor',
     dry_run BOOLEAN DEFAULT 1,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(item_type, item_id)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reactions_live_unique
+ON reactions(item_type, item_id)
+WHERE dry_run = 0;
 
 -- Route 2: Warm-up campaign tracking
 CREATE TABLE IF NOT EXISTS warmup_campaigns (
@@ -485,7 +489,63 @@ CREATE TABLE IF NOT EXISTS event_campaigns (
     dry_run BOOLEAN DEFAULT 1,
     FOREIGN KEY (event_id) REFERENCES events(id)
 );
+
+-- Inbox reply audit tracking
+CREATE TABLE IF NOT EXISTS auto_replies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id TEXT NOT NULL,
+    reply_text TEXT NOT NULL,
+    agent_name TEXT DEFAULT 'responder',
+    confidence REAL DEFAULT 1.0,
+    escalated BOOLEAN DEFAULT 0,
+    dry_run BOOLEAN DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- MAS decision ledger and proactive state
+CREATE TABLE IF NOT EXISTS mas_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    page_id TEXT,
+    route TEXT NOT NULL,
+    subject_type TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT,
+    dry_run BOOLEAN DEFAULT 1,
+    payload_json TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE users ADD COLUMN temperature TEXT DEFAULT 'warm';
+ALTER TABLE users ADD COLUMN last_warmup_at DATETIME;
+ALTER TABLE users ADD COLUMN warmup_count INTEGER DEFAULT 0;
+ALTER TABLE users ADD COLUMN cool_step INTEGER DEFAULT 0;
 ```
+
+### Production MAS decision core
+
+**Universal ID**: `doc:architecture-001:mas-decision-core-001`
+
+The production rollout keeps the existing scheduler and route tools, but inserts a shared decision core between candidate discovery and action logging.
+
+Decision-core responsibilities:
+- derive a working `temperature` snapshot from `lead_stage` + inactivity while preserving hard-stop operator states such as `dormant` and `unsubscribed`
+- block proactive execution when a thread already has pending inbox follow-up or a recent live outbound touch
+- enforce route arbitration so one seeker does not receive overlapping proactive actions in the same short window
+- write every block / allow outcome to `mas_decisions` before or alongside route audit tables
+
+Route arbitration rules for the first production slice:
+- **Reactive beats proactive**: if a thread still needs inbox follow-up, block warm-up and event advertising for that thread
+- **One proactive touch at a time**: if a live warm-up, event notification, or auto-reply happened in the last 24 hours, suppress new proactive sends
+- **Warm-up cadence**: live warm-up remains capped at 1 send per 7 days per thread
+- **Dormant quarterly events**: `temperature = 'dormant'` may receive event outreach only when no live event campaign was logged in the last 90 days
+- **Hard stops**: `spam`, `unsubscribed`, and operator-marked `temperature = 'unsubscribed'` never receive proactive outreach
+
+Rollout path:
+1. add schema + ledger + scheduler-side eligibility checks without changing existing fetch/reply interfaces
+2. keep message generation as-is (heuristic/template) while decisioning becomes centralized and auditable
+3. later swap route content generation to ADK `Reactor`, `WarmUpComposer`, and `EventAdvertiser`
+4. only after ledger + QA gates hold steady, wire real CDP delivery for warm-up / event / reactions
 
 ### Operational Surface
 
@@ -535,10 +595,19 @@ Page (page_id)
 ├── Thread (thread_id)
 │   ├── Message
 │   ├── users CRM table
-│   └── user_ad_ids / ad_posts
+│   ├── user_ad_ids / ad_posts
+│   └── auto_replies audit trail
 └── Unified User Identity
     └── Customer Journey: Unknown → Seeker → ... → Sahaja Mahayogi
 ```
+
+Inbox CRM timing state:
+- `users.last_interaction` advances only when a newly inserted customer message is observed
+- `users.last_synced_at` advances on scrape sync even when there is no new customer activity
+
+Comment CRM timing state:
+- `comment_users.last_interaction` advances only when a newly inserted comment is observed for that commenter
+- `comment_users.last_synced_at` advances on scrape sync even when no new comment was inserted
 
 ## Seeker Journey Stages
 

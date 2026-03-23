@@ -71,8 +71,9 @@ python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_message_by_u
 ### Database Schema (FrankenSQLite)
 
 - **`threads`**: `id`, `page_id`, `thread_name`, `last_synced_time`
-- **`messages`**: `thread_id`, `sender`, `content`, `message_timestamp` (UNIQUE)
-- **`users`**: `thread_id`, `thread_name`, `phone`, `email`, `fb_url`, `city`, `last_interaction`
+- **`messages`**: `thread_id`, `sender`, `content`, `message_timestamp`, `seq` (UNIQUE cùng sender/content/timestamp)
+- **`users`**: `thread_id`, `thread_name`, `phone`, `email`, `fb_url`, `city`, `last_interaction`, `last_synced_at`
+- **`auto_replies`**: nhật ký audit trả lời inbox có hỗ trợ `dry_run`
 - **`fetch_log`**: `page_id`, `timestamp`, `threads_count`, `messages_count`
 
 ## 🛤 Các giai đoạn seeker

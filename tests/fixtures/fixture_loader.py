@@ -20,7 +20,7 @@ def load_fixture(name: str) -> dict:
 
 
 def create_test_db() -> sqlite3.Connection:
-    """Create an in-memory SQLite DB with full schema (inbox + comments + auto_replies)."""
+    """Create an in-memory SQLite DB with full schema (inbox + comments)."""
     import sys
     project_root = os.path.dirname(os.path.dirname(FIXTURES_DIR))
     if project_root not in sys.path:
@@ -31,20 +31,6 @@ def create_test_db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     setup_database(conn)
-
-    # Add auto_replies table (used by L5 seeker tools)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS auto_replies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            thread_id TEXT NOT NULL,
-            reply_text TEXT NOT NULL,
-            agent_name TEXT DEFAULT 'responder',
-            confidence REAL DEFAULT 1.0,
-            escalated BOOLEAN DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
     return conn
 
 

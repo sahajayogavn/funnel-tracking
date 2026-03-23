@@ -49,5 +49,45 @@ class TestCommentShouldFetch(unittest.TestCase):
         self.assertFalse(should_fetch_comments("page123", self.conn))
 
 
+class TestCommentSchemaMigrations(unittest.TestCase):
+    def setUp(self):
+        self._tmp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self._tmp_dir, "test.db")
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
+
+    def test_setup_comment_database_adds_last_synced_at_column(self):
+        self.conn.execute(
+            '''
+            CREATE TABLE comment_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id TEXT,
+                commenter_name TEXT,
+                fb_user_id TEXT,
+                fb_profile_url TEXT,
+                phone TEXT,
+                email TEXT,
+                city TEXT DEFAULT 'Unknown',
+                lead_stage TEXT DEFAULT 'Intake',
+                first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(post_id, commenter_name)
+            )
+            '''
+        )
+        self.conn.commit()
+
+        setup_comment_database(self.conn)
+
+        cols = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(comment_users)").fetchall()
+        }
+        self.assertIn("last_synced_at", cols)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -43,6 +43,7 @@ def find_unreacted_items(page_id: str, limit: int = 20) -> dict:
                 SELECT 1 FROM reactions r
                 WHERE r.item_type = 'message'
                 AND r.item_id = CAST(m.id AS TEXT)
+                AND COALESCE(r.dry_run, 1) = 0
             )
             ORDER BY m.id DESC
             LIMIT ?
@@ -72,6 +73,7 @@ def find_unreacted_items(page_id: str, limit: int = 20) -> dict:
                 SELECT 1 FROM reactions r
                 WHERE r.item_type = 'comment'
                 AND r.item_id = CAST(c.id AS TEXT)
+                AND COALESCE(r.dry_run, 1) = 0
             )
             ORDER BY c.id DESC
             LIMIT ?

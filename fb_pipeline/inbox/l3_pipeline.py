@@ -89,6 +89,7 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
 def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city) -> dict:
     cursor = conn.cursor()
     messages_added = 0
+    new_customer_message_added = False
     ad_context = thread_record.ad_context
 
     for idx, msg in enumerate(thread_record.messages):
@@ -107,6 +108,8 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
         )
         if cursor.rowcount > 0:
             messages_added += 1
+            if msg.sender == "Customer":
+                new_customer_message_added = True
 
     cursor.execute('''
         INSERT INTO threads (id, page_id, thread_name, last_synced_time)
@@ -137,23 +140,43 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             ''', (aid, ad_context, ad_city))
 
     user_info = thread_record.user_info
-    cursor.execute('''
-        INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, last_interaction)
-        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-        ON CONFLICT(thread_id) DO UPDATE SET
-            phone = COALESCE(excluded.phone, users.phone),
-            email = COALESCE(excluded.email, users.email),
-            fb_url = COALESCE(excluded.fb_url, users.fb_url),
-            city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE users.city END,
-            last_interaction = datetime('now')
-    ''', (
-        thread_record.thread_id,
-        thread_record.thread_name,
-        user_info.get("phone"),
-        user_info.get("email"),
-        thread_record.fb_url,
-        thread_record.city,
-    ))
+    if new_customer_message_added:
+        cursor.execute('''
+            INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, last_interaction, last_synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            ON CONFLICT(thread_id) DO UPDATE SET
+                phone = COALESCE(excluded.phone, users.phone),
+                email = COALESCE(excluded.email, users.email),
+                fb_url = COALESCE(excluded.fb_url, users.fb_url),
+                city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE users.city END,
+                last_interaction = datetime('now'),
+                last_synced_at = datetime('now')
+        ''', (
+            thread_record.thread_id,
+            thread_record.thread_name,
+            user_info.get("phone"),
+            user_info.get("email"),
+            thread_record.fb_url,
+            thread_record.city,
+        ))
+    else:
+        cursor.execute('''
+            INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, last_synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(thread_id) DO UPDATE SET
+                phone = COALESCE(excluded.phone, users.phone),
+                email = COALESCE(excluded.email, users.email),
+                fb_url = COALESCE(excluded.fb_url, users.fb_url),
+                city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE users.city END,
+                last_synced_at = datetime('now')
+        ''', (
+            thread_record.thread_id,
+            thread_record.thread_name,
+            user_info.get("phone"),
+            user_info.get("email"),
+            thread_record.fb_url,
+            thread_record.city,
+        ))
 
     conn.commit()
     return {

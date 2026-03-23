@@ -81,6 +81,7 @@ class TestInboxContracts(unittest.TestCase):
         user = self.conn.execute("SELECT * FROM users WHERE thread_id = ?", (thread_record.thread_id,)).fetchone()
         self.assertEqual(user["fb_url"], "selected456")
         self.assertEqual(user["city"], "Hà Nội")
+        self.assertIsNotNone(user["last_synced_at"])
 
         ad = self.conn.execute("SELECT * FROM ad_posts WHERE ad_id = '6930299765389'").fetchone()
         self.assertEqual(ad["city"], "Hà Nội")
@@ -88,6 +89,50 @@ class TestInboxContracts(unittest.TestCase):
         msgs = self.conn.execute("SELECT content, seq FROM messages WHERE thread_id = ? ORDER BY seq", (thread_record.thread_id,)).fetchall()
         self.assertIn("--- [AD SOURCE]: Thiền miễn phí tại Hà Nội ---", msgs[0]["content"])
         self.assertEqual(msgs[1]["seq"], 1)
+
+    def test_persist_thread_record_only_refreshes_last_synced_at_without_new_customer_message(self):
+        thread_record = enrich_thread_record(
+            build_thread_record("page1", {"name": "User A", "text": "User A\nPreview"}),
+            [
+                {"sender": "Customer", "text": "Xin chào", "timestamp": "Today"},
+                {"sender": "Page", "text": "Địa chỉ: 40 Vương Thừa Vũ", "timestamp": "Today"},
+            ],
+            extract_user_info,
+            detect_city,
+            ad_context="Thiền miễn phí tại Hà Nội",
+            fb_url="selected456",
+            ad_ids=["6930299765389"],
+        )
+        persist_thread_record(self.conn, thread_record, detect_city)
+
+        stale_interaction = "2000-01-01 00:00:00"
+        stale_synced = "2000-01-01 00:00:00"
+        self.conn.execute(
+            "UPDATE users SET last_interaction = ?, last_synced_at = ? WHERE thread_id = ?",
+            (stale_interaction, stale_synced, thread_record.thread_id),
+        )
+        self.conn.commit()
+
+        resynced_record = enrich_thread_record(
+            build_thread_record("page1", {"name": "User A", "text": "User A\nPreview"}),
+            [
+                {"sender": "Customer", "text": "Xin chào", "timestamp": "Today"},
+                {"sender": "Page", "text": "Lớp tiếp theo vào Chủ Nhật", "timestamp": "Tomorrow"},
+            ],
+            extract_user_info,
+            detect_city,
+            ad_context="Thiền miễn phí tại Hà Nội",
+            fb_url="selected456",
+            ad_ids=["6930299765389"],
+        )
+        persist_thread_record(self.conn, resynced_record, detect_city)
+
+        user = self.conn.execute(
+            "SELECT last_interaction, last_synced_at FROM users WHERE thread_id = ?",
+            (thread_record.thread_id,),
+        ).fetchone()
+        self.assertEqual(user["last_interaction"], stale_interaction)
+        self.assertNotEqual(user["last_synced_at"], stale_synced)
 
 
 if __name__ == '__main__':

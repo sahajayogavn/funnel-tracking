@@ -56,7 +56,7 @@ def navigate_to_thread(page, page_id: str, thread_name: str) -> bool:
 
 
 def log_auto_reply(thread_id: str, reply_text: str, agent_name: str = "responder",
-                   escalated: bool = False) -> dict:
+                   escalated: bool = False, dry_run: bool = True) -> dict:
     """Log an auto-generated reply to FrankenSQLite.
 
     Args:
@@ -64,31 +64,21 @@ def log_auto_reply(thread_id: str, reply_text: str, agent_name: str = "responder
         reply_text: The generated reply text.
         agent_name: Which agent created this reply (default: responder).
         escalated: Whether this was escalated to human review.
+        dry_run: Whether this was a dry-run-only typed reply.
 
     Returns:
         dict: Status of the logging operation.
     """
     try:
         conn = get_db_connection()
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS auto_replies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                thread_id TEXT NOT NULL,
-                reply_text TEXT NOT NULL,
-                agent_name TEXT DEFAULT 'responder',
-                confidence REAL DEFAULT 1.0,
-                escalated BOOLEAN DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
         conn.execute(
-            "INSERT INTO auto_replies (thread_id, reply_text, agent_name, escalated) "
-            "VALUES (?, ?, ?, ?)",
-            (thread_id, reply_text, agent_name, escalated)
+            "INSERT INTO auto_replies (thread_id, reply_text, agent_name, escalated, dry_run) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (thread_id, reply_text, agent_name, escalated, dry_run)
         )
         conn.commit()
         conn.close()
-        return {"status": "logged", "thread_id": thread_id}
+        return {"status": "logged", "thread_id": thread_id, "dry_run": dry_run}
     except Exception as e:
         logger.error(f"Failed to log reply: {e}")
         return {"status": "error", "error": str(e)}

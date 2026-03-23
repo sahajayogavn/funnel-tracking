@@ -133,6 +133,7 @@ def find_target_seekers_for_event(event_id: int, city: str,
             AND NOT EXISTS (
                 SELECT 1 FROM event_campaigns ec
                 WHERE ec.event_id = ? AND ec.thread_id = u.thread_id
+                AND COALESCE(ec.dry_run, 1) = 0
             )
             ORDER BY u.last_interaction DESC
             LIMIT ?

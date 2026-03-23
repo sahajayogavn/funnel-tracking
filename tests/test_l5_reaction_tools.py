@@ -101,11 +101,18 @@ class TestFindUnreactedItems:
 
     def test_excludes_already_reacted(self, seeded_db):
         from adk_agents.tools.l5_reaction_tools import find_unreacted_items, log_reaction
-        # React to message 1
-        log_reaction("message", "1", "love")
+        # Live reaction suppresses future selection
+        log_reaction("message", "1", "love", dry_run=False)
         result = find_unreacted_items("119587786260266")
         msg_ids = [i["item_id"] for i in result["items"] if i["item_type"] == "message"]
         assert "1" not in msg_ids
+
+    def test_dry_run_reaction_does_not_suppress_live_selection(self, seeded_db):
+        from adk_agents.tools.l5_reaction_tools import find_unreacted_items, log_reaction
+        log_reaction("message", "1", "love", dry_run=True)
+        result = find_unreacted_items("119587786260266")
+        msg_ids = [i["item_id"] for i in result["items"] if i["item_type"] == "message"]
+        assert "1" in msg_ids
 
 
 class TestLogReaction:

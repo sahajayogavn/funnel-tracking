@@ -31,9 +31,10 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from playwright.sync_api import sync_playwright
 
-from fb_pipeline.contracts.l1_inbox import parse_page_id
+from fb_pipeline.browser.l3_inbox import extract_ad_id_labels
+from fb_pipeline.contracts.l1_inbox import detect_city, extract_user_info, parse_page_id
 from fb_pipeline.inbox.l3_pipeline import scrape_inbox
-from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+from fb_pipeline.persistence.l4_sqlite_store import get_db_connection, record_fetch
 from fb_pipeline.session.l2_bootstrap import attach_to_authorized_session
 
 # Setup logging
@@ -227,7 +228,13 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
     sent = send_reply_via_cdp(cdp_page, reply_text, dry_run=dry_run)
 
     # 6. Log the auto-reply
-    log_auto_reply(thread_id, reply_text, agent_name="responder", escalated=False)
+    log_auto_reply(
+        thread_id,
+        reply_text,
+        agent_name="responder",
+        escalated=False,
+        dry_run=dry_run,
+    )
 
     mode = "typed (not sent)" if dry_run else "sent"
     logger.info(f"Reply {mode} for {thread_name}: {reply_text[:60]}...")
@@ -273,7 +280,18 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
 
             # Step 1: Fetch new inbox messages
             logger.info(f"Step 1: Fetching inbox for page {page_id}...")
-            scrape_stats = scrape_inbox(cdp_page, page_id, "1d", 50, conn)
+            scrape_stats = scrape_inbox(
+                cdp_page,
+                page_id,
+                "1d",
+                50,
+                conn,
+                logger,
+                record_fetch,
+                extract_ad_id_labels,
+                extract_user_info,
+                detect_city,
+            )
             logger.info(f"Scrape stats: {scrape_stats}")
 
             conn.close()

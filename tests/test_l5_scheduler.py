@@ -6,6 +6,8 @@ Tests schedule registration, route enable/disable, and scheduler loop logic.
 """
 import os
 import sys
+from datetime import datetime
+
 import pytest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -101,6 +103,55 @@ class TestReactionHeuristic:
         from tools.l5_scheduler import _select_reaction_heuristic
         result = _select_reaction_heuristic({"content": None})
         assert result == "like"
+
+
+class TestDecisionCore:
+    def test_compute_temperature_respects_manual_unsubscribed_state(self):
+        from tools.l5_scheduler import _compute_temperature
+        assert _compute_temperature("Seeker", "2026-03-01T00:00:00", "unsubscribed") == "unsubscribed"
+
+    def test_compute_temperature_for_recent_registered_thread(self):
+        from tools.l5_scheduler import _compute_temperature
+        recent = datetime.now().isoformat()
+        assert _compute_temperature("Seeker_Public_Program", recent, None) == "hot"
+
+    def test_compute_temperature_for_old_seeker_thread(self):
+        from tools.l5_scheduler import _compute_temperature
+        old = "2026-01-01T00:00:00"
+        assert _compute_temperature("Seeker", old, None) == "cold"
+
+    def test_evaluate_proactive_eligibility_blocks_pending_reply(self, monkeypatch):
+        import tools.l5_scheduler as sched
+        monkeypatch.setattr(sched, "_load_user_state", lambda thread_id: {
+            "thread_id": thread_id,
+            "lead_stage": "Seeker",
+            "last_interaction": datetime.now().isoformat(),
+            "temperature": None,
+        })
+        monkeypatch.setattr(sched, "_thread_has_pending_reply", lambda page_id, thread_id: True)
+        monkeypatch.setattr(sched, "_recent_live_touch_exists", lambda thread_id, since_hours=24: False)
+        monkeypatch.setattr(sched, "_has_recent_live_event", lambda thread_id, since_days=90: False)
+
+        eligible, reason, payload = sched._evaluate_proactive_eligibility("page123", "warmup", "thread_1")
+        assert eligible is False
+        assert reason == "pending_inbox_reply"
+        assert payload["thread_id"] == "thread_1"
+
+    def test_evaluate_proactive_eligibility_blocks_dormant_quarterly_limit(self, monkeypatch):
+        import tools.l5_scheduler as sched
+        monkeypatch.setattr(sched, "_load_user_state", lambda thread_id: {
+            "thread_id": thread_id,
+            "lead_stage": "Seeker",
+            "last_interaction": "2026-01-01T00:00:00",
+            "temperature": "dormant",
+        })
+        monkeypatch.setattr(sched, "_thread_has_pending_reply", lambda page_id, thread_id: False)
+        monkeypatch.setattr(sched, "_recent_live_touch_exists", lambda thread_id, since_hours=24: False)
+        monkeypatch.setattr(sched, "_has_recent_live_event", lambda thread_id, since_days=90: True)
+
+        eligible, reason, _ = sched._evaluate_proactive_eligibility("page123", "event", "thread_1")
+        assert eligible is False
+        assert reason == "dormant_quarterly_limit"
 
 
 class TestGracefulShutdown:

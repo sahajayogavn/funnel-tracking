@@ -100,19 +100,6 @@ def find_unreplied_threads(page_id: str, limit: int = 10) -> dict:
     """
     try:
         conn = get_db_connection()
-        # Ensure auto_replies table exists (FrankenSQLite schema extension)
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS auto_replies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                thread_id TEXT NOT NULL,
-                reply_text TEXT NOT NULL,
-                agent_name TEXT DEFAULT 'responder',
-                confidence REAL DEFAULT 1.0,
-                escalated BOOLEAN DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.commit()
 
         rows = conn.execute('''
             SELECT DISTINCT t.id, t.thread_name
@@ -123,6 +110,7 @@ def find_unreplied_threads(page_id: str, limit: int = 10) -> dict:
             AND NOT EXISTS (
                 SELECT 1 FROM auto_replies ar
                 WHERE ar.thread_id = t.id
+                AND COALESCE(ar.dry_run, 1) = 0
                 AND ar.created_at > datetime(m.timestamp, '-1 hour')
             )
             ORDER BY m.timestamp DESC

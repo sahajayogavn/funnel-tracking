@@ -312,7 +312,7 @@ class TestL4PersistenceAndReadback(unittest.TestCase):
             store_mod.get_db_connection = original_get_db
 
     def test_log_auto_reply_marks_thread_replied(self):
-        """Test 12: After log_auto_reply(), thread is no longer unreplied."""
+        """Test 12: After a live log_auto_reply(), thread is no longer unreplied."""
         import fb_pipeline.persistence.l4_sqlite_store as store_mod
         original_get_db = store_mod.get_db_connection
 
@@ -344,7 +344,8 @@ class TestL4PersistenceAndReadback(unittest.TestCase):
             log_result = ft_mod.log_auto_reply(
                 self.thread_id,
                 "Chào bạn! Cảm ơn bạn đã quan tâm.",
-                agent_name="responder"
+                agent_name="responder",
+                dry_run=False,
             )
             self.assertEqual(log_result["status"], "logged")
 
