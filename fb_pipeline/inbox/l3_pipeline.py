@@ -5,6 +5,7 @@ from fb_pipeline.contracts.l1_inbox import (
     SeekerInfo,
     ThreadRecord,
     detect_city,
+    detect_city_smart,
     extract_user_info,
     parse_ad_ids,
 )
@@ -30,7 +31,13 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
                          ad_ids: list | None = None) -> EnrichedThreadRecord:
     db_msgs = [{"sender": m.get("sender"), "content": m.get("text", "")} for m in js_messages]
     user_info = extract_user_info(db_msgs, thread_record.thread_name, ad_context)
-    city = detect_city(ad_context, db_msgs)
+    # code:tool-citydetect-001:smart-detect-integration
+    # Use LLM-first city detection with all message signals
+    city = detect_city_smart(
+        ad_context, db_msgs,
+        thread_name=thread_record.thread_name,
+        customer_messages=db_msgs,
+    )
     normalized_messages = []
     for idx, msg in enumerate(js_messages):
         text = (msg.get("text") or "").strip()

@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-03-23T13:22:20.316335",
+  "timestamp": "2026-03-23T16:54:03.115205",
   "page_id": "1548373332058326",
   "summary": {
     "total": 10,
-    "passed": 6,
-    "failed": 4
+    "passed": 10,
+    "failed": 0
   },
   "threads": [
     {
@@ -175,7 +175,7 @@
         },
         "phone": "0393084936",
         "email": null,
-        "city": "TP. Hồ Chí Minh",
+        "city": "Đà Nẵng",
         "sample_messages": [
           "--- [AD SOURCE]: Mar 4, 2026, 6:53 PM\nChương trình có mất phí không?\nHoàn toàn m",
           "Chào Thanh! Chúng tôi có thể giúp gì cho bạn?",
@@ -187,9 +187,9 @@
         "message_count": "PASSED (25 vs 25, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
-        "city": "FAILED"
+        "city": "PASSED"
       },
-      "overall": "FAILED"
+      "overall": "PASSED"
     },
     {
       "thread_name": "Thị Thứ Nguyễn",
@@ -221,7 +221,7 @@
         },
         "phone": "0779026129",
         "email": null,
-        "city": "TP. Hồ Chí Minh",
+        "city": "Đà Nẵng",
         "sample_messages": [
           "--- [AD SOURCE]: This chat contains a reply to your ad.\nKHAI GIẢNG LỚP THIỀN ONL",
           "Chào Thị Thứ! Chúng tôi có thể giúp gì cho bạn?",
@@ -233,9 +233,9 @@
         "message_count": "PASSED (24 vs 24, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
-        "city": "FAILED"
+        "city": "PASSED"
       },
-      "overall": "FAILED"
+      "overall": "PASSED"
     },
     {
       "thread_name": "Chi-e Mymy",
@@ -267,7 +267,7 @@
         },
         "phone": "0905761156",
         "email": null,
-        "city": "TP. Hồ Chí Minh",
+        "city": "Đà Nẵng",
         "sample_messages": [
           "Dạ em chào Ad ạ",
           "Ad cho e dky khoá thiền 8/3 tại đà nẵng ạ",
@@ -279,9 +279,9 @@
         "message_count": "PASSED (22 vs 22, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
-        "city": "FAILED"
+        "city": "PASSED"
       },
-      "overall": "FAILED"
+      "overall": "PASSED"
     },
     {
       "thread_name": "Huỳnh Thiệu Phong",
@@ -313,7 +313,7 @@
         },
         "phone": "0905526780",
         "email": null,
-        "city": "TP. Hồ Chí Minh",
+        "city": "Đà Nẵng",
         "sample_messages": [
           "Hà Lê replied to an ad.",
           "Chào Hà! Chúng tôi có thể giúp gì cho bạn?",
@@ -325,9 +325,9 @@
         "message_count": "PASSED (22 vs 22, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
-        "city": "FAILED"
+        "city": "PASSED"
       },
-      "overall": "FAILED"
+      "overall": "PASSED"
     },
     {
       "thread_name": "Hung Bui",

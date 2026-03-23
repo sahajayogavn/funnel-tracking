@@ -178,10 +178,17 @@ def method2_llm_db_analysis(conn: sqlite3.Connection, thread: dict) -> dict:
     # matching L1 detect_city contract which only checks Page sender)
     city_keywords = {
         "Hà Nội": ["Hà Nội", "Ha Noi", "Vương Thừa Vũ", "Khương Đình",
-                     "Thanh Xuân", "Cầu Giấy", "Đống Đa", "Ba Đình"],
+                     "Thanh Xuân", "Cầu Giấy", "Đống Đa", "Ba Đình",
+                     "Khương Trung", "Hoàn Kiếm", "Hai Bà Trưng",
+                     "Long Biên", "Hà nội"],
         "TP. Hồ Chí Minh": ["Hồ Chí Minh", "TP.HCM", "TPHCM", "Sài Gòn",
-                              "Xô Viết Nghệ Tĩnh", "Bình Thạnh", "HCM"],
-        "Đà Nẵng": ["Đà Nẵng", "Da Nang"],
+                              "Saigon", "Bình Thạnh", "Quận 1", "Quận 3",
+                              "Quận 7", "Thủ Đức", "Gò Vấp", "Tân Bình", "HCM"],
+        "Đà Nẵng": ["Đà Nẵng", "Da Nang", "Đà nẵng"],
+        "Huế": ["Huế", "Hue"],
+        "Hội An": ["Hội An", "Hoi An"],
+        "Nghệ An": ["Nghệ An", "Nghe An", "Vinh"],
+        "Hải Phòng": ["Hải Phòng", "Hai Phong"],
         "Online": ["online", "Online", "zoom", "Zoom", "trực tuyến"],
     }
     # Only scan Page-sender messages (L1 detect_city only checks Page sender)

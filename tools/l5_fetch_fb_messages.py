@@ -21,6 +21,7 @@ from fb_pipeline.contracts.l1_inbox import (
     SeekerInfo,
     ThreadRecord,
     detect_city as shared_detect_city,
+    detect_city_smart as shared_detect_city_smart,
     extract_user_info as shared_extract_user_info,
     parse_page_id as shared_parse_page_id,
 )
@@ -116,8 +117,8 @@ def extract_ad_id_labels(page) -> list:
 
 # code:tool-fbmessages-002:city-detect
 def detect_city(ad_context: str, page_messages: list) -> str:
-    """Detect city from ad context or page-sent messages using keyword matching."""
-    return shared_detect_city(ad_context, page_messages)
+    """Detect city using LLM-first with rule-based fallback."""
+    return shared_detect_city_smart(ad_context, page_messages)
 
 
 # --- DB Setup ---

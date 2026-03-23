@@ -3,6 +3,9 @@
 This file documents the core operational rules and architectural patterns for the AI agents working in this repository.
 **ALL UPDATES TO THIS FILE MUST BE IN ENGLISH.**
 
+> **⚠️ SYNC RULE: `GEMINI.md` ↔ `CLAUDE.md` are paired files and MUST always have identical content.**
+> Whenever you modify `GEMINI.md`, you MUST immediately apply the same changes to `CLAUDE.md`, and vice versa. Never update one without the other.
+
 ## 1. Project Directory Structure
 
 The repository is structured to support Agile XP methodologies for AI Agents, ensuring separation of rules, workflows, agent memory, and executed code.
