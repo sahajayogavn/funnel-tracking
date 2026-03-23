@@ -363,6 +363,138 @@ The MAS boundary is currently defined at the inbox enrichment layer and consumed
 
 This means the MAS layer depends on shared pipeline contracts and stored inbox state, not on raw DOM scraping details.
 
+## MAS Trigger Routes
+
+The MAS currently exposes one production-wired inbox ADK flow plus three scheduled route scaffolds in `tools/l5_scheduler.py`.
+
+### Trigger Architecture
+
+```text
+┌──────────────────────────────────────────────────────────────────────┐
+│  l5_scheduler.py  (unified daemon, runs on local Mac)               │
+│                                                                      │
+│  every 15 min ──→ fetch inbox + comments (existing L5 wrappers)     │
+│  every 15 min ──→ Route 1: reaction heuristic + reaction logging    │
+│  every 15 min ──→ Inbox Reply: ADK Classifier → Responder           │
+│  every day 9AM ─→ Route 2: strategy/template warm-up logging        │
+│  every day 10AM → Route 3: event targeting + notification logging   │
+│                                                                      │
+│  Shared state: FrankenSQLite + L5 wrappers; only inbox reply        │
+│  currently runs through an ADK Runner end-to-end                    │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Inbox Reply (ADK-backed production flow)
+
+| Aspect | Detail |
+| --- | --- |
+| Trigger | Every 15 minutes via `run_reply_cycle()` or manually via `tools/l5_inbox_mas_runner.py` |
+| Input | Persisted thread messages + seeker CRM context from FrankenSQLite |
+| ADK agents | `MessageClassifier` → `Responder` |
+| Knowledge source | `load_knowledge_context()` loads `SOUL.md`, `faq.md`, `lop-hoc.md`, `su-kien.md`, `research.md`, and `mas_strategy.md` into session `knowledge_context` |
+| Action | Drafts reply text, navigates to thread, types the reply, and optionally sends in live mode |
+
+Pipeline: persisted thread data → `run_adk_pipeline()` session state injection → `MessageClassifier` → `Responder` → `send_reply_via_cdp()` → `log_auto_reply()`
+
+### Route 1: React (Reaction to New Messages/Comments)
+
+| Aspect | Detail |
+| --- | --- |
+| Trigger | Every 15 minutes (post-fetch) |
+| Input | Unreacted messages and comments from FrankenSQLite |
+| Runtime implementation | Scheduler currently uses `_select_reaction_heuristic()` in `tools/l5_scheduler.py` |
+| ADK status | `Reactor` is defined in `adk_agents/agent.py` but is not wired into the scheduler yet |
+| Action | Logs reaction decisions to `reactions`; live CDP clicking is still a stub in `apply_reaction_via_cdp()` |
+| Dry-run | Default `dry_run=True` — logs decision only |
+
+Pipeline: `find_unreacted_items()` → `_select_reaction_heuristic()` → `log_reaction()`
+
+### Route 2: Warm-up (Proactive Dormant Seeker Nurturing)
+
+| Aspect | Detail |
+| --- | --- |
+| Trigger | Daily at configurable time (default 9:00 AM) |
+| Input | Dormant seekers from `users` table (last_interaction > N days) |
+| Runtime implementation | Scheduler uses `find_dormant_seekers()`, `was_recently_warmed_up()`, and `select_warmup_strategy()` |
+| ADK status | `WarmUpComposer` is defined in `adk_agents/agent.py` but is not wired into the scheduler yet |
+| Action | Generates template-based message text and logs the attempt to `warmup_campaigns`; CDP delivery is not wired yet |
+| Constraints | Max 1 warmup per seeker per 7 days; never warmup spam/unsubscribed |
+
+Pipeline: `find_dormant_seekers()` → `was_recently_warmed_up()` → `select_warmup_strategy()` → template message → `log_warmup_campaign()`
+
+### Route 3: Event Advertising (City-Targeted Notifications)
+
+| Aspect | Detail |
+| --- | --- |
+| Trigger | Daily at configurable time (default 10:00 AM) |
+| Input | Upcoming events from `events` plus seekers matched by city |
+| Runtime implementation | Scheduler builds a plain text notification inline after querying events/targets |
+| ADK status | `EventAdvertiser` is defined in `adk_agents/agent.py` but is not wired into the scheduler yet |
+| Action | Logs candidate notifications to `event_campaigns`; CDP sending is not wired yet |
+| Strategy | `find_target_seekers_for_event()` normalizes stage aliases and prioritizes `Registered` / `Public Program Seeker` before generic `Seeker` |
+
+Pipeline: `get_upcoming_events()` → `find_target_seekers_for_event()` → inline scheduler template → `log_event_campaign()`
+
+### Extended DB Schema (Trigger Routes)
+
+```sql
+-- Route 1: Reaction tracking
+CREATE TABLE IF NOT EXISTS reactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_type TEXT NOT NULL,       -- 'message' or 'comment'
+    item_id TEXT NOT NULL,         -- thread_id or comment row id
+    reaction_type TEXT NOT NULL,   -- 'like', 'love', 'care', 'haha', 'wow', 'sad', 'angry'
+    agent_name TEXT DEFAULT 'reactor',
+    dry_run BOOLEAN DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(item_type, item_id)
+);
+
+-- Route 2: Warm-up campaign tracking
+CREATE TABLE IF NOT EXISTS warmup_campaigns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id TEXT NOT NULL,
+    seeker_name TEXT,
+    journey_stage TEXT,
+    strategy_type TEXT,
+    message_text TEXT NOT NULL,
+    sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    dry_run BOOLEAN DEFAULT 1,
+    response_received BOOLEAN DEFAULT 0,
+    response_at DATETIME
+);
+
+-- Route 3: Event catalog
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    city TEXT NOT NULL,
+    event_date TEXT NOT NULL,
+    description TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Route 3: Event campaign tracking
+CREATE TABLE IF NOT EXISTS event_campaigns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    thread_id TEXT NOT NULL,
+    seeker_name TEXT,
+    message_text TEXT NOT NULL,
+    sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    dry_run BOOLEAN DEFAULT 1,
+    FOREIGN KEY (event_id) REFERENCES events(id)
+);
+```
+
+### Operational Surface
+
+| Command | Purpose |
+| --- | --- |
+| `python tools/scheduler.py --page-id <id>` | Start unified daemon (all routes, dry-run) |
+| `python tools/scheduler.py --page-id <id> --live` | Start daemon in live mode |
+| `python tools/scheduler.py --page-id <id> --routes react,warmup` | Enable specific routes only |
+
 ## Operational Entry Points
 
 ### Operator commands
@@ -410,16 +542,14 @@ Page (page_id)
 
 ## Seeker Journey Stages
 
-| # | Stage | Description |
-| --- | --- | --- |
-| 0 | Unknown | Not yet identified |
-| 1 | Seeker | First interaction with Page |
-| 2 | Public Program Seeker | Attending public meditation programs |
-| 3 | 18-Week Seeker | Enrolled in deep learning course |
-| 4 | Seed | Foundation of Sahaja Yoga |
-| 5 | Sahaja Yogi | Regular practitioner |
-| 6 | Dedicated Sahaja Yogi | Fully dedicated |
-| 7 | Sahaja Mahayogi | Highest spiritual dedication |
+| # | Strategy stage | Runtime / DB values | Description |
+| --- | --- | --- | --- |
+| 0 | User | `User`, legacy `Intake` | Not yet identified or only minimally known |
+| 1 | Follower | `Seeker` | Early engagement with Page or community touch-points |
+| 2 | Curious Seeker | `Seeker` | Asking about classes, programs, or next steps |
+| 3 | Registered | `Seeker_Public_Program`, normalized display `Public Program Seeker` | Has shared registration details for a class or program |
+| 4 | Deep Learner | `Seeker_18_Weeks`, normalized display `18-Week Seeker` | Continuing in longer-form class journey |
+| 5 | Sahaja Yogi | `Seed` → `Sahaja_Mahayogi` | Ongoing practitioner path beyond seeker onboarding |
 
 ## Tech Stack
 
