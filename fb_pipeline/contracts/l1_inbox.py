@@ -118,10 +118,12 @@ def parse_ad_ids(text: str) -> list:
 
 
 def detect_city(ad_context: str, page_messages: list) -> str:
+    # code:tool-citydetect-001:keyword-fix — scan ALL senders (Customer + Page)
     search_text = ad_context
     for message in page_messages:
-        if message.get("sender") == "Page":
-            search_text += " " + message.get("content", "")
+        # Handle both 'content' (DB/normalized) and 'text' (JS-scraped) keys
+        content = message.get("content", "") or message.get("text", "")
+        search_text += " " + content
 
     for city, keywords in CITY_KEYWORDS.items():
         for keyword in keywords:

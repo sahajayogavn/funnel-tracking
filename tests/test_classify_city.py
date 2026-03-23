@@ -25,6 +25,7 @@ from fb_pipeline.contracts.l1_city_llm import (
     detect_city_llm,
     gather_signals_for_user,
 )
+from fb_pipeline.contracts.l1_inbox import detect_city
 
 
 class TestBuildPrompt(unittest.TestCase):
@@ -318,6 +319,56 @@ class TestKnownCities(unittest.TestCase):
         self.assertIn("TP. Hồ Chí Minh", KNOWN_CITIES)
         self.assertIn("Đà Nẵng", KNOWN_CITIES)
         self.assertIn("Online", KNOWN_CITIES)
+
+
+class TestDetectCityKeyword(unittest.TestCase):
+    """
+    Regression tests for keyword-based detect_city() — defect #1 fix.
+    code:tool-citydetect-001:regression-keyword
+
+    Before fix: only Page sender messages were scanned.
+    After fix: all messages (Customer + Page) are scanned.
+    """
+
+    def test_hung_bui_customer_message_ha_noi(self):
+        """Core regression: Hung Bui said 'Hà Nội' in a Customer message — must be detected."""
+        msgs = [
+            {"sender": "Customer", "content": "SY tổ chức lớp học thiền tại Hà Nội"},
+            {"sender": "Page",     "content": "Chào bạn, cảm ơn bạn đã nhắn tin"},
+        ]
+        self.assertEqual(detect_city("", msgs), "Hà Nội")
+
+    def test_customer_message_content_key(self):
+        """Customer message with 'content' key is detected correctly."""
+        msgs = [{"sender": "Customer", "content": "Mình ở Đà Nẵng"}]
+        self.assertEqual(detect_city("", msgs), "Đà Nẵng")
+
+    def test_customer_message_text_key(self):
+        """JS-scraped Customer message with 'text' key (not 'content') is detected."""
+        msgs = [{"sender": "Customer", "text": "Hỏi về lớp ở Đà Nẵng", "content": ""}]
+        self.assertEqual(detect_city("", msgs), "Đà Nẵng")
+
+    def test_page_message_still_detected(self):
+        """Page messages are still scanned after fix (no regression)."""
+        msgs = [{"sender": "Page", "content": "Lớp tại Đà Nẵng ngày mai"}]
+        self.assertEqual(detect_city("", msgs), "Đà Nẵng")
+
+    def test_ad_context_only(self):
+        """City in ad_context only (no messages) is detected."""
+        self.assertEqual(detect_city("Sự kiện tại TPHCM miễn phí", []), "TP. Hồ Chí Minh")
+
+    def test_unknown_when_no_signals(self):
+        """Returns Unknown when no city keywords present anywhere."""
+        msgs = [{"sender": "Customer", "content": "Xin chào, tôi muốn tìm hiểu thiền"}]
+        self.assertEqual(detect_city("", msgs), "Unknown")
+
+    def test_both_senders_ha_noi(self):
+        """When both Customer and Page mention city, first keyword match wins."""
+        msgs = [
+            {"sender": "Customer", "content": "Tôi muốn học tại Hà Nội"},
+            {"sender": "Page",     "content": "OK, lớp ở Hà Nội sẽ khai giảng sớm"},
+        ]
+        self.assertEqual(detect_city("", msgs), "Hà Nội")
 
 
 if __name__ == '__main__':

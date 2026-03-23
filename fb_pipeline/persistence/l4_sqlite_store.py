@@ -124,7 +124,10 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    _ensure_column(cursor, "users", "last_synced_at", "last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+    # Ensure last_synced_at exists for schemas created before it was added to CREATE TABLE.
+    # NOTE: SQLite forbids ALTER TABLE ADD COLUMN with non-constant defaults (e.g. CURRENT_TIMESTAMP),
+    # so we use a plain DATETIME (NULL default) here for migration compatibility.
+    _ensure_column(cursor, "users", "last_synced_at", "last_synced_at DATETIME")
     _ensure_column(cursor, "users", "temperature", "temperature TEXT DEFAULT 'warm'")
     _ensure_column(cursor, "users", "last_warmup_at", "last_warmup_at DATETIME")
     _ensure_column(cursor, "users", "warmup_count", "warmup_count INTEGER DEFAULT 0")
@@ -315,7 +318,8 @@ def setup_comment_database(conn: sqlite3.Connection):
             UNIQUE(post_id, commenter_name)
         )
     ''')
-    _ensure_column(cursor, "comment_users", "last_synced_at", "last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+    # Use NULL default for last_synced_at in ALTER TABLE (CURRENT_TIMESTAMP not allowed as non-constant)
+    _ensure_column(cursor, "comment_users", "last_synced_at", "last_synced_at DATETIME")
     conn.commit()
 
 
