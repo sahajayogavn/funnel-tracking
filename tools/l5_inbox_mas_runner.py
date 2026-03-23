@@ -18,6 +18,7 @@ Usage:
     python tools/inbox_mas_runner.py --page-id 119587786260266 --poll
 """
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -50,6 +51,32 @@ logger = logging.getLogger("inbox_mas_runner")
 # --- Constants ---
 POLL_INTERVAL = 300  # 5 minutes
 CDP_URL = "http://127.0.0.1:9222"
+
+
+# code:tool-inbox-mas-001:knowledge-loader
+KNOWLEDGE_FILES = [
+    "memory/SOUL.md",
+    "memory/agent_memory/faq.md",
+    "memory/agent_memory/lop-hoc.md",
+    "memory/agent_memory/su-kien.md",
+    "memory/research.md",
+    "memory/mas_strategy.md",
+]
+
+
+def load_knowledge_context() -> str:
+    """Load markdown knowledge files into a single prompt context string."""
+    sections = []
+    for relative_path in KNOWLEDGE_FILES:
+        absolute_path = os.path.join(PROJECT_ROOT, relative_path)
+        try:
+            with open(absolute_path, "r", encoding="utf-8") as f:
+                sections.append(f"## Source: {relative_path}\n{f.read().strip()}")
+        except FileNotFoundError:
+            logger.warning(f"Knowledge file missing: {relative_path}")
+        except Exception as exc:
+            logger.warning(f"Knowledge file load failed ({relative_path}): {exc}")
+    return "\n\n".join(section for section in sections if section)
 
 
 def setup_llm_env():
@@ -92,38 +119,43 @@ def run_adk_pipeline(thread_messages: list, seeker_context: dict) -> dict:
         for m in thread_messages
         if m.get('content')
     ])
-
     seeker_text = json.dumps(seeker_context, ensure_ascii=False, indent=2)
+    knowledge_context = load_knowledge_context()
 
-    # Create runner and session
-    runner = Runner(agent=root_agent, app_name="sahajayoga_inbox")
     session_service = InMemorySessionService()
-
-    session = session_service.create_session(
+    runner = Runner(
+        agent=root_agent,
         app_name="sahajayoga_inbox",
-        user_id="inbox_runner"
+        session_service=session_service,
+    )
+    session = asyncio.run(
+        session_service.create_session(
+            app_name="sahajayoga_inbox",
+            user_id="inbox_runner",
+            state={
+                "thread_messages": conversation_text,
+                "seeker_context": seeker_text,
+                "knowledge_context": knowledge_context,
+            },
+        )
     )
 
-    # Inject context into session state
-    session_service.append_event(
-        session=session,
-        event=None  # Will be set by the runner
-    ) if False else None  # placeholder
-
-    # Build the user message with embedded context
     prompt = (
-        f"Process this Facebook inbox thread.\n\n"
-        f"Thread messages:\n{conversation_text}\n\n"
-        f"Seeker context:\n{seeker_text}"
+        "Process this Facebook inbox thread using the provided session state. "
+        "Use thread_messages, seeker_context, and knowledge_context when relevant."
     )
-
     user_msg = types.Content(
         role="user",
         parts=[types.Part(text=prompt)]
     )
 
-    # Run pipeline and collect results
-    result = {"classification": "", "reply_text": ""}
+    result = {
+        "classification": "",
+        "reply_text": "",
+        "thread_messages": conversation_text,
+        "seeker_context": seeker_text,
+        "knowledge_context": knowledge_context,
+    }
 
     for event in runner.run(
         user_id="inbox_runner",
@@ -137,7 +169,6 @@ def run_adk_pipeline(thread_messages: list, seeker_context: dict) -> dict:
             elif hasattr(event, 'author') and event.author == "Responder":
                 result["reply_text"] = text
             else:
-                # Last output is typically the reply
                 result["reply_text"] = text
 
     return result

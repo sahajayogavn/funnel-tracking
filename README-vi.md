@@ -7,8 +7,8 @@ Chào mừng bạn đến với repo **Funnel Tracking**. Mục tiêu của dự
 1. **Facebook Fanpage Integration**: Tự động fetch và xử lý tin nhắn từ seekers mới.
 2. **Telegram Notification**: Forward tin nhắn sang nhóm Telegram chỉ định.
 3. **Lưu trữ thông tin Seekers**: Lưu trữ dữ liệu seekers (SĐT, email, thành phố, FB URL) trong FrankenSQLite.
-4. **Agent Memory**: Thư mục `memory/agent_memory/` lưu file Markdown (`lop-hoc.md`, `su-kien.md`) làm ngữ cảnh cho bot.
-5. **AI Agent Software (ADK)**: Hệ thống đa tác tử Google ADK tự động phân loại và trả lời tin nhắn Facebook inbox.
+4. **Agent Memory**: Inbox MAS nạp `memory/SOUL.md`, `memory/agent_memory/faq.md`, `memory/agent_memory/lop-hoc.md`, `memory/agent_memory/su-kien.md`, `memory/research.md`, và `memory/mas_strategy.md` vào runtime `knowledge_context`.
+5. **AI Agent Software (ADK)**: Google ADK vận hành luồng trả lời inbox (Classifier → Responder), còn các route react / warm-up / event hiện là scaffold trong scheduler và tools.
 6. **Web Dashboard**: Ứng dụng Next.js 16 với Dashboard, Seekers CRM, Network Graph, Journey Workflow.
 
 ## 🏗 Kiến trúc dự án & Quy tắc
@@ -20,8 +20,8 @@ Dự án được khởi tạo theo phương pháp Agile XP dành cho AI Agents.
 | `.agents/rules/`       | Quy tắc hành vi của AI Agents (Git Operations, Tool Writing, ADK, DevOps QA) |
 | `.agents/workflows/`   | Quy trình làm việc của agents                                           |
 | `.agents/skills/`      | Kĩ năng (skills) mà agents có thể sử dụng                               |
-| `adk_agents/`          | Hệ thống đa tác tử Google ADK (Receptionist, Guide, Supervisor)         |
-| `tools/`               | Script Python 3.13 CLI (`fetch_fb_messages.py`, `env_manager.py`)       |
+| `adk_agents/`          | Google ADK agents cho inbox reply cùng định nghĩa route react / warm-up / event |
+| `tools/`               | Script Python 3.13 CLI và các wrapper chuẩn `l5_*` cho operator / scheduler |
 | `web/`                 | Ứng dụng web Next.js 16 (Dashboard, Seekers CRM, Graph, Journey)        |
 | `tests/`               | Unit tests cho tất cả tools                                             |
 | `memory/agent_memory/` | Kiến thức — khóa học, sự kiện, log seekers, FrankenSQLite DB            |
@@ -75,6 +75,15 @@ python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_message_by_u
 - **`users`**: `thread_id`, `thread_name`, `phone`, `email`, `fb_url`, `city`, `last_interaction`
 - **`fetch_log`**: `page_id`, `timestamp`, `threads_count`, `messages_count`
 
+## 🛤 Các giai đoạn seeker
+
+```text
+Web journey:     Unknown → Seeker → Seeker_Public_Program → Seeker_18_Weeks → Seed → Sahaja_Yogi → Sahaja_Yogi_Dedicated → Sahaja_Mahayogi
+Strategy labels: User    → Follower / Curious Seeker      → Registered      → Deep Learner   → Sahaja Yogi
+```
+
+Journey engine phía web định nghĩa runtime keys, còn MAS strategy chuẩn hóa chúng thành nhãn seeker-facing.
+
 ## 🔑 Universal IDs và Bảo mật
 
 - **Universal ID**: Mọi thành phần theo cấu trúc `<type>:<section-name-XXX>[:<component_name-YYY>]`.
@@ -88,7 +97,7 @@ python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_message_by_u
 4. Cài đặt trình duyệt: `playwright install chromium`
 5. Cấu hình credentials: `python tools/env_manager.py`
 6. Chạy tools: `python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_messages`
-7. Chạy ADK agents: `adk run adk_agents/` (CLI) hoặc `adk web adk_agents/` (Web UI)
+7. Chạy ADK agents: `adk run adk_agents/` (CLI) hoặc `adk web .` từ thư mục gốc repo (Web UI; sau đó chọn `adk_agents`)
 8. Chạy Web Dashboard: `cd web && npm install && npm run dev`
 
 ## 📖 Tài liệu

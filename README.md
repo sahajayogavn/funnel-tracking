@@ -7,8 +7,8 @@ Welcome to the **Funnel Tracking** repository. This project builds AI Agents to 
 1. **Facebook Fanpage Integration**: Automatically fetch and process inbox messages from seekers.
 2. **Telegram Notification**: Forward inquiries to a designated Telegram group.
 3. **Seeker Information Storage**: Store and manage seeker data (phone, email, city, FB URL) in FrankenSQLite.
-4. **Agent Memory**: Utilize `memory/agent_memory/` Markdown documents (`lop-hoc.md`, `su-kien.md`) for conversational context.
-5. **AI Agent Software (ADK)**: Google ADK multi-agent system that auto-classifies and replies to Facebook inbox messages.
+4. **Agent Memory**: The inbox MAS loads `memory/SOUL.md`, `memory/agent_memory/faq.md`, `memory/agent_memory/lop-hoc.md`, `memory/agent_memory/su-kien.md`, `memory/research.md`, and `memory/mas_strategy.md` into runtime `knowledge_context`.
+5. **AI Agent Software (ADK)**: Google ADK powers the inbox reply flow (Classifier → Responder), while reaction / warm-up / event routes are scaffolded in the scheduler and tools.
 6. **Web Dashboard**: Next.js 16 full-stack application with:
    - 📊 **Dashboard**: Stats overview of all seekers, posts, messages
    - 👥 **Seekers CRM**: Sortable table with GitHub-style activity histogram, city badges, hover journey tooltip
@@ -24,8 +24,8 @@ Initialized according to Agile XP methodology for AI Agents. All core guidelines
 | `.agents/rules/`       | Rules governing AI agent behavior (Git Operations, Tool Writing, Full-Stack, ADK, DevOps QA) |
 | `.agents/workflows/`   | Workflow configurations for agent tasks                                                 |
 | `.agents/skills/`      | Agent capabilities and skills (7 symlinked skills)                                      |
-| `adk_agents/`          | Google ADK multi-agent system (Receptionist, Guide, Supervisor)                         |
-| `tools/`               | Python 3.13 CLI scripts (`fetch_fb_messages.py`, `fetch_comments.py`)                   |
+| `adk_agents/`          | Google ADK agents for inbox reply plus route definitions for react / warm-up / event flows |
+| `tools/`               | Python 3.13 CLI scripts and canonical `l5_*` wrappers for operators and schedulers        |
 | `web/`                 | Next.js 16 full-stack web application                                                   |
 | `tests/`               | Unit tests for all tools                                                                |
 | `memory/agent_memory/` | Knowledge base — course lists, events, seeker logs, FrankenSQLite DB                    |
@@ -116,7 +116,7 @@ Page (page_id = 1548373332058326)
 │   ├── Message (by UserID or PageID)
 │   └── users CRM table
 └── Unified User Identity (fb_user_id + fb_profile_url)
-    └── Customer Journey: Intake → Engaged → Registered → Attending
+    └── Customer Journey (strategy/runtime): User → Seeker (Follower/Curious) → Seeker_Public_Program (Registered) → Seeker_18_Weeks (Deep Learner) → Seed → Sahaja Yogi
 ```
 
 Every interaction (comment, message, reply) is a **touch-point** in the seeker's journey. The AI Agent uses these touch-points to personalize responses and maximize engagement at each funnel stage.
@@ -151,12 +151,13 @@ cd web && npm install && npm run dev
 
 ## 🛤️ Seeker Journey Stages
 
-```
-Unknown → Seeker → Public Program → 18 Weeks → Seed → Sahaja Yogi → Dedicated → Mahayogi
+```text
+Web journey:     Unknown → Seeker → Seeker_Public_Program → Seeker_18_Weeks → Seed → Sahaja_Yogi → Sahaja_Yogi_Dedicated → Sahaja_Mahayogi
+Strategy labels: User    → Follower / Curious Seeker      → Registered      → Deep Learner   → Sahaja Yogi
 ```
 
 Each stage transition is triggered by touch-points (comments, messages, registrations, attendance).
-The journey engine in `web/src/lib/journey-engine.ts` defines all transition rules.
+The journey engine in `web/src/lib/journey-engine.ts` defines the canonical web journey keys, while the MAS strategy normalizes them into seeker-facing labels.
 
 ## 🔑 Universal IDs and Security
 
@@ -171,7 +172,7 @@ The journey engine in `web/src/lib/journey-engine.ts` defines all transition rul
 4. Install Playwright browser: `playwright install chromium`
 5. Set up credentials: `python tools/env_manager.py`
 6. Run Python tools: `python tools/fetch_fb_messages.py --pageId <PAGE_ID> --action fetch_messages`
-7. Run ADK agents: `adk run adk_agents/` (CLI) or `adk web adk_agents/` (Web UI)
+7. Run ADK agents: `adk run adk_agents/` (CLI) or `adk web .` from the repo root (Web UI; then select `adk_agents`)
 8. Run Web Dashboard: `cd web && npm install && npm run dev`
 
 ## 📖 Documentation

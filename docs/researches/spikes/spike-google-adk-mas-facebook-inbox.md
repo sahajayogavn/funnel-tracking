@@ -105,7 +105,7 @@ funnel-tracking/
 adk run adk_agents/
 
 # Web UI (Dev)
-adk web adk_agents/
+adk web .  # then select `adk_agents` in the Web UI
 
 # Programmatic (Production)
 runner = Runner(agent=root_agent, app_name="funnel_mas")
