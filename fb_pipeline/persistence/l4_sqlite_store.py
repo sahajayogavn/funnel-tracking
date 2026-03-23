@@ -132,6 +132,56 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             resolved_at DATETIME
         )
     ''')
+    # --- MAS Trigger Routes tables ---
+    # code:schema-mas-triggers-001
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS reactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_type TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            reaction_type TEXT NOT NULL,
+            agent_name TEXT DEFAULT 'reactor',
+            dry_run BOOLEAN DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(item_type, item_id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS warmup_campaigns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            seeker_name TEXT,
+            journey_stage TEXT,
+            strategy_type TEXT,
+            message_text TEXT NOT NULL,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            dry_run BOOLEAN DEFAULT 1,
+            response_received BOOLEAN DEFAULT 0,
+            response_at DATETIME
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            city TEXT NOT NULL,
+            event_date TEXT NOT NULL,
+            description TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS event_campaigns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            thread_id TEXT NOT NULL,
+            seeker_name TEXT,
+            message_text TEXT NOT NULL,
+            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            dry_run BOOLEAN DEFAULT 1,
+            FOREIGN KEY (event_id) REFERENCES events(id)
+        )
+    ''')
     conn.commit()
 
 

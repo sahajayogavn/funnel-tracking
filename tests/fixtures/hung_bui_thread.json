@@ -1,0 +1,68 @@
+{
+  "metadata": {
+    "page_id": "1548373332058326",
+    "selected_item_id": "100001005716854",
+    "fb_url": "100001005716854",
+    "thread_type": "FB_MESSAGE",
+    "source_url": "https://business.facebook.com/latest/inbox/all/?nav_ref=manage_page_ap_plus_inbox_message_button&asset_id=1548373332058326&business_id=&mailbox_id=1548373332058326&selected_item_id=100001005716854&thread_type=FB_MESSAGE"
+  },
+  "visible_thread": {
+    "domIndex": 0,
+    "name": "Hung Bui",
+    "text": "Hung Bui\nChào bạn! Mình muốn tìm hiểu về lớp thiền\nToday",
+    "lines": ["Hung Bui", "Chào bạn! Mình muốn tìm hiểu về lớp thiền", "Today"]
+  },
+  "js_messages": [
+    {
+      "sender": "Customer",
+      "text": "Chào bạn! Mình muốn tìm hiểu về lớp thiền Sahaja Yoga ạ",
+      "timestamp": "Mar 20, 2026, 9:15 AM"
+    },
+    {
+      "sender": "Customer",
+      "text": "Lớp có miễn phí không ạ?",
+      "timestamp": "Mar 20, 2026, 9:15 AM"
+    },
+    {
+      "sender": "Page",
+      "text": "Chào Hưng! Cảm ơn bạn đã quan tâm đến Sahaja Yoga. Tất cả các lớp thiền của chúng tôi đều hoàn toàn miễn phí nhé ạ!",
+      "timestamp": "Mar 20, 2026, 10:30 AM"
+    },
+    {
+      "sender": "Page",
+      "text": "Hiện tại chúng tôi có lớp tại Hà Nội (40 Vương Thừa Vũ) và TP.HCM (02 Xô Viết Nghệ Tĩnh). Bạn ở thành phố nào ạ?",
+      "timestamp": "Mar 20, 2026, 10:30 AM"
+    },
+    {
+      "sender": "Customer",
+      "text": "Mình ở Hà Nội ạ",
+      "timestamp": "Mar 20, 2026, 11:00 AM"
+    },
+    {
+      "sender": "Page",
+      "text": "Để đăng ký, bạn vui lòng để lại họ tên đầy đủ và số điện thoại để ghi danh nhé ạ!",
+      "timestamp": "Mar 20, 2026, 11:15 AM"
+    },
+    {
+      "sender": "Customer",
+      "text": "Bùi Duy Hưng",
+      "timestamp": "Mar 21, 2026, 8:00 AM"
+    },
+    {
+      "sender": "Customer",
+      "text": "0901234567",
+      "timestamp": "Mar 21, 2026, 8:00 AM"
+    }
+  ],
+  "ad_context": "Thiền định miễn phí Sahaja Yoga tại Hà Nội - Lớp khai giảng tháng 3",
+  "ad_ids": ["6930299765389"],
+  "expected": {
+    "thread_name": "Hung Bui",
+    "phone": "0901234567",
+    "email": null,
+    "city": "Hà Nội",
+    "message_count": 8,
+    "has_customer_messages": true,
+    "has_page_messages": true
+  }
+}

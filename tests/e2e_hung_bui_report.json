@@ -1,0 +1,163 @@
+{
+  "status": "success",
+  "crawl": {
+    "thread_id": "1548373332058326_100001005716854",
+    "thread_name": "Hung Bui",
+    "message_count": 21,
+    "city": "Unknown",
+    "phone": "01666667975",
+    "ad_ids": [],
+    "fb_url": "100001005716854"
+  },
+  "persist": {
+    "thread_id": "1548373332058326_100001005716854",
+    "messages_added": 21,
+    "ad_ids_count": 0,
+    "city": "Unknown",
+    "mas_handoff": {
+      "thread_id": "1548373332058326_100001005716854",
+      "thread_name": "Hung Bui",
+      "page_id": "1548373332058326",
+      "fb_url": "100001005716854",
+      "seeker": {
+        "name": "Hung Bui",
+        "phone": "01666667975",
+        "email": "duyhunghd6@gmail.com",
+        "city": "Unknown",
+        "lead_stage": "Intake"
+      },
+      "ad_context": "",
+      "ad_ids": [],
+      "messages": [
+        {
+          "sender": "Customer",
+          "content": "Thân gửi  page Sahaja Yoga Vietnam",
+          "message_timestamp": "3/7/17, 10:33 AM",
+          "seq": 0
+        },
+        {
+          "sender": "Customer",
+          "content": "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
+          "message_timestamp": "3/7/17, 10:33 AM",
+          "seq": 1
+        },
+        {
+          "sender": "Customer",
+          "content": "do đó, tôi gửi tin nhắn để đăng ký tham dự",
+          "message_timestamp": "3/7/17, 10:33 AM",
+          "seq": 2
+        },
+        {
+          "sender": "Customer",
+          "content": "- Họ tên: Bùi Duy Hùng\n- Năm sinh: 1989\n- Số điện thoại: 01666667975\n- Địa chỉ email: duyhunghd6@gmail.com\n- Số người đăng ký tham dự: 2",
+          "message_timestamp": "3/7/17, 10:33 AM",
+          "seq": 3
+        },
+        {
+          "sender": "Customer",
+          "content": "Thanks",
+          "message_timestamp": "3/7/17, 10:33 AM",
+          "seq": 4
+        },
+        {
+          "sender": "Page",
+          "content": "chào bạn, mình nhận được thông tin đăng ký của bạn rồi nha",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 5
+        },
+        {
+          "sender": "Page",
+          "content": "hẹn gặp 2 bạn 16h30 chủ nhật 26/3 trên lớp nhé",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 6
+        },
+        {
+          "sender": "Customer",
+          "content": "cám ơn bạn nhiều!",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 7
+        },
+        {
+          "sender": "Customer",
+          "content": "mình theo tập SY từ 2007, hồi còn diễn đàn sahajayoga-vietnam.org",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 8
+        },
+        {
+          "sender": "Customer",
+          "content": "và vẫn đều đặn hành thiền",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 9
+        },
+        {
+          "sender": "Customer",
+          "content": "Và mình nhận biết được những điều tuyệt vời mà SY mang lại. Vì vậy, nếu SY được càng nhiều người theo tập thì thật là tốt",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 10
+        },
+        {
+          "sender": "Page",
+          "content": "hihi",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 11
+        },
+        {
+          "sender": "Page",
+          "content": "vậy a biết a Thi đúng ko ạ?",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 12
+        },
+        {
+          "sender": "Customer",
+          "content": "bác Geo",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 13
+        },
+        {
+          "sender": "Customer",
+          "content": "bác ấy chính là người hướng dẫn tụi mình hồi đó",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 14
+        },
+        {
+          "sender": "Page",
+          "content": "hehe",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 15
+        },
+        {
+          "sender": "Page",
+          "content": "vậy chủ nhật ngày 26 a lên lớp nha",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 16
+        },
+        {
+          "sender": "Page",
+          "content": "mình trao đổi thêm a nhé",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 17
+        },
+        {
+          "sender": "Customer",
+          "content": "Hôm đó mình sẽ tới",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 18
+        },
+        {
+          "sender": "Page",
+          "content": "mong gặp anh ạ",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 19
+        },
+        {
+          "sender": "Customer",
+          "content": "mong được gặp bạn và cộng đồng SY ở Hà Nội",
+          "message_timestamp": "3/8/17, 12:58 PM",
+          "seq": 20
+        }
+      ]
+    }
+  },
+  "classification": "**Classifying customer intent**\n\nI need to classify the overall thread to understand the customer's intent, which seems to be a follow-up or thanks. My analysis shows a positive sentiment and low urgency. The customer ends with \"mong được gặp...\" after their registration confirmation, suggesting they're pleased or looking forward to something. Overall, the thread seems focused on the registration process. I should probably categorize it as a registration-related incoming thread. Let’s craft a summary!",
+  "reply_text": "Dạ, rất vui được gặp anh và người đi cùng vào Chủ nhật này ạ. Cảm ơn anh đã luôn gắn bó với Sahaja Yoga và chia sẻ những điều tốt đẹp như vậy. Hẹn gặp anh lúc 16h30 trên lớp ở Hà Nội nhé 🙏"
+}

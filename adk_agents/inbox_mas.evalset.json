@@ -1,0 +1,142 @@
+{
+  "eval_set_id": "inbox_mas_e2e",
+  "name": "Sahaja Yoga Inbox MAS E2E Tests",
+  "description": "End-to-end evaluation of the MessageClassifier + Responder pipeline for the Sahaja Yoga Facebook inbox agent.",
+  "eval_cases": [
+    {
+      "eval_id": "greeting_en",
+      "conversation": [
+        {
+          "invocation_id": "greeting_en_inv1",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "Hello, I want to learn about Sahaja Yoga meditation. Can you tell me more?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [{"text": "Hello! Sahaja Yoga meditation classes are completely free and held regularly."}]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "rubric_id": "greeting_warmth",
+          "rubric_content": {"text_property": "The agent's response is warm, welcoming, and mentions that meditation classes are FREE."},
+          "type": "FINAL_RESPONSE_QUALITY"
+        },
+        {
+          "rubric_id": "greeting_language",
+          "rubric_content": {"text_property": "The agent's response is in English since the user wrote in English."},
+          "type": "FINAL_RESPONSE_QUALITY"
+        }
+      ]
+    },
+    {
+      "eval_id": "question_classes",
+      "conversation": [
+        {
+          "invocation_id": "question_classes_inv1",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "Where are the Sahaja Yoga classes held? What time do they start?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [{"text": "Our classes are held regularly in various cities. Could you tell me which city you are in so I can share the schedule?"}]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "rubric_id": "question_helpful",
+          "rubric_content": {"text_property": "The agent provides helpful information about classes or asks which city the user is in to give specific details."},
+          "type": "FINAL_RESPONSE_QUALITY"
+        },
+        {
+          "rubric_id": "question_not_pushy",
+          "rubric_content": {"text_property": "The agent is not pushy, commercial, or salesy. The tone is genuine and welcoming."},
+          "type": "FINAL_RESPONSE_QUALITY"
+        }
+      ]
+    },
+    {
+      "eval_id": "registration_request",
+      "conversation": [
+        {
+          "invocation_id": "registration_inv1",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "I want to sign up for the meditation class in Ho Chi Minh City. How do I register?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [{"text": "That's wonderful! Could you please share your name and phone number so we can register you?"}]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "rubric_id": "registration_asks_details",
+          "rubric_content": {"text_property": "The agent asks for the user's name and/or phone number to complete registration."},
+          "type": "FINAL_RESPONSE_QUALITY"
+        },
+        {
+          "rubric_id": "registration_encouraging",
+          "rubric_content": {"text_property": "The agent is encouraging and positive about the user wanting to register."},
+          "type": "FINAL_RESPONSE_QUALITY"
+        }
+      ]
+    },
+    {
+      "eval_id": "vietnamese_greeting",
+      "conversation": [
+        {
+          "invocation_id": "vi_greeting_inv1",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "Xin chào, mình muốn tìm hiểu về thiền Sahaja Yoga. Lớp học có miễn phí không?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [{"text": "Chào bạn! Lớp thiền Sahaja Yoga hoàn toàn miễn phí."}]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "rubric_id": "vi_language_match",
+          "rubric_content": {"text_property": "The agent's response is in Vietnamese because the user wrote in Vietnamese."},
+          "type": "FINAL_RESPONSE_QUALITY"
+        },
+        {
+          "rubric_id": "vi_free_classes",
+          "rubric_content": {"text_property": "The agent mentions that classes are free (miễn phí) in the response."},
+          "type": "FINAL_RESPONSE_QUALITY"
+        }
+      ]
+    },
+    {
+      "eval_id": "spam_detection",
+      "conversation": [
+        {
+          "invocation_id": "spam_inv1",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "BUY CHEAP WATCHES NOW!!! BEST PRICE GUARANTEED visit www.scam-watches.com CLICK HERE!!!"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [{"text": ""}]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "rubric_id": "spam_handled",
+          "rubric_content": {"text_property": "The agent does NOT engage with the spam content. It either politely declines, gives a very brief non-committal response, or provides a generic meditation-related reply without acknowledging the spam."},
+          "type": "FINAL_RESPONSE_QUALITY"
+        }
+      ]
+    }
+  ]
+}
