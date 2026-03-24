@@ -173,3 +173,37 @@ class TestAdkWiring:
 
         assert len(goto_calls) >= 1, "Step 2b re-navigation goto() was never called"
         assert "PAGE123" in goto_calls[0]
+
+
+class TestSanitizeReply:
+    """Unit tests for the reply sanitizer — code:tool-inbox-mas-001:reply-sanitizer"""
+
+    def _sanitize(self, text):
+        from tools.l5_inbox_mas_runner import _sanitize_reply
+        return _sanitize_reply(text)
+
+    def test_strips_bold_heading_reasoning(self):
+        raw = "**Crafting a warm reply**\n\nI need to write something.\nDạ bạn ơi 🙏"
+        result = self._sanitize(raw)
+        assert "**Crafting" not in result
+        assert "I need to" not in result
+        assert "Dạ bạn ơi 🙏" in result
+
+    def test_preserves_clean_vietnamese_reply(self):
+        clean = "Dạ bạn ơi, lớp thiền hoàn toàn miễn phí 🙏\nBạn gửi họ tên và SĐT nhé."
+        assert self._sanitize(clean) == clean
+
+    def test_returns_empty_string_for_pure_reasoning(self):
+        leak = "**Crafting a message**\nI need to think about this.\nLet me write something."
+        result = self._sanitize(leak)
+        assert result == ""
+
+    def test_strips_i_need_to_lines(self):
+        raw = "I need to confirm the registration.\nDạ chị đã đăng ký thành công rồi ạ 🙏"
+        result = self._sanitize(raw)
+        assert "I need to" not in result
+        assert "Dạ chị đã đăng ký" in result
+
+    def test_empty_input_returns_empty(self):
+        assert self._sanitize("") == ""
+        assert self._sanitize(None) is None

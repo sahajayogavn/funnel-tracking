@@ -176,3 +176,23 @@ Example: `https://zalo.me/g/dxknkh602` → `https_zalo_me_g_dxknkh602.png`
 - **`su-kien.md`**: Events can reference QR codes when Zalo groups are created.
 - **Dependencies**: `pip install "qrcode[pil]"` (already in `.venv`).
 
+## 10. Inbox MAS E2E Safety Rules
+
+These rules are **absolute** and must never be violated:
+
+### 10.1 E2E Test Target — Hung Bui Only
+
+- When running any browser-based E2E test for the Inbox MAS pipeline (e.g. `inbox_mas_runner.py --once`), you **MUST** restrict the test to **Hung Bui's thread only** (`thread_name = "Hung Bui"`), because that is the developer's own Facebook account.
+- **NEVER** run a browser E2E test against real customer threads. Real customers must not receive any test, draft, or accidental messages.
+- To target Hung Bui specifically, pass `--max-threads 1` and confirm the first unreplied thread is Hung Bui before proceeding, or use a `--target-thread "Hung Bui"` flag if implemented.
+
+### 10.2 Reply Sanitizer — Always Strip Reasoning Leaks
+
+- The `_sanitize_reply()` function in `tools/l5_inbox_mas_runner.py` **MUST** be applied to every `reply_text` before it is typed into any Facebook message box.
+- A reply that starts with `**Crafting...`, `I need to...`, `Let me...`, or any chain-of-thought narration is a **reasoning leak** and must be blocked — never sent.
+- If `_sanitize_reply()` returns an empty string, the thread must be logged as `no_reply` and skipped. Do NOT type empty or reasoning-only text.
+
+### 10.3 Dry-Run Is the Default
+
+- The `--live` flag (which presses Enter and actually sends messages) must **never** be passed during development, debugging, or E2E testing.
+- Only the human operator (Steve) decides when to run in live mode against real customers.

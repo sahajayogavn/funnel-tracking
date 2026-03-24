@@ -185,7 +185,64 @@ def run_adk_pipeline(thread_messages: list, seeker_context: dict) -> dict:
             else:
                 result["reply_text"] = text
 
+    # code:tool-inbox-mas-001:reply-sanitizer
+    # Strip any LLM chain-of-thought / reasoning lines from the reply before
+    # it is typed into a Facebook message box. Lines that start with "**" or
+    # match known reasoning patterns are removed. Only clean reply lines remain.
+    result["reply_text"] = _sanitize_reply(result.get("reply_text", ""))
+
     return result
+
+
+def _sanitize_reply(text: str) -> str:
+    """Remove LLM reasoning-leak lines from a generated reply.
+
+    Lines starting with '**' (e.g. '**Crafting a warm reply**') and lines
+    that are pure reasoning narration are stripped. Empty results raise a
+    warning so callers know no usable reply was produced.
+
+    Args:
+        text: Raw reply text from the LLM.
+
+    Returns:
+        Cleaned reply string (may be empty if the entire output was reasoning).
+    """
+    import re
+
+    if not text:
+        return text
+
+    reasoning_patterns = re.compile(
+        r'^(\*\*.*\*\*'                    # **Any heading**
+        r'|I need to\b'                    # "I need to ..."
+        r'|I\'m (?:going to|working|thinking|attempting)\b'
+        r'|Let me\b'                       # "Let me ..."
+        r'|I should\b'                     # "I should ..."
+        r'|I want to\b'                    # "I want to ..."
+        r'|I\'ll\b'                        # "I'll ..."
+        r'|Here is the reply'
+        r'|Here\'s (?:my|the) reply'
+        r')',
+        re.IGNORECASE,
+    )
+
+    clean_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if reasoning_patterns.match(stripped):
+            logger.debug(f"[sanitize_reply] Stripped reasoning line: {stripped[:80]}")
+            continue
+        clean_lines.append(line)
+
+    # Remove leading/trailing blank lines from the result
+    cleaned = "\n".join(clean_lines).strip()
+    if not cleaned and text.strip():
+        logger.warning(
+            "[sanitize_reply] Entire reply was reasoning leak — no clean text. "
+            "Original (truncated): " + text[:120]
+        )
+    return cleaned
+
 
 
 # code:tool-inbox-mas-001:telegram-notify
