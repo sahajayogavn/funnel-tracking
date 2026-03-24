@@ -16,7 +16,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+from fb_pipeline.persistence.l4_sqlite_store import get_db_connection, get_comment_db_connection
 
 
 # --- Warmup Strategy Definitions ---
@@ -94,6 +94,8 @@ WARMUP_STRATEGIES = {
 }
 
 
+# code:tool-stage-001
+# code:tool-event-001
 def find_dormant_seekers(page_id: str = None, min_days: int = 3,
                           max_seekers: int = 10) -> dict:
     """Find seekers who haven't interacted in at least min_days.
@@ -107,21 +109,26 @@ def find_dormant_seekers(page_id: str = None, min_days: int = 3,
         dict: Status, count, and list of dormant seekers.
     """
     try:
-        conn = get_db_connection()
         cutoff = (datetime.now() - timedelta(days=min_days)).isoformat()
-        rows = conn.execute('''
-            SELECT thread_id, thread_name, city, lead_stage,
-                   last_interaction, first_seen,
-                   julianday('now') - julianday(last_interaction) AS days_dormant
-            FROM users
-            WHERE last_interaction < ?
-            AND lead_stage NOT IN ('spam', 'unsubscribed')
-            ORDER BY last_interaction ASC
-            LIMIT ?
-        ''', (cutoff, max_seekers)).fetchall()
-        conn.close()
+        seekers = []
 
-        seekers = [{
+        conn = get_db_connection()
+        try:
+            dm_rows = conn.execute('''
+                SELECT thread_id, thread_name, city, lead_stage,
+                       last_interaction, first_seen,
+                       julianday('now') - julianday(last_interaction) AS days_dormant,
+                       temperature, last_warmup_at, warmup_count, cool_step
+                FROM users
+                WHERE last_interaction < ?
+                AND lead_stage NOT IN ('spam', 'unsubscribed')
+                ORDER BY last_interaction ASC
+                LIMIT ?
+            ''', (cutoff, max_seekers)).fetchall()
+        finally:
+            conn.close()
+
+        seekers.extend({
             "thread_id": r["thread_id"],
             "name": r["thread_name"],
             "city": r["city"],
@@ -129,7 +136,46 @@ def find_dormant_seekers(page_id: str = None, min_days: int = 3,
             "last_interaction": r["last_interaction"],
             "first_seen": r["first_seen"],
             "days_dormant": int(r["days_dormant"]) if r["days_dormant"] else 0,
-        } for r in rows]
+            "temperature": r["temperature"],
+            "last_warmup_at": r["last_warmup_at"],
+            "warmup_count": r["warmup_count"],
+            "cool_step": r["cool_step"],
+            "source": "inbox",
+        } for r in dm_rows)
+
+        conn2 = get_comment_db_connection()
+        try:
+            comment_rows = conn2.execute('''
+                SELECT fb_user_id, commenter_name, city, lead_stage,
+                       last_interaction, first_seen,
+                       julianday('now') - julianday(last_interaction) AS days_dormant,
+                       temperature, last_warmup_at, warmup_count, cool_step
+                FROM comment_users
+                WHERE last_interaction < ?
+                AND lead_stage NOT IN ('spam', 'unsubscribed')
+                ORDER BY last_interaction ASC
+                LIMIT ?
+            ''', (cutoff, max_seekers)).fetchall()
+        finally:
+            conn2.close()
+
+        seekers.extend({
+            "thread_id": f"comment_{r['fb_user_id']}" if r["fb_user_id"] else f"comment_name_{r['commenter_name']}",
+            "name": r["commenter_name"],
+            "city": r["city"],
+            "lead_stage": r["lead_stage"] or "Intake",
+            "last_interaction": r["last_interaction"],
+            "first_seen": r["first_seen"],
+            "days_dormant": int(r["days_dormant"]) if r["days_dormant"] else 0,
+            "temperature": r["temperature"],
+            "last_warmup_at": r["last_warmup_at"],
+            "warmup_count": r["warmup_count"],
+            "cool_step": r["cool_step"],
+            "source": "comment",
+        } for r in comment_rows)
+
+        seekers.sort(key=lambda seeker: seeker.get("last_interaction") or "")
+        seekers = seekers[:max_seekers]
 
         return {"status": "success", "seekers": seekers, "count": len(seekers)}
     except Exception as e:

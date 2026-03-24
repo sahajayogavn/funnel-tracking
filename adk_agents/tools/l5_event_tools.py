@@ -21,11 +21,19 @@ from adk_agents.tools.l5_warmup_tools import normalize_lead_stage
 
 
 EVENT_STAGE_PRIORITIES = {
-    "Registered": 0,
-    "Public Program Seeker": 0,
-    "Seeker": 1,
-    "18-Week Seeker": 2,
-    "Intake": 3,
+    "18-Week Seeker": 4,
+    "Registered": 3,
+    "Public Program Seeker": 3,
+    "Seeker": 2,
+    "Intake": 1,
+}
+
+# code:tool-event-001:interest-scoring
+INTEREST_KEYWORDS = {
+    "music": ["âm nhạc", "am nhac", "music", "nhạc", "concert"],
+    "healing": ["trị liệu", "tri lieu", "healing", "chữa lành", "wellness", "sức khỏe", "suc khoe"],
+    "class": ["lớp", "lop", "khóa", "khoa", "học", "hoc", "zoom", "online", "offline", "đăng ký", "dang ky"],
+    "meditation": ["thiền", "thien", "meditate", "meditation"],
 }
 
 
@@ -104,6 +112,49 @@ def get_upcoming_events(city: str = None, days_ahead: int = 14) -> dict:
         return {"status": "error", "error": str(e)}
 
 
+# code:tool-stage-001
+# code:tool-event-001:interest-scoring
+def _score_seeker_interest(messages: list[dict], event_type: str) -> int:
+    event_type_text = (event_type or "").lower()
+    keyword_buckets = []
+
+    if any(token in event_type_text for token in ["âm nhạc", "am nhac", "music"]):
+        keyword_buckets.extend(["music", "healing"])
+    if any(token in event_type_text for token in ["trị liệu", "tri lieu", "healing", "wellness"]):
+        keyword_buckets.extend(["healing", "meditation"])
+    if any(token in event_type_text for token in ["lớp", "lop", "khóa", "khoa", "4 tuần", "4 tuan", "18 tuần", "18 tuan", "online"]):
+        keyword_buckets.extend(["class", "meditation"])
+
+    if not keyword_buckets:
+        keyword_buckets.append("meditation")
+
+    keywords = []
+    for bucket in keyword_buckets:
+        keywords.extend(INTEREST_KEYWORDS.get(bucket, []))
+
+    score = 0
+    for message in messages:
+        content = (message.get("content") or "").lower()
+        for keyword in keywords:
+            if keyword in content:
+                score += 1
+    return score
+
+
+def _get_thread_messages_for_interest(thread_id: str, limit: int = 30) -> list[dict]:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT sender, content, message_timestamp FROM messages WHERE thread_id = ? ORDER BY seq DESC, id DESC LIMIT ?",
+            (thread_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+# code:tool-stage-001
+# code:tool-event-001
 def find_target_seekers_for_event(event_id: int, city: str,
                                    max_seekers: int = 20) -> dict:
     """Find seekers in a specific city who haven't been notified about this event.
@@ -123,10 +174,19 @@ def find_target_seekers_for_event(event_id: int, city: str,
     seen_thread_ids = set()
 
     try:
-        # Search DM users (inbox) by city
         conn = get_db_connection()
+        event_row = conn.execute(
+            "SELECT name, description FROM events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+        event_type = " ".join(
+            part for part in [event_row["name"], event_row["description"]] if event_row and part
+        ) if event_row else ""
+
+        # Search DM users (inbox) by city
         dm_rows = conn.execute('''
-            SELECT u.thread_id, u.thread_name, u.city, u.lead_stage, u.last_interaction
+            SELECT u.thread_id, u.thread_name, u.city, u.lead_stage, u.last_interaction,
+                   u.temperature, u.last_warmup_at, u.warmup_count, u.cool_step
             FROM users u
             WHERE u.city = ?
             AND u.lead_stage NOT IN ('spam', 'unsubscribed')
@@ -143,20 +203,29 @@ def find_target_seekers_for_event(event_id: int, city: str,
         for r in dm_rows:
             if r["thread_id"] not in seen_thread_ids:
                 normalized_stage = normalize_lead_stage(r["lead_stage"])
+                messages = _get_thread_messages_for_interest(r["thread_id"])
+                interest_score = _score_seeker_interest(messages, event_type)
                 seekers.append({
                     "thread_id": r["thread_id"],
                     "name": r["thread_name"],
                     "city": r["city"],
                     "lead_stage": normalized_stage,
+                    "lead_stage_priority": EVENT_STAGE_PRIORITIES.get(normalized_stage, 0),
+                    "interest_score": interest_score,
                     "source": "inbox",
                     "last_interaction": r["last_interaction"],
+                    "temperature": r["temperature"],
+                    "last_warmup_at": r["last_warmup_at"],
+                    "warmup_count": r["warmup_count"],
+                    "cool_step": r["cool_step"],
                 })
                 seen_thread_ids.add(r["thread_id"])
 
         # Search comment users by city (they may not have DM threads)
         conn2 = get_comment_db_connection()
         cmt_rows = conn2.execute('''
-            SELECT cu.commenter_name, cu.city, cu.fb_user_id, cu.lead_stage, cu.last_interaction
+            SELECT cu.commenter_name, cu.city, cu.fb_user_id, cu.lead_stage, cu.last_interaction,
+                   cu.temperature, cu.last_warmup_at, cu.warmup_count, cu.cool_step
             FROM comment_users cu
             WHERE cu.city = ?
             AND cu.lead_stage NOT IN ('spam', 'unsubscribed')
@@ -175,17 +244,24 @@ def find_target_seekers_for_event(event_id: int, city: str,
                     "name": r["commenter_name"],
                     "city": r["city"],
                     "lead_stage": normalized_stage,
+                    "lead_stage_priority": EVENT_STAGE_PRIORITIES.get(normalized_stage, 0),
+                    "interest_score": 0,
                     "source": "comment",
                     "last_interaction": r["last_interaction"],
+                    "temperature": r["temperature"],
+                    "last_warmup_at": r["last_warmup_at"],
+                    "warmup_count": r["warmup_count"],
+                    "cool_step": r["cool_step"],
                 })
                 seen_thread_ids.add(pseudo_thread)
 
         seekers.sort(
             key=lambda seeker: (
-                EVENT_STAGE_PRIORITIES.get(seeker["lead_stage"], 99),
+                seeker.get("lead_stage_priority", 0),
+                seeker.get("interest_score", 0),
                 seeker.get("last_interaction") or "",
             ),
-            reverse=False,
+            reverse=True,
         )
         seekers = seekers[:max_seekers]
 

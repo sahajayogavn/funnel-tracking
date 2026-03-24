@@ -27,8 +27,19 @@ def seeded_db(tmp_path, monkeypatch):
         setup_database(conn)
         return conn
 
+    def _get_comment_conn(*a, **kw):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        from fb_pipeline.persistence.l4_sqlite_store import setup_database, setup_comment_database
+        setup_database(conn)
+        setup_comment_database(conn)
+        return conn
+
     monkeypatch.setattr(
         "adk_agents.tools.l5_warmup_tools.get_db_connection", _get_conn
+    )
+    monkeypatch.setattr(
+        "adk_agents.tools.l5_warmup_tools.get_comment_db_connection", _get_comment_conn
     )
 
     # Seed users with various dormancy
@@ -54,6 +65,27 @@ def seeded_db(tmp_path, monkeypatch):
         )
     conn.commit()
     conn.close()
+
+    comment_conn = _get_comment_conn()
+    comment_conn.execute(
+        "INSERT OR IGNORE INTO comment_users (post_id, commenter_name, fb_user_id, city, lead_stage, last_interaction, first_seen, temperature, last_warmup_at, warmup_count, cool_step) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "post_1",
+            "Dormant Comment 8d",
+            "fb_commenter_1",
+            "Hà Nội",
+            "Seeker",
+            (now - timedelta(days=8)).isoformat(),
+            (now - timedelta(days=90)).isoformat(),
+            "cool",
+            (now - timedelta(days=9)).isoformat(),
+            2,
+            1,
+        )
+    )
+    comment_conn.commit()
+    comment_conn.close()
     return db_path
 
 
@@ -76,6 +108,15 @@ class TestFindDormantSeekers:
         from adk_agents.tools.l5_warmup_tools import find_dormant_seekers
         result = find_dormant_seekers(min_days=3, max_seekers=1)
         assert result["count"] == 1
+
+    def test_includes_comment_users_with_scheduler_fields(self, seeded_db):
+        from adk_agents.tools.l5_warmup_tools import find_dormant_seekers
+        result = find_dormant_seekers(min_days=3, max_seekers=10)
+        comment_seeker = next(s for s in result["seekers"] if s["thread_id"] == "comment_fb_commenter_1")
+        assert comment_seeker["source"] == "comment"
+        assert comment_seeker["temperature"] == "cool"
+        assert comment_seeker["warmup_count"] == 2
+        assert comment_seeker["cool_step"] == 1
 
 
 class TestWasRecentlyWarmedUp:

@@ -68,6 +68,8 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
         ad_context=ad_context,
         ad_ids=list(ad_ids or []),
         messages=normalized_messages,
+        temperature="warm",
+        cool_step=0,
     )
     return EnrichedThreadRecord(
         page_id=thread_record.page_id,
@@ -223,6 +225,8 @@ def _mas_handoff_to_dict(mas_handoff: MasHandoff | None) -> dict:
         },
         "ad_context": mas_handoff.ad_context,
         "ad_ids": list(mas_handoff.ad_ids),
+        "temperature": mas_handoff.temperature,
+        "cool_step": mas_handoff.cool_step,
         "messages": [
             {
                 "sender": message.sender,

@@ -39,6 +39,65 @@ def _ensure_column(cursor: sqlite3.Cursor, table_name: str, column_name: str, co
 
 
 
+def _table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
+    row = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+# code:arch-schema-002
+
+def migrate_schema_v2(conn: sqlite3.Connection):
+    cursor = conn.cursor()
+    alter_specs = {
+        "messages": [
+            ("seq", "seq INTEGER DEFAULT 0"),
+        ],
+        "users": [
+            ("last_synced_at", "last_synced_at DATETIME"),
+            ("temperature", "temperature TEXT DEFAULT 'warm'"),
+            ("last_warmup_at", "last_warmup_at DATETIME"),
+            ("warmup_count", "warmup_count INTEGER DEFAULT 0"),
+            ("cool_step", "cool_step INTEGER DEFAULT 0"),
+        ],
+        "auto_replies": [
+            ("dry_run", "dry_run BOOLEAN DEFAULT 1"),
+        ],
+        "comment_users": [
+            ("last_synced_at", "last_synced_at DATETIME"),
+            ("temperature", "temperature TEXT DEFAULT 'warm'"),
+            ("last_warmup_at", "last_warmup_at DATETIME"),
+            ("warmup_count", "warmup_count INTEGER DEFAULT 0"),
+            ("cool_step", "cool_step INTEGER DEFAULT 0"),
+        ],
+    }
+
+    for table_name, columns in alter_specs.items():
+        if not _table_exists(cursor, table_name):
+            continue
+        for _column_name, column_ddl in columns:
+            try:
+                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_ddl}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
+    if _table_exists(cursor, "users"):
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_temperature_last_interaction "
+            "ON users(temperature, last_interaction)"
+        )
+    if _table_exists(cursor, "comment_users"):
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_comment_users_temperature_last_interaction "
+            "ON comment_users(temperature, last_interaction)"
+        )
+    conn.commit()
+
+
+
 def setup_database(conn: sqlite3.Connection, logger=None):
     cursor = conn.cursor()
     cursor.execute('''
@@ -132,6 +191,11 @@ def setup_database(conn: sqlite3.Connection, logger=None):
     _ensure_column(cursor, "users", "last_warmup_at", "last_warmup_at DATETIME")
     _ensure_column(cursor, "users", "warmup_count", "warmup_count INTEGER DEFAULT 0")
     _ensure_column(cursor, "users", "cool_step", "cool_step INTEGER DEFAULT 0")
+    # code:arch-schema-002
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_users_temperature_last_interaction
+        ON users(temperature, last_interaction)
+    ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_ad_ids (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -262,10 +326,12 @@ def setup_database(conn: sqlite3.Connection, logger=None):
         CREATE INDEX IF NOT EXISTS idx_mas_decisions_subject_route_created
         ON mas_decisions(subject_type, subject_id, route, created_at)
     ''')
+    migrate_schema_v2(conn)
     conn.commit()
 
 
 def setup_comment_database(conn: sqlite3.Connection):
+    # code:arch-schema-002
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS posts (
@@ -320,6 +386,15 @@ def setup_comment_database(conn: sqlite3.Connection):
     ''')
     # Use NULL default for last_synced_at in ALTER TABLE (CURRENT_TIMESTAMP not allowed as non-constant)
     _ensure_column(cursor, "comment_users", "last_synced_at", "last_synced_at DATETIME")
+    _ensure_column(cursor, "comment_users", "temperature", "temperature TEXT DEFAULT 'warm'")
+    _ensure_column(cursor, "comment_users", "last_warmup_at", "last_warmup_at DATETIME")
+    _ensure_column(cursor, "comment_users", "warmup_count", "warmup_count INTEGER DEFAULT 0")
+    _ensure_column(cursor, "comment_users", "cool_step", "cool_step INTEGER DEFAULT 0")
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_comment_users_temperature_last_interaction
+        ON comment_users(temperature, last_interaction)
+    ''')
+    migrate_schema_v2(conn)
     conn.commit()
 
 

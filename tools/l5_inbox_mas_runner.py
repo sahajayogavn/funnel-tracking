@@ -25,6 +25,8 @@ import os
 import sys
 import time
 
+import requests
+
 # Setup paths
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -175,6 +177,39 @@ def run_adk_pipeline(thread_messages: list, seeker_context: dict) -> dict:
     return result
 
 
+# code:tool-inbox-mas-001:telegram-notify
+def _notify_telegram_if_needed(thread_name: str, classification: str, reply_text: str):
+    trigger_terms = ("escalate", "register", "phone", "urgent")
+    classification_text = (classification or "").lower()
+    if not any(term in classification_text for term in trigger_terms):
+        return
+
+    try:
+        from tools.env_manager import load_credentials
+
+        creds = load_credentials()
+        bot_token = creds.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = creds.get("TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not bot_token or not chat_id:
+            logger.warning("Telegram notification skipped: missing bot token or chat id")
+            return
+
+        message_text = (
+            f"Inbox MAS alert\n"
+            f"Thread: {thread_name}\n"
+            f"Classification: {classification}\n"
+            f"Reply draft: {reply_text}"
+        )
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": message_text},
+            timeout=10,
+        ).raise_for_status()
+        logger.info(f"Telegram notification sent for {thread_name}")
+    except Exception as exc:
+        logger.warning(f"Telegram notification failed for {thread_name}: {exc}")
+
+
 def process_single_thread(cdp_page, page_id: str, thread_id: str,
                           thread_name: str, dry_run: bool = True) -> dict:
     """Process a single thread: lookup CRM, run ADK, reply via CDP.
@@ -193,6 +228,8 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
     from adk_agents.tools.facebook_tools import (
         navigate_to_thread, send_reply_via_cdp, log_auto_reply
     )
+    from adk_agents.tools.l5_stage_tools import evaluate_stage_gate
+    from fb_pipeline.persistence.l4_sqlite_store import log_mas_decision
 
     logger.info(f"{'[DRY-RUN]' if dry_run else '[LIVE]'} Processing thread: {thread_name}")
 
@@ -239,12 +276,32 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
     mode = "typed (not sent)" if dry_run else "sent"
     logger.info(f"Reply {mode} for {thread_name}: {reply_text[:60]}...")
 
+    stage_result = evaluate_stage_gate(thread_id)
+    if stage_result.get("promoted"):
+        log_mas_decision(
+            page_id,
+            "stage_gate",
+            "thread",
+            thread_id,
+            "promoted",
+            stage_result.get("reason"),
+            dry_run=dry_run,
+            payload=stage_result,
+        )
+        logger.info(
+            f"Stage promoted for {thread_name}: "
+            f"{stage_result.get('from_stage')} -> {stage_result.get('to_stage')}"
+        )
+
+    _notify_telegram_if_needed(thread_name, classification, reply_text)
+
     return {
         "status": "success",
         "mode": "dry_run" if dry_run else "live",
         "thread_name": thread_name,
         "classification": classification,
         "reply_text": reply_text,
+        "stage_result": stage_result,
     }
 
 

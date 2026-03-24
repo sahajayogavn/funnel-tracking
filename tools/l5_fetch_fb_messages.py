@@ -183,6 +183,8 @@ def _to_shared_enriched_thread_record(thread_record):
             ad_context=mas_handoff.get("ad_context", ""),
             ad_ids=list(mas_handoff.get("ad_ids") or []),
             messages=[InboxMessage(**message) for message in mas_handoff.get("messages") or []],
+            temperature=mas_handoff.get("temperature", "warm"),
+            cool_step=mas_handoff.get("cool_step", 0),
         )
     return EnrichedThreadRecord(
         page_id=thread_record["page_id"],

@@ -48,6 +48,7 @@ class SeekerInfo:
 
 
 @dataclass
+# code:arch-schema-002
 class MasHandoff:
     thread_id: str
     thread_name: str
@@ -57,6 +58,8 @@ class MasHandoff:
     ad_context: str = ""
     ad_ids: list[str] = field(default_factory=list)
     messages: list[InboxMessage] = field(default_factory=list)
+    temperature: str = "warm"
+    cool_step: int = 0
 
 
 @dataclass

@@ -77,6 +77,27 @@ def seeded_db(tmp_path, monkeypatch):
     )
     conn.commit()
     conn.close()
+
+    comment_conn = _get_comment_conn()
+    comment_conn.execute(
+        "INSERT OR IGNORE INTO comment_users (post_id, commenter_name, fb_user_id, city, lead_stage, last_interaction, first_seen, temperature, last_warmup_at, warmup_count, cool_step) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "post_hn_1",
+            "Comment Hà Nội User",
+            "fb_comment_hn",
+            "Hà Nội",
+            "Seeker_Public_Program",
+            (now - timedelta(days=6)).isoformat(),
+            (now - timedelta(days=70)).isoformat(),
+            "warm",
+            (now - timedelta(days=12)).isoformat(),
+            1,
+            0,
+        )
+    )
+    comment_conn.commit()
+    comment_conn.close()
     return db_path
 
 
@@ -160,6 +181,16 @@ class TestFindTargetSeekers:
         from adk_agents.tools.l5_event_tools import find_target_seekers_for_event
         result = find_target_seekers_for_event(event_id=1, city="Đà Nẵng")
         assert result["count"] == 0
+
+    def test_includes_comment_users_with_scheduler_fields(self, seeded_db):
+        from adk_agents.tools.l5_event_tools import find_target_seekers_for_event
+        result = find_target_seekers_for_event(event_id=1, city="Hà Nội")
+        seeker = next(s for s in result["seekers"] if s["thread_id"] == "comment_fb_comment_hn")
+        assert seeker["source"] == "comment"
+        assert seeker["lead_stage"] == "Public Program Seeker"
+        assert seeker["temperature"] == "warm"
+        assert seeker["warmup_count"] == 1
+        assert seeker["cool_step"] == 0
 
 
 class TestLogEventCampaign:

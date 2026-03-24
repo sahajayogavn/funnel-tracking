@@ -23,6 +23,7 @@ Usage:
     python tools/scheduler.py --page-id 119587786260266 --fetch-interval 10 --warmup-time 08:30
 """
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -87,6 +88,12 @@ TEMPERATURE_THRESHOLDS = {
     "Sahaja Yogi": {"hot": 14, "warm": 30, "cool": 90},
 }
 
+COOL_SEQUENCE_TEMPLATES = {
+    1: "Chào bạn, lâu rồi mình không thấy bạn. Hy vọng bạn khỏe 🙏",
+    2: "Mình chia sẻ bạn mẹo thiền 5 phút mỗi sáng giúp tỉnh táo cả ngày 🌿",
+    3: "Cuối tuần này có Thiền Âm nhạc tại {city}, hoàn toàn miễn phí. Bạn muốn tham gia không?",
+}
+
 STAGE_TO_STRATEGY_STAGE = {
     "intake": "Follower",
     "user": "Follower",
@@ -147,13 +154,30 @@ def _compute_temperature(lead_stage: str | None, last_interaction: str | None, s
     return "cold"
 
 
+# code:tool-stage-001
+# code:tool-event-001
 def _load_user_state(thread_id: str) -> dict | None:
-    from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+    from fb_pipeline.persistence.l4_sqlite_store import get_db_connection, get_comment_db_connection
+
+    if thread_id.startswith("comment_"):
+        comment_key = thread_id[len("comment_"):]
+        conn = get_comment_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT commenter_name AS thread_name, lead_stage, last_interaction, temperature, last_warmup_at, warmup_count, cool_step, city "
+                "FROM comment_users WHERE fb_user_id = ?",
+                (comment_key,),
+            ).fetchone()
+            if row:
+                return {"thread_id": thread_id, **dict(row)}
+            return None
+        finally:
+            conn.close()
 
     conn = get_db_connection(logger=logger)
     try:
         row = conn.execute(
-            "SELECT thread_id, thread_name, lead_stage, last_interaction, temperature, last_warmup_at, warmup_count, cool_step "
+            "SELECT thread_id, thread_name, lead_stage, last_interaction, temperature, last_warmup_at, warmup_count, cool_step, city "
             "FROM users WHERE thread_id = ?",
             (thread_id,),
         ).fetchone()
@@ -205,23 +229,57 @@ def _has_recent_live_event(thread_id: str, since_days: int = 90) -> bool:
         conn.close()
 
 
-def _update_user_decision_state(thread_id: str, temperature: str, warmup_sent: bool = False):
-    from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+# code:tool-scheduler-001:cool-sequence
+def _get_next_cool_step(user_state: dict) -> int | None:
+    current_step = int(user_state.get("cool_step") or 0)
+    return current_step + 1 if current_step < 3 else None
 
-    conn = get_db_connection(logger=logger)
+
+# code:tool-stage-001
+# code:tool-scheduler-001:cool-sequence
+def _update_user_decision_state(
+    thread_id: str,
+    temperature: str,
+    warmup_sent: bool = False,
+    cool_step: int | None = None,
+):
+    from fb_pipeline.persistence.l4_sqlite_store import get_db_connection, get_comment_db_connection
+
+    is_comment_user = thread_id.startswith("comment_")
+    if is_comment_user:
+        conn = get_comment_db_connection()
+        where_clause = "fb_user_id = ?"
+        thread_key = thread_id[len("comment_"):]
+        table_name = "comment_users"
+    else:
+        conn = get_db_connection(logger=logger)
+        where_clause = "thread_id = ?"
+        thread_key = thread_id
+        table_name = "users"
+
     try:
         if warmup_sent:
-            conn.execute(
-                "UPDATE users SET temperature = ?, last_warmup_at = datetime('now'), warmup_count = COALESCE(warmup_count, 0) + 1, "
-                "cool_step = CASE WHEN ? = 'cool' THEN MIN(COALESCE(cool_step, 0) + 1, 3) ELSE COALESCE(cool_step, 0) END "
-                "WHERE thread_id = ?",
-                (temperature, temperature, thread_id),
-            )
+            if cool_step is None:
+                conn.execute(
+                    f"UPDATE {table_name} SET temperature = ?, last_warmup_at = datetime('now'), warmup_count = COALESCE(warmup_count, 0) + 1 WHERE {where_clause}",
+                    (temperature, thread_key),
+                )
+            else:
+                conn.execute(
+                    f"UPDATE {table_name} SET temperature = ?, last_warmup_at = datetime('now'), warmup_count = COALESCE(warmup_count, 0) + 1, cool_step = ? WHERE {where_clause}",
+                    (temperature, cool_step, thread_key),
+                )
         else:
-            conn.execute(
-                "UPDATE users SET temperature = ? WHERE thread_id = ?",
-                (temperature, thread_id),
-            )
+            if cool_step is None:
+                conn.execute(
+                    f"UPDATE {table_name} SET temperature = ? WHERE {where_clause}",
+                    (temperature, thread_key),
+                )
+            else:
+                conn.execute(
+                    f"UPDATE {table_name} SET temperature = ?, cool_step = ? WHERE {where_clause}",
+                    (temperature, cool_step, thread_key),
+                )
         conn.commit()
     finally:
         conn.close()
@@ -292,9 +350,7 @@ def run_react_cycle(page_id: str, dry_run: bool = True):
 
         processed = 0
         for item in unreacted["items"]:
-            # Use a simple heuristic for reaction selection
-            # In production, this would go through the Reactor ADK agent
-            reaction_type = _select_reaction_heuristic(item)
+            reaction_type = run_adk_reactor(item, dry_run=True) or _select_reaction_heuristic(item)
             log_reaction(
                 item_type=item["item_type"],
                 item_id=item["item_id"],
@@ -323,6 +379,141 @@ def _select_reaction_heuristic(item: dict) -> str:
     return "like"
 
 
+# code:tool-scheduler-001:reactor-adk
+# code:tool-scheduler-001:warmup-composer-adk
+# code:tool-scheduler-001:event-advertiser-adk
+def _run_adk_route(agent, app_name: str, user_id: str, state: dict, prompt: str) -> list[dict]:
+    """Run a single ADK route agent and collect text events."""
+    from google.adk.runners import Runner
+    from google.adk.sessions import InMemorySessionService
+    from google.genai import types
+
+    session_service = InMemorySessionService()
+    runner = Runner(
+        agent=agent,
+        app_name=app_name,
+        session_service=session_service,
+    )
+    session = asyncio.run(
+        session_service.create_session(
+            app_name=app_name,
+            user_id=user_id,
+            state=state,
+        )
+    )
+
+    user_msg = types.Content(
+        role="user",
+        parts=[types.Part(text=prompt)],
+    )
+
+    events = []
+    for event in runner.run(user_id=user_id, session_id=session.id, new_message=user_msg):
+        if hasattr(event, "content") and event.content and event.content.parts:
+            text = event.content.parts[0].text
+            if text:
+                events.append({
+                    "author": getattr(event, "author", ""),
+                    "text": text.strip(),
+                })
+    return events
+
+
+def run_adk_reactor(item: dict, dry_run: bool = True) -> str:
+    """Run the Reactor ADK agent for a reaction decision."""
+    from adk_agents.agent import reactor
+
+    _ = dry_run
+    state = {
+        "reaction_content": item.get("content") or "",
+        "reaction_sender": json.dumps(
+            {
+                "sender": item.get("sender"),
+                "item_type": item.get("item_type"),
+                "thread_id": item.get("thread_id"),
+                "post_id": item.get("post_id"),
+                "thread_name": item.get("thread_name"),
+                "timestamp": item.get("timestamp"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+    }
+    events = _run_adk_route(
+        agent=reactor,
+        app_name="sahajayoga_reactor",
+        user_id="scheduler_reactor",
+        state=state,
+        prompt="Choose the best Facebook reaction using the provided session state.",
+    )
+    valid_reactions = {"like", "love", "care", "haha", "wow", "sad"}
+    for event in reversed(events):
+        reaction = (event.get("text") or "").strip().lower()
+        if reaction in valid_reactions:
+            return reaction
+    return ""
+
+
+def run_adk_warmup_composer(seeker: dict, strategy: dict, knowledge_context: str, dry_run: bool = True) -> str:
+    """Run the WarmUpComposer ADK agent for a warm-up message."""
+    from adk_agents.agent import warmup_composer
+
+    _ = dry_run
+    seeker_context = json.dumps(seeker, ensure_ascii=False, indent=2)
+    warmup_brief = json.dumps(
+        {
+            "seeker_context": seeker,
+            "strategy_type": strategy.get("type"),
+            "cool_step": strategy.get("cool_step"),
+            "knowledge_context": knowledge_context,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    events = _run_adk_route(
+        agent=warmup_composer,
+        app_name="sahajayoga_warmup",
+        user_id="scheduler_warmup",
+        state={
+            "seeker_context": seeker_context,
+            "strategy_type": strategy.get("type") or "",
+            "cool_step": strategy.get("cool_step") or "",
+            "knowledge_context": knowledge_context,
+            "warmup_brief": warmup_brief,
+        },
+        prompt="Compose a warm-up message using the provided session state.",
+    )
+    for event in reversed(events):
+        message_text = (event.get("text") or "").strip()
+        if message_text:
+            return message_text
+    return ""
+
+
+def run_adk_event_advertiser(event: dict, seeker: dict, knowledge_context: str, dry_run: bool = True) -> str:
+    """Run the EventAdvertiser ADK agent for an event notification."""
+    from adk_agents.agent import event_advertiser
+
+    _ = dry_run
+    event_details = json.dumps({**event, "knowledge_context": knowledge_context}, ensure_ascii=False, indent=2)
+    seeker_context = json.dumps(seeker, ensure_ascii=False, indent=2)
+    events = _run_adk_route(
+        agent=event_advertiser,
+        app_name="sahajayoga_event",
+        user_id="scheduler_event",
+        state={
+            "event_details": event_details,
+            "seeker_context": seeker_context,
+        },
+        prompt="Compose an event notification using the provided session state.",
+    )
+    for event_output in reversed(events):
+        message_text = (event_output.get("text") or "").strip()
+        if message_text:
+            return message_text
+    return ""
+
+
 # code:tool-scheduler-001:reply
 def run_reply_cycle(page_id: str, dry_run: bool = True, max_threads: int = 5):
     """Inbox Reply: existing MAS reply flow (Classifier → Responder)."""
@@ -338,6 +529,7 @@ def run_reply_cycle(page_id: str, dry_run: bool = True, max_threads: int = 5):
         return {"status": "error", "error": str(e)}
 
 
+# code:tool-scheduler-001:cool-sequence
 # code:tool-scheduler-001:warmup
 def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
     """Route 2: Warm up dormant seekers."""
@@ -348,7 +540,9 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
             select_warmup_strategy, log_warmup_campaign
         )
         from fb_pipeline.persistence.l4_sqlite_store import log_mas_decision
+        from tools.l5_inbox_mas_runner import load_knowledge_context
 
+        knowledge_context = load_knowledge_context()
         dormant = find_dormant_seekers(page_id, max_seekers=max_seekers)
         if dormant["status"] != "success" or dormant["count"] == 0:
             logger.info("[WARMUP] No dormant seekers found.")
@@ -359,39 +553,124 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
         decisioned = 0
         for seeker in dormant["seekers"]:
             thread_id = seeker["thread_id"]
+            source = seeker.get("source")
+            subject_type = "comment_user" if thread_id.startswith("comment_") else "thread"
+
+            if thread_id.startswith("comment_"):
+                logger.info(f"[WARMUP] Skipping comment user {seeker.get('name')} ({thread_id}) — no delivery channel.")
+                log_mas_decision(
+                    page_id,
+                    "warmup",
+                    subject_type,
+                    thread_id,
+                    "blocked",
+                    "no_delivery_channel",
+                    dry_run=dry_run,
+                    payload={
+                        "name": seeker.get("name"),
+                        "days_dormant": seeker.get("days_dormant"),
+                        "source": source,
+                        "temperature": seeker.get("temperature"),
+                        "last_warmup_at": seeker.get("last_warmup_at"),
+                        "warmup_count": seeker.get("warmup_count"),
+                        "cool_step": seeker.get("cool_step"),
+                    },
+                )
+                skipped += 1
+                continue
+
+            user_state = _load_user_state(thread_id)
             eligible, reason, payload = _evaluate_proactive_eligibility(page_id, "warmup", thread_id)
-            payload.update({"name": seeker.get("name"), "days_dormant": seeker.get("days_dormant")})
+            payload.update({"name": seeker.get("name"), "days_dormant": seeker.get("days_dormant"), "source": source})
+            if user_state:
+                payload.update({"cool_step": user_state.get("cool_step", 0), "last_warmup_at": user_state.get("last_warmup_at")})
             if not eligible:
-                log_mas_decision(page_id, "warmup", "thread", thread_id, "blocked", reason, dry_run=dry_run, payload=payload)
+                log_mas_decision(page_id, "warmup", subject_type, thread_id, "blocked", reason, dry_run=dry_run, payload=payload)
                 skipped += 1
                 continue
 
-            if was_recently_warmed_up(thread_id, days=7):
-                log_mas_decision(page_id, "warmup", "thread", thread_id, "blocked", "recent_live_warmup", dry_run=dry_run, payload=payload)
-                logger.info(f"[WARMUP] Skipping {seeker['name']} — recently warmed up.")
-                skipped += 1
-                continue
+            strategy = None
+            message_text = ""
+            next_cool_step = None
+            next_temperature = payload["temperature"]
 
-            strategy = select_warmup_strategy(
-                lead_stage=seeker.get("lead_stage", "Intake"),
-                days_dormant=seeker.get("days_dormant", 7)
-            )
-            if not strategy:
-                log_mas_decision(page_id, "warmup", "thread", thread_id, "blocked", "no_strategy", dry_run=dry_run, payload=payload)
-                skipped += 1
-                continue
+            if payload["temperature"] == "cool":
+                if not user_state:
+                    log_mas_decision(page_id, "warmup", subject_type, thread_id, "blocked", "missing_user_state", dry_run=dry_run, payload=payload)
+                    skipped += 1
+                    continue
 
-            message_text = strategy.get("template", "")
+                next_cool_step = _get_next_cool_step(user_state)
+                if next_cool_step is None:
+                    next_temperature = "cold"
+                    log_mas_decision(
+                        page_id,
+                        "warmup",
+                        subject_type,
+                        thread_id,
+                        "blocked",
+                        "cool_sequence_exhausted",
+                        dry_run=dry_run,
+                        payload={**payload, "temperature": next_temperature, "cool_step": 0},
+                    )
+                    _update_user_decision_state(thread_id, next_temperature, warmup_sent=False, cool_step=0)
+                    skipped += 1
+                    continue
+
+                last_warmup_at = _parse_db_time(user_state.get("last_warmup_at"))
+                days_since_last_warmup = None if last_warmup_at is None else (datetime.now() - last_warmup_at).days
+                if next_cool_step == 2 and (days_since_last_warmup is None or days_since_last_warmup < 3):
+                    log_mas_decision(page_id, "warmup", subject_type, thread_id, "blocked", "cool_step_interval_pending", dry_run=dry_run, payload={**payload, "required_gap_days": 3, "next_cool_step": 2})
+                    skipped += 1
+                    continue
+                if next_cool_step == 3 and (days_since_last_warmup is None or days_since_last_warmup < 5):
+                    log_mas_decision(page_id, "warmup", subject_type, thread_id, "blocked", "cool_step_interval_pending", dry_run=dry_run, payload={**payload, "required_gap_days": 5, "next_cool_step": 3})
+                    skipped += 1
+                    continue
+
+                strategy = {"type": f"cool_step_{next_cool_step}", "cool_step": next_cool_step}
+                template = COOL_SEQUENCE_TEMPLATES[next_cool_step]
+                city = seeker.get("city") or user_state.get("city") or "thành phố của bạn"
+                strategy["template"] = template.format(city=city)
+                message_text = run_adk_warmup_composer(
+                    seeker,
+                    strategy,
+                    knowledge_context,
+                    dry_run=True,
+                ) or strategy.get("template", "")
+            else:
+                if was_recently_warmed_up(thread_id, days=7):
+                    log_mas_decision(page_id, "warmup", subject_type, thread_id, "blocked", "recent_live_warmup", dry_run=dry_run, payload=payload)
+                    logger.info(f"[WARMUP] Skipping {seeker['name']} — recently warmed up.")
+                    skipped += 1
+                    continue
+
+                strategy = select_warmup_strategy(
+                    lead_stage=seeker.get("lead_stage", "Intake"),
+                    days_dormant=seeker.get("days_dormant", 7)
+                )
+                if not strategy:
+                    log_mas_decision(page_id, "warmup", subject_type, thread_id, "blocked", "no_strategy", dry_run=dry_run, payload=payload)
+                    skipped += 1
+                    continue
+                strategy = {**strategy, "cool_step": next_cool_step}
+                message_text = run_adk_warmup_composer(
+                    seeker,
+                    strategy,
+                    knowledge_context,
+                    dry_run=True,
+                ) or strategy.get("template", "")
+
             if message_text:
                 log_mas_decision(
                     page_id,
                     "warmup",
-                    "thread",
+                    subject_type,
                     thread_id,
                     "allowed",
                     "eligible",
                     dry_run=dry_run,
-                    payload={**payload, "strategy_type": strategy["type"]},
+                    payload={**payload, "strategy_type": strategy["type"], "next_cool_step": next_cool_step},
                 )
                 decisioned += 1
                 log_warmup_campaign(
@@ -403,8 +682,9 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
                 )
                 _update_user_decision_state(
                     thread_id,
-                    payload["temperature"],
+                    next_temperature,
                     warmup_sent=not dry_run,
+                    cool_step=next_cool_step,
                 )
                 processed += 1
                 logger.info(
@@ -428,7 +708,9 @@ def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
             log_event_campaign
         )
         from fb_pipeline.persistence.l4_sqlite_store import log_mas_decision
+        from tools.l5_inbox_mas_runner import load_knowledge_context
 
+        knowledge_context = load_knowledge_context()
         events = get_upcoming_events(days_ahead=14)
         if events["status"] != "success" or events["count"] == 0:
             logger.info("[EVENT] No upcoming events found.")
@@ -448,8 +730,10 @@ def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
 
             for seeker in targets["seekers"]:
                 thread_id = seeker["thread_id"]
+                subject_type = "comment_user" if thread_id.startswith("comment_") else "thread"
                 if thread_id.startswith("comment_"):
                     skipped += 1
+                    logger.info(f"[EVENT] Skipping comment user {seeker.get('name')} ({thread_id}) — no delivery channel.")
                     log_mas_decision(
                         page_id,
                         "event",
@@ -458,27 +742,41 @@ def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
                         "blocked",
                         "no_delivery_channel",
                         dry_run=dry_run,
-                        payload={"event_id": event["id"], "city": event["city"], "source": seeker.get("source")},
+                        payload={
+                            "event_id": event["id"],
+                            "city": event["city"],
+                            "source": seeker.get("source"),
+                            "temperature": seeker.get("temperature"),
+                            "last_warmup_at": seeker.get("last_warmup_at"),
+                            "warmup_count": seeker.get("warmup_count"),
+                            "cool_step": seeker.get("cool_step"),
+                        },
                     )
                     continue
 
                 eligible, reason, payload = _evaluate_proactive_eligibility(page_id, "event", thread_id)
                 payload.update({"event_id": event["id"], "event_city": event["city"], "source": seeker.get("source")})
                 if not eligible:
-                    log_mas_decision(page_id, "event", "thread", thread_id, "blocked", reason, dry_run=dry_run, payload=payload)
+                    log_mas_decision(page_id, "event", subject_type, thread_id, "blocked", reason, dry_run=dry_run, payload=payload)
                     skipped += 1
                     continue
 
-                message_text = (
+                fallback_message_text = (
                     f"Xin chào {seeker['name']}! "
                     f"Sahaja Yoga có lớp thiền mới: {event['name']} "
                     f"tại {event['city']} vào ngày {event['event_date']}. "
                     f"Lớp hoàn toàn MIỄN PHÍ. Bạn có muốn tham gia không?"
                 )
+                message_text = run_adk_event_advertiser(
+                    event,
+                    seeker,
+                    knowledge_context,
+                    dry_run=True,
+                ) or fallback_message_text
                 log_mas_decision(
                     page_id,
                     "event",
-                    "thread",
+                    subject_type,
                     thread_id,
                     "allowed",
                     "eligible",

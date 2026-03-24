@@ -6,7 +6,8 @@ Tests schedule registration, route enable/disable, and scheduler loop logic.
 """
 import os
 import sys
-from datetime import datetime
+import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -15,12 +16,93 @@ sys.path.insert(0, PROJECT_ROOT)
 
 
 @pytest.fixture(autouse=True)
-def clear_schedule():
+def clear_schedule(monkeypatch):
     """Clear all scheduled jobs before each test."""
-    import schedule
-    schedule.clear()
+    import types
+
+    class _Jobs:
+        def __init__(self):
+            self._jobs = []
+
+        def clear(self):
+            self._jobs.clear()
+
+        def every(self, interval=None):
+            scheduler = self
+
+            class _Every:
+                def __init__(self, interval):
+                    self.interval = interval
+                    self.unit = None
+
+                @property
+                def minutes(self):
+                    self.unit = "minutes"
+                    return self
+
+                @property
+                def day(self):
+                    self.unit = "day"
+                    return self
+
+                def at(self, when):
+                    self.when = when
+                    return self
+
+                def do(self, func, *args, **kwargs):
+                    scheduler._jobs.append({"func": func, "args": args, "kwargs": kwargs, "interval": self.interval, "unit": self.unit, "when": getattr(self, "when", None)})
+                    return scheduler._jobs[-1]
+
+            return _Every(interval)
+
+        def get_jobs(self):
+            return list(self._jobs)
+
+        def run_pending(self):
+            return None
+
+    fake_schedule = _Jobs()
+    monkeypatch.setitem(sys.modules, "schedule", fake_schedule)
     yield
-    schedule.clear()
+    fake_schedule.clear()
+
+
+@pytest.fixture
+def scheduler_seeded_db(tmp_path):
+    db_path = str(tmp_path / "frankensqlite.db")
+
+    def _get_conn(*a, **kw):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        from fb_pipeline.persistence.l4_sqlite_store import setup_database
+        setup_database(conn)
+        return conn
+
+    def _get_comment_conn(*a, **kw):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        from fb_pipeline.persistence.l4_sqlite_store import setup_database, setup_comment_database
+        setup_database(conn)
+        setup_comment_database(conn)
+        return conn
+
+    now = datetime.now()
+    conn = _get_conn()
+    conn.execute(
+        "INSERT OR IGNORE INTO users (thread_id, thread_name, city, lead_stage, last_interaction, temperature, last_warmup_at, warmup_count, cool_step) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("thread_dm_1", "DM User", "Hà Nội", "Seeker", (now - timedelta(days=5)).isoformat(), "cool", (now - timedelta(days=10)).isoformat(), 1, 1),
+    )
+    conn.commit()
+    conn.close()
+
+    comment_conn = _get_comment_conn()
+    comment_conn.execute(
+        "INSERT OR IGNORE INTO comment_users (post_id, commenter_name, fb_user_id, city, lead_stage, last_interaction, temperature, last_warmup_at, warmup_count, cool_step) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("post_1", "Comment User", "fb_comment_1", "Hà Nội", "Seeker", (now - timedelta(days=6)).isoformat(), "cool", (now - timedelta(days=8)).isoformat(), 2, 1),
+    )
+    comment_conn.commit()
+    comment_conn.close()
+    return _get_conn, _get_comment_conn
 
 
 class TestSetupSchedule:
@@ -152,6 +234,54 @@ class TestDecisionCore:
         eligible, reason, _ = sched._evaluate_proactive_eligibility("page123", "event", "thread_1")
         assert eligible is False
         assert reason == "dormant_quarterly_limit"
+
+
+class TestRouteCommentUsers:
+    def test_load_user_state_reads_comment_users(self, monkeypatch, scheduler_seeded_db):
+        import tools.l5_scheduler as sched
+        get_conn, get_comment_conn = scheduler_seeded_db
+
+        monkeypatch.setattr(
+            "fb_pipeline.persistence.l4_sqlite_store.get_db_connection",
+            lambda *a, **kw: get_conn(),
+        )
+        monkeypatch.setattr(
+            "fb_pipeline.persistence.l4_sqlite_store.get_comment_db_connection",
+            lambda *a, **kw: get_comment_conn(),
+        )
+
+        state = sched._load_user_state("comment_fb_comment_1")
+        assert state is not None
+        assert state["thread_name"] == "Comment User"
+        assert state["temperature"] == "cool"
+        assert state["warmup_count"] == 2
+        assert state["cool_step"] == 1
+
+    def test_update_user_decision_state_updates_comment_users(self, monkeypatch, scheduler_seeded_db):
+        import tools.l5_scheduler as sched
+        get_conn, get_comment_conn = scheduler_seeded_db
+
+        monkeypatch.setattr(
+            "fb_pipeline.persistence.l4_sqlite_store.get_db_connection",
+            lambda *a, **kw: get_conn(),
+        )
+        monkeypatch.setattr(
+            "fb_pipeline.persistence.l4_sqlite_store.get_comment_db_connection",
+            lambda *a, **kw: get_comment_conn(),
+        )
+
+        sched._update_user_decision_state("comment_fb_comment_1", "warm", warmup_sent=False, cool_step=2)
+
+        conn = get_comment_conn()
+        row = conn.execute(
+            "SELECT temperature, warmup_count, cool_step FROM comment_users WHERE fb_user_id = ?",
+            ("fb_comment_1",),
+        ).fetchone()
+        conn.close()
+
+        assert row["temperature"] == "warm"
+        assert row["warmup_count"] == 2
+        assert row["cool_step"] == 2
 
 
 class TestGracefulShutdown:

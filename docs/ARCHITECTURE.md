@@ -520,6 +520,15 @@ ALTER TABLE users ADD COLUMN temperature TEXT DEFAULT 'warm';
 ALTER TABLE users ADD COLUMN last_warmup_at DATETIME;
 ALTER TABLE users ADD COLUMN warmup_count INTEGER DEFAULT 0;
 ALTER TABLE users ADD COLUMN cool_step INTEGER DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_users_temperature_last_interaction
+ON users(temperature, last_interaction);
+
+ALTER TABLE comment_users ADD COLUMN temperature TEXT DEFAULT 'warm';
+ALTER TABLE comment_users ADD COLUMN last_warmup_at DATETIME;
+ALTER TABLE comment_users ADD COLUMN warmup_count INTEGER DEFAULT 0;
+ALTER TABLE comment_users ADD COLUMN cool_step INTEGER DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_comment_users_temperature_last_interaction
+ON comment_users(temperature, last_interaction);
 ```
 
 ### Production MAS decision core
