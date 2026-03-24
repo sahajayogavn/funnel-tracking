@@ -98,7 +98,8 @@ def ensure_page_access(page, expected_page_id: str):
         "you no longer have access",
         "this content isn't available",
         "this page isn't available",
-        "permission",
+        "page isn't available",
+        "doesn't have permission to manage",
     ]
     lowered = page_text.lower()
     if any(marker in lowered for marker in denied_markers):

@@ -68,7 +68,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             logger.info(f"Reached max threads ({max_threads}). Stopping.")
             break
 
-        visible_threads = page.evaluate('''() => {
+        visible_threads = page.evaluate(r'''() => {
             let items = document.querySelectorAll('._5_n1');
             return Array.from(items).map((el, idx) => {
                 let text = el.innerText || '';

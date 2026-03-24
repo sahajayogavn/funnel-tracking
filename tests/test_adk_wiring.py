@@ -114,3 +114,62 @@ class TestAdkWiring:
         assert '"knowledge_context": "KB"' in captured[1]["state"]["warmup_brief"]
         assert "event_details" in captured[2]["state"]
         assert '"knowledge_context": "KB"' in captured[2]["state"]["event_details"]
+
+    def test_responder_prompt_has_output_rule_and_anti_reflection(self):
+        """Responder instruction must begin with OUTPUT RULE to suppress reasoning leaks."""
+        from adk_agents.agent import responder
+
+        instruction = responder.instruction
+        assert instruction.startswith("OUTPUT RULE"), (
+            "Responder instruction must start with 'OUTPUT RULE'"
+        )
+        assert "Do NOT include any thinking" in instruction
+        assert "BAD" in instruction and "GOOD" in instruction
+        assert responder.output_key == "reply_text"
+
+    def test_run_inbox_cycle_renavigates_before_reply_loop(self):
+        """run_inbox_cycle must call page.goto() for Step 2b before processing threads."""
+        import tools.l5_inbox_mas_runner as runner_mod
+
+        goto_calls = []
+
+        class MockPage:
+            url = "https://business.facebook.com/latest/inbox/all?asset_id=PAGE123"
+
+            def goto(self, url, **kwargs):
+                goto_calls.append(url)
+
+            def wait_for_selector(self, sel, **kwargs):
+                pass
+
+            def wait_for_timeout(self, ms):
+                pass
+
+        class MockSession:
+            page = MockPage()
+
+            def close_page(self):
+                pass
+
+        class MockCursor:
+            def execute(self, *a): pass
+            def fetchone(self): return None
+
+        class MockConn:
+            def cursor(self): return MockCursor()
+            def close(self): pass
+
+        with patch.object(runner_mod, "attach_to_authorized_session", return_value=MockSession()), \
+             patch.object(runner_mod, "get_db_connection", return_value=MockConn()), \
+             patch.object(runner_mod, "scrape_inbox",
+                          return_value={"new_threads": 0, "new_messages": 0, "skipped_threads": 0}), \
+             patch.object(runner_mod, "record_fetch", return_value=None), \
+             patch("adk_agents.tools.seeker_tools.find_unreplied_threads",
+                   return_value={"status": "success", "count": 1,
+                                 "threads": [{"thread_id": "t1", "thread_name": "Test"}]}), \
+             patch.object(runner_mod, "process_single_thread",
+                          return_value={"status": "success"}):
+            runner_mod.run_inbox_cycle("PAGE123", dry_run=True, max_threads=1)
+
+        assert len(goto_calls) >= 1, "Step 2b re-navigation goto() was never called"
+        assert "PAGE123" in goto_calls[0]

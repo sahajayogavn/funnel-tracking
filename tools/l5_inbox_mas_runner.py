@@ -25,6 +25,12 @@ import os
 import sys
 import time
 
+try:
+    import nest_asyncio
+    nest_asyncio.apply()  # Allow asyncio.run() inside Playwright's sync event loop
+except ImportError:
+    pass  # nest_asyncio optional; install with: pip install nest-asyncio
+
 import requests
 
 # Setup paths
@@ -131,7 +137,12 @@ def run_adk_pipeline(thread_messages: list, seeker_context: dict) -> dict:
         app_name="sahajayoga_inbox",
         session_service=session_service,
     )
-    session = asyncio.run(
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    session = loop.run_until_complete(
         session_service.create_session(
             app_name="sahajayoga_inbox",
             user_id="inbox_runner",
@@ -362,6 +373,19 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                 return {"status": "no_unreplied", "scrape_stats": scrape_stats}
 
             logger.info(f"Found {unreplied['count']} unreplied thread(s).")
+
+            # Step 2b: Re-navigate to inbox to reset sidebar scroll position.
+            # The scrape phase scrolls the sidebar to the date cutoff so thread
+            # _5_n1 divs are no longer in the DOM viewport. Re-loading the inbox
+            # brings the sidebar back to the top before the navigate-and-type loop.
+            logger.info("Step 2b: Re-navigating to inbox to reset sidebar scroll...")
+            try:
+                cdp_page.goto(inbox_url, wait_until="domcontentloaded", timeout=60000)
+                cdp_page.wait_for_selector("div._5_n1", timeout=15000)
+                cdp_page.wait_for_timeout(2000)
+                logger.info("Inbox sidebar reset successfully.")
+            except Exception as e:
+                logger.warning(f"Sidebar re-navigation failed (will try anyway): {e}")
 
             # Step 3: Process each thread
             for thread in unreplied["threads"]:
