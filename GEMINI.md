@@ -192,7 +192,8 @@ These rules are **absolute** and must never be violated:
 - A reply that starts with `**Crafting...`, `I need to...`, `Let me...`, or any chain-of-thought narration is a **reasoning leak** and must be blocked — never sent.
 - If `_sanitize_reply()` returns an empty string, the thread must be logged as `no_reply` and skipped. Do NOT type empty or reasoning-only text.
 
-### 10.3 Dry-Run Is the Default
+### 10.3 Inbox Replies Are Always Draft-Only
 
-- The `--live` flag (which presses Enter and actually sends messages) must **never** be passed during development, debugging, or E2E testing.
-- Only the human operator (Steve) decides when to run in live mode against real customers.
+- Customer inbox replies must **never** be auto-sent by automation in any mode.
+- The `--live` flag must not change inbox replies into send behavior; if accepted for backward compatibility, inbox reply automation still stops at typed draft text.
+- A human operator (Steve) must review the drafted reply and manually press Enter/send.

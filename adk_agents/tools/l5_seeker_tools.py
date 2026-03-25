@@ -89,31 +89,48 @@ def get_thread_messages(thread_id: str, limit: int = 20) -> dict:
 
 
 def find_unreplied_threads(page_id: str, limit: int = 10) -> dict:
-    """Find threads that have new customer messages with no auto-reply.
+    """Find threads whose latest customer message has not been acknowledged.
 
     Args:
         page_id: The Facebook Page ID to search threads for.
-        limit: Maximum number of unreplied threads to return.
+        limit: Maximum number of actionable threads to return.
 
     Returns:
-        dict: Status and list of unreplied thread IDs and names.
+        dict: Status and list of actionable thread IDs and names.
     """
     try:
         conn = get_db_connection()
 
         rows = conn.execute('''
-            SELECT DISTINCT t.id, t.thread_name
-            FROM threads t
-            JOIN messages m ON m.thread_id = t.id
-            WHERE t.page_id = ?
-            AND m.sender = 'Customer'
-            AND NOT EXISTS (
-                SELECT 1 FROM auto_replies ar
-                WHERE ar.thread_id = t.id
-                AND COALESCE(ar.dry_run, 1) = 0
-                AND ar.created_at > datetime(m.timestamp, '-1 hour')
+            WITH latest_customer_messages AS (
+                SELECT
+                    m.thread_id,
+                    MAX(m.message_timestamp) AS latest_customer_message_timestamp,
+                    MAX(m.timestamp) AS latest_customer_recorded_at
+                FROM messages m
+                WHERE m.sender = 'Customer'
+                GROUP BY m.thread_id
+            ),
+            latest_acknowledgements AS (
+                SELECT
+                    ar.thread_id,
+                    MAX(ar.customer_message_timestamp) AS latest_acknowledged_customer_message_timestamp
+                FROM auto_replies ar
+                WHERE ar.customer_message_timestamp IS NOT NULL
+                GROUP BY ar.thread_id
             )
-            ORDER BY m.timestamp DESC
+            SELECT
+                t.id,
+                t.thread_name
+            FROM threads t
+            JOIN latest_customer_messages lcm ON lcm.thread_id = t.id
+            LEFT JOIN latest_acknowledgements la ON la.thread_id = t.id
+            WHERE t.page_id = ?
+              AND (
+                    la.latest_acknowledged_customer_message_timestamp IS NULL
+                    OR lcm.latest_customer_message_timestamp > la.latest_acknowledged_customer_message_timestamp
+              )
+            ORDER BY lcm.latest_customer_recorded_at DESC
             LIMIT ?
         ''', (page_id, limit)).fetchall()
         conn.close()

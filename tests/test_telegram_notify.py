@@ -73,7 +73,8 @@ class TestTelegramNotify:
         })
         monkeypatch.setattr("adk_agents.tools.facebook_tools.navigate_to_thread", lambda page, page_id, thread_name: True)
         monkeypatch.setattr("adk_agents.tools.facebook_tools.send_reply_via_cdp", lambda page, reply_text, dry_run=True: True)
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.log_auto_reply", lambda *a, **k: None)
+        auto_reply_calls = []
+        monkeypatch.setattr("adk_agents.tools.facebook_tools.log_auto_reply", lambda *a, **k: auto_reply_calls.append({"args": a, "kwargs": k}) or None)
         monkeypatch.setattr("adk_agents.tools.l5_stage_tools.evaluate_stage_gate", lambda thread_id: {
             "promoted": True,
             "from_stage": "Seeker",
@@ -87,6 +88,7 @@ class TestTelegramNotify:
 
         result = runner.process_single_thread(object(), "page-1", "thread-1", "Lan", dry_run=True)
 
-        assert result["status"] == "success"
+        assert result["status"] == "drafted"
         assert result["stage_result"]["promoted"] is True
+        assert auto_reply_calls[0]["kwargs"]["customer_message_timestamp"] == "2026-03-24T10:00:00"
         assert notify_calls == [("Lan", "register and urgent", "Xin mời bạn gửi số điện thoại")]

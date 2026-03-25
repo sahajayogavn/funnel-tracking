@@ -2,7 +2,7 @@ import ast
 import importlib.util
 import os
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 LEGACY_MODULE_PATH = os.path.join(PROJECT_ROOT, 'adk_agents', 'tools', 'facebook_tools.py')
@@ -54,6 +54,40 @@ class TestFacebookToolWrappers(unittest.TestCase):
     def test_canonical_exact_path_works(self):
         module = _load_module(CANONICAL_MODULE_PATH, 'facebook_tools_canonical_under_test')
         self._exercise_navigate(module)
+
+    def test_send_reply_wrapper_forces_draft_only_behavior(self):
+        module = _load_module(CANONICAL_MODULE_PATH, 'facebook_tools_send_under_test')
+
+        with patch.object(module, 'shared_send_reply_via_cdp', return_value=True) as shared_send:
+            result = module.send_reply_via_cdp(MagicMock(), 'Xin chào', dry_run=False)
+
+        self.assertTrue(result)
+        shared_send.assert_called_once()
+        self.assertEqual(shared_send.call_args.kwargs['dry_run'], True)
+
+    def test_send_reply_wrapper_docstring_mentions_draft_only(self):
+        module = _load_module(CANONICAL_MODULE_PATH, 'facebook_tools_doc_under_test')
+
+        doc = module.send_reply_via_cdp.__doc__ or ''
+        self.assertIn('draft-only', doc)
+        self.assertNotIn('press Enter', doc)
+        self.assertNotIn('type and send', doc)
+
+    def test_log_auto_reply_includes_customer_boundary_when_supported(self):
+        module = _load_module(CANONICAL_MODULE_PATH, 'facebook_tools_log_under_test')
+
+        conn = MagicMock()
+        with patch.object(module, 'get_db_connection', return_value=conn):
+            result = module.log_auto_reply(
+                'thread-1',
+                'Reply draft',
+                customer_message_timestamp='2026-03-25T10:00:00',
+            )
+
+        self.assertEqual(result['status'], 'logged')
+        self.assertEqual(result['customer_message_timestamp'], '2026-03-25T10:00:00')
+        executed_sql = conn.execute.call_args.args[0]
+        self.assertIn('customer_message_timestamp', executed_sql)
 
 
 if __name__ == '__main__':

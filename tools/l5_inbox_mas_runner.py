@@ -4,14 +4,14 @@ Inbox MAS Runner — CLI tool for the Sahaja Yoga Facebook Inbox MAS.
 code:tool-inbox-mas-001
 
 Fetches new Facebook inbox messages via CDP, processes them through
-the ADK multi-agent pipeline (Classify → Respond), and optionally
-replies via CDP.
+the ADK multi-agent pipeline (Classify → Respond), and drafts replies
+into the composer for human review.
 
 Usage:
-    # Single cycle, dry-run (type reply but don't send)
+    # Single cycle, draft replies for review
     python tools/inbox_mas_runner.py --page-id 119587786260266 --once
 
-    # Single cycle, live (send replies)
+    # Backward-compatible flag; still drafts only and never sends
     python tools/inbox_mas_runner.py --page-id 119587786260266 --once --live
 
     # Continuous polling (5-min intervals)
@@ -280,14 +280,14 @@ def _notify_telegram_if_needed(thread_name: str, classification: str, reply_text
 
 def process_single_thread(cdp_page, page_id: str, thread_id: str,
                           thread_name: str, dry_run: bool = True) -> dict:
-    """Process a single thread: lookup CRM, run ADK, reply via CDP.
+    """Process a single thread and draft a reply for human review.
 
     Args:
         cdp_page: Playwright page connected via CDP.
         page_id: Facebook Page ID.
         thread_id: Thread identifier.
         thread_name: Display name of the thread.
-        dry_run: If True, type reply but don't press Enter.
+        dry_run: Legacy compatibility flag. Inbox reply handling remains draft-only.
 
     Returns:
         dict: Processing result.
@@ -299,7 +299,9 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
     from adk_agents.tools.l5_stage_tools import evaluate_stage_gate
     from fb_pipeline.persistence.l4_sqlite_store import log_mas_decision
 
-    logger.info(f"{'[DRY-RUN]' if dry_run else '[LIVE]'} Processing thread: {thread_name}")
+    if not dry_run:
+        logger.warning("--live is ignored for inbox replies; drafting only for human review.")
+    logger.info(f"[DRAFT] Processing thread: {thread_name}")
 
     # 1. Get messages from DB
     msg_result = get_thread_messages(thread_id)
@@ -324,25 +326,34 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
         logger.warning(f"No reply generated for {thread_name}")
         return {"status": "no_reply", "classification": classification}
 
+    latest_customer_message_timestamp = None
+    for message in reversed(msg_result["messages"]):
+        if message.get("sender") == "Customer":
+            latest_customer_message_timestamp = message.get("timestamp")
+            break
+
     # 4. Navigate to thread in FB inbox
     if not navigate_to_thread(cdp_page, page_id, thread_name):
         logger.warning(f"Could not navigate to thread {thread_name}")
         return {"status": "nav_failed", "reply_text": reply_text}
 
-    # 5. Type reply (dry-run: type only, live: type + Enter)
-    sent = send_reply_via_cdp(cdp_page, reply_text, dry_run=dry_run)
+    # 5. Draft reply into the composer
+    drafted = send_reply_via_cdp(cdp_page, reply_text, dry_run=True)
+    if not drafted:
+        logger.warning(f"Could not draft reply for {thread_name}")
+        return {"status": "draft_failed", "reply_text": reply_text}
 
-    # 6. Log the auto-reply
+    # 6. Log the drafted reply acknowledgement
     log_auto_reply(
         thread_id,
         reply_text,
         agent_name="responder",
         escalated=False,
-        dry_run=dry_run,
+        dry_run=True,
+        customer_message_timestamp=latest_customer_message_timestamp,
     )
 
-    mode = "typed (not sent)" if dry_run else "sent"
-    logger.info(f"Reply {mode} for {thread_name}: {reply_text[:60]}...")
+    logger.info(f"Reply drafted for {thread_name}: {reply_text[:60]}...")
 
     stage_result = evaluate_stage_gate(thread_id)
     if stage_result.get("promoted"):
@@ -364,22 +375,23 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
     _notify_telegram_if_needed(thread_name, classification, reply_text)
 
     return {
-        "status": "success",
-        "mode": "dry_run" if dry_run else "live",
+        "status": "drafted",
+        "mode": "draft_only",
         "thread_name": thread_name,
         "classification": classification,
         "reply_text": reply_text,
         "stage_result": stage_result,
+        "customer_message_timestamp": latest_customer_message_timestamp,
     }
 
 
 def run_inbox_cycle(page_id: str, dry_run: bool = True,
                     max_threads: int = 5) -> dict:
-    """Run one complete inbox cycle: fetch → find unreplied → process → reply.
+    """Run one complete inbox cycle: fetch → find unreplied → process → draft.
 
     Args:
         page_id: Facebook Page ID.
-        dry_run: If True, type replies but don't send them.
+        dry_run: Legacy compatibility flag. Inbox replies remain draft-only.
         max_threads: Max number of threads to process per cycle.
 
     Returns:
@@ -492,7 +504,7 @@ def main():
     )
     parser.add_argument(
         "--live", action="store_true",
-        help="Send replies for real (default is dry-run: type but don't send)"
+        help="Deprecated compatibility flag. Inbox runner still drafts only and never sends."
     )
     parser.add_argument(
         "--max-threads", type=int, default=5,
@@ -504,7 +516,9 @@ def main():
     )
 
     args = parser.parse_args()
-    dry_run = not args.live
+    dry_run = True
+    if args.live:
+        logger.warning("--live is accepted for compatibility but ignored; inbox replies are always drafted for human review.")
 
     # Parse page_id from URL if needed
     page_id = parse_page_id(args.page_id)
@@ -512,7 +526,7 @@ def main():
     # Setup LLM environment
     setup_llm_env()
 
-    mode_str = "[DRY-RUN] Type replies but don't send" if dry_run else "[LIVE] Replies will be SENT"
+    mode_str = "[DRAFT-ONLY] Type replies for human review; automation never sends"
     logger.info(f"=== Inbox MAS Runner ===")
     logger.info(f"Page ID: {page_id}")
     logger.info(f"Mode: {mode_str}")

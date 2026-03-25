@@ -4,7 +4,7 @@ logger = logging.getLogger("fb_pipeline.browser.actions")
 
 
 def send_reply_via_cdp(page, reply_text: str, dry_run: bool = True) -> bool:
-    """Type a reply in the currently active FB inbox thread via CDP."""
+    """Type a draft reply in the active FB inbox thread without sending it."""
     try:
         reply_selector = (
             'div[aria-label*="Reply"], '
@@ -22,17 +22,14 @@ def send_reply_via_cdp(page, reply_text: str, dry_run: bool = True) -> bool:
         page.wait_for_timeout(500)
         page.keyboard.type(reply_text, delay=30)
         page.wait_for_timeout(500)
-
-        if dry_run:
-            logger.info(f"[DRY-RUN] Reply typed (NOT sent): {reply_text[:80]}...")
-            return True
-
-        page.keyboard.press("Enter")
-        page.wait_for_timeout(1000)
-        logger.info(f"[LIVE] Reply sent: {reply_text[:80]}...")
+        logger.info(
+            "Draft reply typed and left unsent%s: %s...",
+            "" if dry_run else " (send disabled)",
+            reply_text[:80],
+        )
         return True
     except Exception as e:
-        logger.error(f"Reply failed: {e}")
+        logger.error(f"Draft typing failed: {e}")
         return False
 
 

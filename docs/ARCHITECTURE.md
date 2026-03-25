@@ -17,7 +17,7 @@ The platform is a monorepo with four runtime pillars sharing a single FrankenSQL
 │                                                                       │
 │  ┌────────────────┐   ┌────────────────┐   ┌──────────────────────┐   │
 │  │   Tools/CLI    │   │  fb_pipeline   │   │     adk_agents       │   │
-│  │   tools/       │──▶│ shared package │──▶│ MAS / auto-reply     │   │
+│  │   tools/       │──▶│ shared package │──▶│ MAS / inbox drafting │   │
 │  │ l5_* + shims   │   │ l1→l4 layers   │   │ orchestration        │   │
 │  │ operator UX    │   │ session/store  │   │                      │   │
 │  └────────┬───────┘   └────────┬───────┘   └──────────┬───────────┘   │
@@ -319,7 +319,7 @@ L2 CDP9222 / browser handle
 4. `fb_pipeline.inbox.l3_pipeline.build_thread_record(...)` normalizes thread metadata
 5. `fb_pipeline.inbox.l3_pipeline.enrich_thread_record(...)` derives contact info, city, ad IDs, and builds a `MasHandoff`
 6. `fb_pipeline.inbox.l3_pipeline.persist_thread_record(...)` writes `threads`, `messages`, `users`, `user_ad_ids`, and `ad_posts`
-7. `tools/l5_inbox_mas_runner.py` and `adk_agents/tools/l5_*` consume the persisted thread data plus MAS handoff context to classify and draft/send replies
+7. `tools/l5_inbox_mas_runner.py` and `adk_agents/tools/l5_*` consume the persisted thread data plus MAS handoff context to classify and draft replies for human review
 
 ### Comment flow: Facebook ingestion → enrichment → persistence
 
@@ -358,8 +358,8 @@ The MAS boundary is currently defined at the inbox enrichment layer and consumed
 
 - `fb_pipeline.contracts.l1_inbox.MasHandoff` is the normalized payload for agent-side processing
 - `fb_pipeline.inbox.l3_pipeline.enrich_thread_record(...)` constructs that payload
-- `tools/l5_inbox_mas_runner.py` is the canonical operator entry point for automated cycles
-- `adk_agents/tools/l5_seeker_tools.py` and `adk_agents/tools/l5_facebook_tools.py` consume persisted thread data and shared helpers to classify, respond, and log auto-replies
+- `tools/l5_inbox_mas_runner.py` is the canonical operator entry point for automated draft cycles
+- `adk_agents/tools/l5_seeker_tools.py` and `adk_agents/tools/l5_facebook_tools.py` consume persisted thread data and shared helpers to classify, draft, and log draft replies
 
 This means the MAS layer depends on shared pipeline contracts and stored inbox state, not on raw DOM scraping details.
 
@@ -392,9 +392,9 @@ The MAS currently exposes one production-wired inbox ADK flow plus three schedul
 | Input | Persisted thread messages + seeker CRM context from FrankenSQLite |
 | ADK agents | `MessageClassifier` → `Responder` |
 | Knowledge source | `load_knowledge_context()` loads `SOUL.md`, `faq.md`, `lop-hoc.md`, `su-kien.md`, `research.md`, and `mas_strategy.md` into session `knowledge_context` |
-| Action | Drafts reply text, navigates to thread, types the reply, and optionally sends in live mode |
+| Action | Drafts reply text, navigates to thread, and types the reply into the composer for human review only |
 
-Pipeline: persisted thread data → `run_adk_pipeline()` session state injection → `MessageClassifier` → `Responder` → `send_reply_via_cdp()` → `log_auto_reply()`
+Pipeline: persisted thread data → `run_adk_pipeline()` session state injection → `MessageClassifier` → `Responder` → `send_reply_via_cdp()` draft typing → `log_auto_reply()` draft audit
 
 ### Route 1: React (Reaction to New Messages/Comments)
 
@@ -499,6 +499,7 @@ CREATE TABLE IF NOT EXISTS auto_replies (
     confidence REAL DEFAULT 1.0,
     escalated BOOLEAN DEFAULT 0,
     dry_run BOOLEAN DEFAULT 1,
+    customer_message_timestamp TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -545,7 +546,7 @@ Decision-core responsibilities:
 
 Route arbitration rules for the first production slice:
 - **Reactive beats proactive**: if a thread still needs inbox follow-up, block warm-up and event advertising for that thread
-- **One proactive touch at a time**: if a live warm-up, event notification, or auto-reply happened in the last 24 hours, suppress new proactive sends
+- **One proactive touch at a time**: if a live warm-up, event notification, or inbox draft acknowledgement happened in the last 24 hours, suppress new proactive sends
 - **Warm-up cadence**: live warm-up remains capped at 1 send per 7 days per thread
 - **Dormant quarterly events**: `temperature = 'dormant'` may receive event outreach only when no live event campaign was logged in the last 90 days
 - **Hard stops**: `spam`, `unsubscribed`, and operator-marked `temperature = 'unsubscribed'` never receive proactive outreach
@@ -561,7 +562,7 @@ Rollout path:
 | Command | Purpose |
 | --- | --- |
 | `python tools/scheduler.py --page-id <id>` | Start unified daemon (all routes, dry-run) |
-| `python tools/scheduler.py --page-id <id> --live` | Start daemon in live mode |
+| `python tools/scheduler.py --page-id <id> --live` | Start daemon with proactive live-delivery mode where supported; inbox replies remain draft-only |
 | `python tools/scheduler.py --page-id <id> --routes react,warmup` | Enable specific routes only |
 
 ## Operational Entry Points
@@ -570,8 +571,7 @@ Rollout path:
 
 - Inbox fetch/capture: `python tools/fetch_fb_messages.py ...`
 - Comment fetch/capture: `python tools/fetch_comments.py ...`
-- Automated inbox cycle: `python tools/inbox_mas_runner.py --page-id <asset_id> --once`
-- Live auto-reply mode: `python tools/inbox_mas_runner.py --page-id <asset_id> --once --live`
+- Automated inbox draft cycle: `python tools/inbox_mas_runner.py --page-id <asset_id> --once`
 - User dedup maintenance: `python tools/dedup_users.py --dry-run` or `--execute`
 
 The legacy command surface remains stable even though the canonical implementation files are now `tools/l5_*.py`.

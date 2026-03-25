@@ -1,70 +1,61 @@
 # QA Test Plan & Validation Report
 
 **Universal ID**: `doc:test-report-001`
-**Date**: 2026-03-23
-**Scope**: ADK inbox memory adaptation, MAS strategy normalization, event targeting, and documentation alignment.
+**Date**: 2026-03-25
+**Scope**: ADK inbox draft-only safety, latest-customer-turn draft suppression, QA regression coverage, and documentation alignment.
 
 ## 1. Change Set Under Test
 
-- Runtime loading of markdown knowledge sources into ADK session state in `tools/l5_inbox_mas_runner.py`.
-- Session-state propagation for `thread_messages`, `seeker_context`, and `knowledge_context` into the inbox ADK pipeline.
-- Lead-stage normalization for warm-up and event routes in `adk_agents/tools/l5_warmup_tools.py` and `adk_agents/tools/l5_event_tools.py`.
-- Event target prioritization by normalized stage.
-- Documentation and knowledge-source alignment in:
-  - `docs/ARCHITECTURE.md`
-  - `README.md`
-  - `README-vi.md`
-  - `.agents/rules/tool-writing.md`
-  - `.agents/rules/adk-agent-rules.md`
-  - `memory/SOUL.md`
-  - `memory/research.md`
-  - `memory/agent_memory/faq.md`
-  - `memory/agent_memory/lop-hoc.md`
-  - `memory/agent_memory/su-kien.md`
+- Inbox browser reply safety in `fb_pipeline/browser/l2_actions.py` so customer replies are typed only and never auto-sent.
+- Inbox wrapper and runner semantics in `adk_agents/tools/l5_facebook_tools.py` and `tools/l5_inbox_mas_runner.py` so successful execution ends at drafted text for human review.
+- `auto_replies` audit persistence and latest-customer-turn acknowledgement behavior in `fb_pipeline/persistence/l4_sqlite_store.py` and `adk_agents/tools/l5_seeker_tools.py`.
+- Sanitization-empty handling so `no_reply` does not type text and does not create false suppression.
+- Documentation and QA alignment in `docs/ARCHITECTURE.md`, `memory/mas_strategy.md`, `CLAUDE.md`, `GEMINI.md`, `web/README.md`, and this report.
 
 ## 2. QA Test Plan
 
 ### 2.1 Objectives
 
-1. Prove the inbox runtime now loads the new `./memory` sources into `knowledge_context`.
-2. Prove the ADK runner receives the expected session state.
-3. Prove MAS strategy aliases normalize consistently across warm-up and event flows.
-4. Prove event targeting favors `Registered` / `Public Program Seeker` ahead of generic `Seeker`.
-5. Verify docs describe implementation truth rather than aspirational behavior.
+1. Prove no production inbox path can press Enter or auto-send a customer reply.
+2. Prove a successfully typed draft is logged as a draft acknowledgement for the latest customer message boundary.
+3. Prove a drafted reply suppresses repeat drafting until a newer customer message arrives.
+4. Prove sanitization-empty and operational failures remain safe and do not create false suppression.
+5. Verify docs describe draft-only inbox behavior rather than legacy live-send behavior.
 
 ### 2.2 Test Matrix
 
 | Area | Risk | Validation method | Acceptance criteria |
 | --- | --- | --- | --- |
-| Knowledge loading | Runtime ignores new memory files | `tests/test_l5_inbox_mas_runner.py::test_load_knowledge_context_includes_all_sources` | All required markdown sources are present in the assembled context |
-| ADK session state | Pipeline runs without injected knowledge/state | `tests/test_l5_inbox_mas_runner.py::test_run_adk_pipeline_populates_session_state` | Session state contains `thread_messages`, `seeker_context`, and `knowledge_context` |
-| Warm-up strategy normalization | Stage aliases drift between web/runtime/strategy naming | `tests/test_l5_warmup_tools.py` | Journey-engine and legacy aliases normalize to expected strategy stages |
-| Event targeting | Wrong users prioritized for event outreach | `tests/test_l5_event_tools.py` | Normalized registered/public-program seekers rank ahead of generic seekers |
-| Live ADK smoke | Pipeline shape regresses under real runner | `tests/test_adk_e2e.py` | Either passes with configured env, or cleanly skips when env is absent |
-| Docs consistency | Docs overstate route maturity or old commands | targeted file review + grep checks | Docs state inbox is production-wired; routes 1-3 remain scaffolded/logging/template based |
+| Low-level browser safety | Inbox automation still presses Enter | `tests/test_l2_inbox_draft_safety.py` | `send_reply_via_cdp()` types successfully and never calls Enter/send |
+| Runner draft semantics | Runner still treats inbox replies as sent/live | `tests/test_l5_inbox_mas_runner.py` | Successful processing ends at `drafted`; sanitization-empty returns `no_reply` without typing |
+| Wrapper audit logging | Wrapper still exposes send semantics or misses customer boundary | `tests/test_l5_facebook_tools.py` | Wrapper is draft-only and persists latest customer-message acknowledgement fields |
+| Draft suppression query | Same thread is redrafted every cycle | query-focused inbox tests for `find_unreplied_threads()` | Draft acknowledgement suppresses repeats until a newer customer message arrives |
+| Persistence migration | Existing DB misses new acknowledgement column | `tests/test_l4_inbox_persistence.py` | `auto_replies.customer_message_timestamp` exists and stores the latest customer boundary |
+| Hung Bui / docs safety alignment | Browser QA or docs still imply customer auto-send | targeted grep/file review and Hung Bui-focused E2E wording checks | Hung Bui-only safety remains intact and docs describe draft-only inbox behavior |
 
 ### 2.3 Execution Order
 
 1. Write QA plan.
-2. Run focused regression tests for inbox runner, warm-up tools, and event tools.
-3. Run ADK E2E smoke suite if env is available; otherwise confirm skip behavior.
-4. Re-scan docs for known stale phrases and command drift.
+2. Run focused regression tests for low-level draft safety, runner semantics, wrapper logging, persistence migration, and query suppression behavior.
+3. Run any safe E2E or smoke coverage that validates draft-only behavior without sending customer messages.
+4. Re-scan docs for stale live-send wording and Hung Bui safety drift.
 5. Record results and QA signoff.
 
 ## 3. Execution Results
 
 ### 3.1 Automated tests
 
-Executed on 2026-03-23:
+Executed on 2026-03-25:
 
 1. Focused regression suite
-   - Command: `.venv/bin/python -m pytest tests/test_l5_inbox_mas_runner.py tests/test_l5_warmup_tools.py tests/test_l5_event_tools.py -v`
-   - Result: **28 passed**
+   - Command: `.venv/bin/python -m pytest tests/test_l2_inbox_draft_safety.py tests/test_l5_inbox_mas_runner.py tests/test_l5_facebook_tools.py tests/test_l4_inbox_persistence.py tests/test_l5_inbox_query_actions.py tests/test_telegram_notify.py -v`
+   - Result: **34 passed**
    - Coverage intent confirmed:
-     - knowledge loading includes all required sources
-     - ADK session state is populated with `thread_messages`, `seeker_context`, and `knowledge_context`
-     - warm-up stage aliases normalize correctly
-     - event target selection prioritizes normalized registered/public-program seekers
+     - low-level inbox reply typing never presses Enter, even when legacy live-style flags are passed
+     - runner semantics end at `drafted`, with `no_reply` and `draft_failed` staying safe
+     - wrapper logging persists `customer_message_timestamp` when available
+     - draft acknowledgement suppresses repeat drafting until a newer customer message arrives
+     - schema migration supports `auto_replies.customer_message_timestamp`
 
 2. ADK E2E smoke suite
    - Command: `.venv/bin/python -m pytest tests/test_adk_e2e.py -v`
@@ -77,18 +68,17 @@ Performed targeted grep and file review after edits.
 
 Verified outcomes:
 
-- `README-vi.md` now matches the English README for runtime `knowledge_context`, route maturity, journey taxonomy, and `adk web .` usage.
-- `docs/ARCHITECTURE.md` describes inbox reply as the only production-wired ADK route and marks react / warm-up / event as not yet scheduler-wired through ADK end-to-end.
-- `.agents/rules/tool-writing.md` and `.agents/rules/adk-agent-rules.md` now reflect the current stage model and ADK command usage.
-- Remaining `adk web adk_agents/` hits are only explanatory guardrails in `CLAUDE.md` / `GEMINI.md` saying **not** to use that command.
-- No remaining stale `Intake → Engaged → Registered → Attending` funnel string was found in markdown docs.
+- `docs/ARCHITECTURE.md` and `web/README.md` describe inbox handling as draft-only typing for human review.
+- `CLAUDE.md` and `GEMINI.md` require Hung Bui-only browser E2E targeting and manual human send for inbox replies.
+- `memory/mas_strategy.md` describes Inbox MAS as draft-only rather than auto-send.
+- No touched user-facing or rule markdown file still claims that `tools/inbox_mas_runner.py --live` sends customer inbox replies.
 
 ## 4. QA Signoff
 
-**Status**: PASS WITH E2E SKIP
+**Status**: PASS
 
-Focused regression coverage passed, documentation drift checks passed, and the E2E suite skipped cleanly for missing live LLM credentials exactly as designed. No QA defects were identified in the tested change set.
+QA signoff is complete for this change set. Focused draft-only regression coverage passed, ADK smoke coverage skipped cleanly due to missing credentials, and the touched docs now align with the non-send boundary.
 
 ## 5. Signoff Rule
 
-QA signoff requires all focused regression tests to pass, E2E smoke tests to pass or skip cleanly due to missing credentials, and no remaining doc drift in the touched user-facing or rule files.
+QA signoff requires all focused draft-only regression tests to pass, any safe smoke/E2E checks to pass or skip cleanly due to missing credentials, and no remaining doc drift in the touched user-facing or rule files.

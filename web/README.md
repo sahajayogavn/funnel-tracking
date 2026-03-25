@@ -96,7 +96,7 @@ Reusable Facebook logic should go into `fb_pipeline/`, not the UI app and not th
 3. `fb_pipeline.browser.l3_inbox` scrapes inbox threads and message panels
 4. `fb_pipeline.inbox.l3_pipeline` normalizes threads, enriches messages, and persists them
 5. inbox enrichment produces a MAS handoff payload for agent-side automation
-6. `adk_agents/tools/l5_*` uses the persisted data to classify and draft/send responses
+6. `adk_agents/tools/l5_*` uses the persisted data to classify and draft responses for human review
 7. `web/` reads the resulting CRM and activity data from SQLite
 
 ### Comments path
@@ -114,7 +114,7 @@ Comments now have extraction/persistence parity with the inbox path, but MAS aut
 The UI does not invoke raw scraping logic directly. MAS orchestration sits behind the shared inbox pipeline and runner:
 
 - `fb_pipeline.contracts.l1_inbox.MasHandoff` defines the normalized handoff shape
-- `tools/l5_inbox_mas_runner.py` is the canonical operator entry point for automated cycles
+- `tools/l5_inbox_mas_runner.py` is the canonical operator entry point for automated draft cycles
 - `adk_agents/tools/l5_*` consumes persisted inbox state and shared helpers
 
 This keeps the UI decoupled from Facebook DOM details.
@@ -127,7 +127,6 @@ From the repo root:
 python tools/fetch_fb_messages.py --pageId <asset_id> --credential default
 python tools/fetch_comments.py --pageId <asset_id> --credential default
 python tools/inbox_mas_runner.py --page-id <asset_id> --once
-python tools/inbox_mas_runner.py --page-id <asset_id> --once --live
 python tools/dedup_users.py --dry-run
 ```
 

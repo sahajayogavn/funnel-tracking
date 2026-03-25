@@ -25,20 +25,21 @@ from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
 
 # code:agent-mas-001:send-reply-cdp
 def send_reply_via_cdp(page, reply_text: str, dry_run: bool = True) -> bool:
-    """Type a reply in the currently active FB inbox thread via CDP.
+    """Draft a reply in the active FB inbox thread via CDP.
 
-    In dry-run mode: types the message but does NOT press Enter.
-    In live mode: types the message AND presses Enter to send.
+    This wrapper is draft-only for inbox MAS callers. It types the message into
+    the composer and never exposes send semantics, even if legacy callers pass
+    ``dry_run=False``.
 
     Args:
         page: Playwright page object (connected via CDP).
-        reply_text: The text to type as a reply.
-        dry_run: If True, type but don't send. If False, type and send.
+        reply_text: The text to type as a reply draft.
+        dry_run: Legacy compatibility flag. Ignored for inbox drafting.
 
     Returns:
-        bool: True if reply was typed (and optionally sent) successfully.
+        bool: True if reply text was drafted successfully.
     """
-    return shared_send_reply_via_cdp(page, reply_text, dry_run=dry_run)
+    return shared_send_reply_via_cdp(page, reply_text, dry_run=True)
 
 
 def navigate_to_thread(page, page_id: str, thread_name: str) -> bool:
@@ -56,29 +57,50 @@ def navigate_to_thread(page, page_id: str, thread_name: str) -> bool:
 
 
 def log_auto_reply(thread_id: str, reply_text: str, agent_name: str = "responder",
-                   escalated: bool = False, dry_run: bool = True) -> dict:
-    """Log an auto-generated reply to FrankenSQLite.
+                   escalated: bool = False, dry_run: bool = True,
+                   customer_message_timestamp: str | None = None) -> dict:
+    """Log an auto-generated reply draft to FrankenSQLite.
 
     Args:
-        thread_id: The thread this reply belongs to.
+        thread_id: The thread this draft belongs to.
         reply_text: The generated reply text.
-        agent_name: Which agent created this reply (default: responder).
+        agent_name: Which agent created this draft (default: responder).
         escalated: Whether this was escalated to human review.
-        dry_run: Whether this was a dry-run-only typed reply.
+        dry_run: Legacy compatibility flag retained for existing schema usage.
+        customer_message_timestamp: Latest customer-message boundary acknowledged
+            by this drafted reply.
 
     Returns:
         dict: Status of the logging operation.
     """
+    conn = None
     try:
         conn = get_db_connection()
-        conn.execute(
-            "INSERT INTO auto_replies (thread_id, reply_text, agent_name, escalated, dry_run) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (thread_id, reply_text, agent_name, escalated, dry_run)
-        )
+        try:
+            conn.execute(
+                "INSERT INTO auto_replies (thread_id, reply_text, agent_name, escalated, dry_run, customer_message_timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (thread_id, reply_text, agent_name, escalated, dry_run, customer_message_timestamp)
+            )
+        except Exception as exc:
+            if "customer_message_timestamp" not in str(exc):
+                raise
+            logger.warning("auto_replies missing customer_message_timestamp; logging draft without boundary")
+            conn.execute(
+                "INSERT INTO auto_replies (thread_id, reply_text, agent_name, escalated, dry_run) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (thread_id, reply_text, agent_name, escalated, dry_run)
+            )
         conn.commit()
-        conn.close()
-        return {"status": "logged", "thread_id": thread_id, "dry_run": dry_run}
+        return {
+            "status": "logged",
+            "thread_id": thread_id,
+            "dry_run": dry_run,
+            "customer_message_timestamp": customer_message_timestamp,
+        }
     except Exception as e:
-        logger.error(f"Failed to log reply: {e}")
+        logger.error(f"Failed to log reply draft: {e}")
         return {"status": "error", "error": str(e)}
+    finally:
+        if conn is not None:
+            conn.close()

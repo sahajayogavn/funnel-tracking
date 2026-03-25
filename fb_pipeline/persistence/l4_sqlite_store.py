@@ -64,6 +64,7 @@ def migrate_schema_v2(conn: sqlite3.Connection):
         ],
         "auto_replies": [
             ("dry_run", "dry_run BOOLEAN DEFAULT 1"),
+            ("customer_message_timestamp", "customer_message_timestamp TEXT"),
         ],
         "comment_users": [
             ("last_synced_at", "last_synced_at DATETIME"),
@@ -304,10 +305,12 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             confidence REAL DEFAULT 1.0,
             escalated BOOLEAN DEFAULT 0,
             dry_run BOOLEAN DEFAULT 1,
+            customer_message_timestamp TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     _ensure_column(cursor, "auto_replies", "dry_run", "dry_run BOOLEAN DEFAULT 1")
+    _ensure_column(cursor, "auto_replies", "customer_message_timestamp", "customer_message_timestamp TEXT")
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mas_decisions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

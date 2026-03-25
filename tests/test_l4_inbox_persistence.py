@@ -106,7 +106,7 @@ class TestMasSchemaMigrations(unittest.TestCase):
         self.conn.close()
         shutil.rmtree(self._tmp_dir, ignore_errors=True)
 
-    def test_setup_database_adds_last_synced_at_and_auto_reply_dry_run_columns(self):
+    def test_setup_database_adds_last_synced_at_and_auto_reply_columns(self):
         self.conn.execute(
             '''
             CREATE TABLE users (
@@ -148,6 +148,7 @@ class TestMasSchemaMigrations(unittest.TestCase):
         }
         self.assertIn("last_synced_at", user_cols)
         self.assertIn("dry_run", auto_reply_cols)
+        self.assertIn("customer_message_timestamp", auto_reply_cols)
         self.assertIn("temperature", user_cols)
         self.assertIn("last_warmup_at", user_cols)
         self.assertIn("warmup_count", user_cols)
@@ -189,6 +190,23 @@ class TestMasSchemaMigrations(unittest.TestCase):
             self.conn.execute(
                 "INSERT INTO reactions (item_type, item_id, reaction_type, dry_run) VALUES ('message', '1', 'care', 0)"
             )
+
+    def test_auto_reply_rows_can_store_customer_message_timestamp(self):
+        setup_database(self.conn)
+
+        self.conn.execute(
+            "INSERT INTO auto_replies (thread_id, reply_text, customer_message_timestamp) VALUES (?, ?, ?)",
+            ("thread-1", "Draft reply", "2026-03-25T10:00:00"),
+        )
+        self.conn.commit()
+
+        row = self.conn.execute(
+            "SELECT thread_id, reply_text, customer_message_timestamp FROM auto_replies WHERE thread_id = ?",
+            ("thread-1",),
+        ).fetchone()
+        self.assertEqual(row["thread_id"], "thread-1")
+        self.assertEqual(row["reply_text"], "Draft reply")
+        self.assertEqual(row["customer_message_timestamp"], "2026-03-25T10:00:00")
 
     def test_log_mas_decision_persists_payload_json(self):
         setup_database(self.conn)
