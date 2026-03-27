@@ -23,7 +23,7 @@ class TestL2InboxDraftSafety(unittest.TestCase):
         self.assertTrue(result)
         page.wait_for_selector.assert_called_once()
         reply_box.click.assert_called_once_with()
-        page.keyboard.type.assert_called_once_with("Hello seeker", delay=30)
+        page.keyboard.type.assert_called_once_with("Hello seeker", delay=5)
         page.keyboard.press.assert_not_called()
 
     def test_send_reply_types_draft_without_pressing_enter_when_live_requested(self):
@@ -32,7 +32,7 @@ class TestL2InboxDraftSafety(unittest.TestCase):
         result = send_reply_via_cdp(page, "Still only a draft", dry_run=False)
 
         self.assertTrue(result)
-        page.keyboard.type.assert_called_once_with("Still only a draft", delay=30)
+        page.keyboard.type.assert_called_once_with("Still only a draft", delay=5)
         page.keyboard.press.assert_not_called()
 
 

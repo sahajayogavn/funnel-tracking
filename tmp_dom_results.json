@@ -1,0 +1,50 @@
+{
+  "unreplied_customer": [
+    {
+      "sender": "Page",
+      "text": "Thảo Điện Lạnh replied to an ad.",
+      "debug": {
+        "page_class": false,
+        "cust_class": false,
+        "avatar": false
+      }
+    },
+    {
+      "sender": "Page",
+      "text": "Thảo Điện Lạnh replied to an ad.",
+      "debug": {
+        "page_class": false,
+        "cust_class": false,
+        "avatar": false
+      }
+    },
+    {
+      "sender": "Page",
+      "text": "Chào Điện Lạnh! Chúng tôi có thể giúp gì cho bạn?\n",
+      "debug": {
+        "page_class": true,
+        "cust_class": false,
+        "avatar": false
+      }
+    },
+    {
+      "sender": "Customer",
+      "text": "Học phí\nLàm thế nào để đăng ký học?",
+      "debug": {
+        "page_class": false,
+        "cust_class": true,
+        "avatar": true
+      }
+    },
+    {
+      "sender": "Page",
+      "text": "Khóa học thiền ở Hà Nội\n Thời gian: 20h-21h30, tối",
+      "debug": {
+        "page_class": true,
+        "cust_class": false,
+        "avatar": true
+      }
+    }
+  ],
+  "replied_page": []
+}

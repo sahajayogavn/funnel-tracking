@@ -33,14 +33,30 @@ class TestFacebookToolWrappers(unittest.TestCase):
     def _exercise_navigate(self, module):
         page = MagicMock()
         page.url = 'https://business.facebook.com/latest/inbox/all?asset_id=123'
+        
+        # We need a proper mock chain where is_visible() returns True
+        mock_locator = MagicMock()
+        page.locator.return_value = mock_locator
+        
         thread_el = MagicMock()
-        page.locator.return_value.filter.return_value.first = thread_el
+        mock_locator.filter.return_value.first = thread_el
+        
+        composer_el = MagicMock()
+        composer_el.is_visible.return_value = True
+        
+        # When page.locator is called with reply_selector, return the composer mock
+        def locator_side_effect(selector):
+            if selector == 'div._5_n1':
+                return mock_locator
+            return composer_el
+        
+        page.locator.side_effect = locator_side_effect
 
         result = module.navigate_to_thread(page, '123', 'Thread Name')
 
         self.assertTrue(result)
         page.wait_for_selector.assert_called_once_with('div._5_n1', timeout=10000)
-        page.locator.assert_called_once_with('div._5_n1')
+        page.locator.assert_any_call('div._5_n1')
         thread_el.click.assert_called_once_with(force=True, timeout=5000)
 
     def test_legacy_shim_imports_canonical_wrapper(self):

@@ -61,18 +61,16 @@ Summary: <one-line summary of what the seeker wants>""",
 responder = LlmAgent(
     name="Responder",
     model=MODEL_NAME,
-    instruction="""OUTPUT RULE (highest priority): Write ONLY the final reply message text.
-Do NOT include any thinking, reasoning steps, markdown headers, or text like
-"**Crafting a message**" / "**I need to**" / "**Let me**".
-If you think before replying, keep all thinking internal — output the reply only.
+    instruction="""OUTPUT RULE (highest priority): Write ONLY the final exact reply message you will send to the user.
+You MUST NOT output any thoughts, reasoning, or markdown headers. Do NOT explain what you are doing. Start your output IMMEDIATELY with the Vietnamese or English greeting.
 
 BAD (never do this):
   **Crafting a response**
   I need to write a warm message...
-  Here is the reply: Dạ bạn ơi...
+  Here is the reply: Dạ chào anh...
 
 GOOD (always do this):
-  Dạ bạn ơi, lớp thiền hoàn toàn miễn phí 🙏 ...
+  Dạ chào anh, lớp thiền hoàn toàn miễn phí ạ 🙏 ...
 
 ---
 

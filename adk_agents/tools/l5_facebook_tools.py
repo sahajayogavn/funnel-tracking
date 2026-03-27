@@ -42,18 +42,19 @@ def send_reply_via_cdp(page, reply_text: str, dry_run: bool = True) -> bool:
     return shared_send_reply_via_cdp(page, reply_text, dry_run=True)
 
 
-def navigate_to_thread(page, page_id: str, thread_name: str) -> bool:
+def navigate_to_thread(page, page_id: str, thread_name: str, thread_id: str = None) -> bool:
     """Navigate to a specific thread in FB Business Suite inbox.
 
     Args:
         page: Playwright page object.
         page_id: Facebook Page ID.
         thread_name: Name of the thread to navigate to.
+        thread_id: Optional exact thread ID to navigate via URL parameter.
 
     Returns:
         bool: True if thread was found and clicked.
     """
-    return shared_navigate_to_thread(page, page_id, thread_name)
+    return shared_navigate_to_thread(page, page_id, thread_name, thread_id)
 
 
 def log_auto_reply(thread_id: str, reply_text: str, agent_name: str = "responder",

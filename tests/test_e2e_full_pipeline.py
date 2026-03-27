@@ -340,12 +340,21 @@ class TestL4PersistenceAndReadback(unittest.TestCase):
             result = st_mod.find_unreplied_threads("1548373332058326")
             self.assertGreater(result["count"], 0)
 
-            # Log auto-reply
+            # Find the latest customer message timestamp for this thread
+            row = self.conn.execute(
+                "SELECT MAX(message_timestamp) AS ts FROM messages "
+                "WHERE thread_id = ? AND sender = 'Customer'",
+                (self.thread_id,)
+            ).fetchone()
+            latest_customer_ts = row["ts"]
+
+            # Log auto-reply with customer_message_timestamp for acknowledgement
             log_result = ft_mod.log_auto_reply(
                 self.thread_id,
                 "Chào bạn! Cảm ơn bạn đã quan tâm.",
                 agent_name="responder",
                 dry_run=False,
+                customer_message_timestamp=latest_customer_ts,
             )
             self.assertEqual(log_result["status"], "logged")
 

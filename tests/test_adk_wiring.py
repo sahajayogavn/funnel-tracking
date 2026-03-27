@@ -123,7 +123,7 @@ class TestAdkWiring:
         assert instruction.startswith("OUTPUT RULE"), (
             "Responder instruction must start with 'OUTPUT RULE'"
         )
-        assert "Do NOT include any thinking" in instruction
+        assert "MUST NOT output any thoughts" in instruction
         assert "BAD" in instruction and "GOOD" in instruction
         assert responder.output_key == "reply_text"
 

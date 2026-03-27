@@ -96,13 +96,26 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
 
     for idx, msg in enumerate(thread_record.messages):
         msg_content_to_save = msg.content
+        sender_to_save = msg.sender
+        
+        # Heuristically classify Facebook's automated responses
+        if sender_to_save == "Page":
+            if ("Chúng tôi có thể giúp gì cho bạn?" in msg_content_to_save or 
+                "Bạn để lại Họ tên và Số điện thoại để đăng ký" in msg_content_to_save or
+                "Khóa học thiền ở Hà Nội" in msg_content_to_save or
+                "Thời gian: 20h-21h30" in msg_content_to_save):
+                sender_to_save = "Auto_Page"
+
         if messages_added == 0 and ad_context:
             msg_content_to_save = f"--- [AD SOURCE]: {ad_context} ---\n\n{msg_content_to_save}"
+            # Also ensure ad_source injections don't shadow Customer intent
+            if sender_to_save == "Page": sender_to_save = "Auto_Page"
+            
         cursor.execute(
             "INSERT OR IGNORE INTO messages (thread_id, sender, content, message_timestamp, seq) VALUES (?, ?, ?, ?, ?)",
             (
                 thread_record.thread_id,
-                msg.sender,
+                sender_to_save,
                 msg_content_to_save,
                 msg.message_timestamp,
                 msg.seq if msg.seq is not None else idx,

@@ -62,6 +62,9 @@ def clear_schedule(monkeypatch):
             return None
 
     fake_schedule = _Jobs()
+    import tools.l5_scheduler as sched_mod
+    monkeypatch.setattr(sched_mod, "schedule", fake_schedule)
+    # Also patch sys.modules so `import schedule` inside test methods returns the fake
     monkeypatch.setitem(sys.modules, "schedule", fake_schedule)
     yield
     fake_schedule.clear()

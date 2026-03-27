@@ -16,23 +16,23 @@ class TestFindUnrepliedThreads(unittest.TestCase):
     def setUp(self):
         self._tmp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self._tmp_dir, "frankensqlite.db")
-        self.original_connect = sqlite3.connect
 
-        def patched_connect(path, *args, **kwargs):
-            if "frankensqlite" in str(path):
-                return self.original_connect(self.db_path, *args, **kwargs)
-            return self.original_connect(path, *args, **kwargs)
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
+        setup_database(self.conn)
+
+        def _make_conn(*args, **kwargs):
+            c = sqlite3.connect(self.db_path)
+            c.row_factory = sqlite3.Row
+            setup_database(c)
+            return c
 
         self.patcher = patch(
-            'fb_pipeline.persistence.l4_sqlite_store.sqlite3.connect',
-            side_effect=patched_connect,
+            'adk_agents.tools.l5_seeker_tools.get_db_connection',
+            side_effect=_make_conn,
         )
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
-
-        self.conn = self.original_connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row
-        setup_database(self.conn)
 
     def tearDown(self):
         self.conn.close()

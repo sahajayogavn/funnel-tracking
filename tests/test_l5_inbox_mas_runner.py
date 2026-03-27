@@ -1,7 +1,7 @@
 import os
 import sys
 import logging
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -115,7 +115,9 @@ class TestProcessSingleThread:
         monkeypatch.setattr("adk_agents.tools.facebook_tools.send_reply_via_cdp", lambda *a, **k: draft_calls.append((a, k)) or True)
         monkeypatch.setattr("adk_agents.tools.facebook_tools.log_auto_reply", lambda *a, **k: log_calls.append((a, k)) or None)
 
-        result = runner.process_single_thread(object(), "page-1", "thread-1", "Lan", dry_run=True)
+        cdp_page = MagicMock()
+        cdp_page.evaluate.return_value = "Customer"
+        result = runner.process_single_thread(cdp_page, "page-1", "thread-1", "Lan", dry_run=True)
 
         assert result == {"status": "no_reply", "classification": "Intent: greeting"}
         assert navigate_calls == []
@@ -139,7 +141,7 @@ class TestProcessSingleThread:
             "classification": "Intent: schedule",
             "reply_text": "Mời bạn xem lịch học mới nhất ạ",
         })
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.navigate_to_thread", lambda page, page_id, thread_name: True)
+        monkeypatch.setattr("adk_agents.tools.facebook_tools.navigate_to_thread", lambda page, page_id, thread_name, thread_id: True)
 
         draft_calls = []
         log_calls = []
@@ -149,7 +151,9 @@ class TestProcessSingleThread:
         monkeypatch.setattr("fb_pipeline.persistence.l4_sqlite_store.log_mas_decision", lambda *a, **k: None)
         monkeypatch.setattr(runner, "_notify_telegram_if_needed", lambda *a, **k: None)
 
-        result = runner.process_single_thread(object(), "page-1", "thread-1", "Lan", dry_run=False)
+        cdp_page = MagicMock()
+        cdp_page.evaluate.return_value = "Customer"
+        result = runner.process_single_thread(cdp_page, "page-1", "thread-1", "Lan", dry_run=False)
 
         assert result["status"] == "drafted"
         assert result["mode"] == "draft_only"
@@ -173,13 +177,15 @@ class TestProcessSingleThread:
             "classification": "Intent: greeting",
             "reply_text": "Xin chào bạn",
         })
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.navigate_to_thread", lambda page, page_id, thread_name: True)
+        monkeypatch.setattr("adk_agents.tools.facebook_tools.navigate_to_thread", lambda page, page_id, thread_name, thread_id: True)
         monkeypatch.setattr("adk_agents.tools.facebook_tools.send_reply_via_cdp", lambda *a, **k: False)
 
         log_calls = []
         monkeypatch.setattr("adk_agents.tools.facebook_tools.log_auto_reply", lambda *a, **k: log_calls.append((a, k)) or None)
 
-        result = runner.process_single_thread(object(), "page-1", "thread-1", "Lan", dry_run=True)
+        cdp_page = MagicMock()
+        cdp_page.evaluate.return_value = "Customer"
+        result = runner.process_single_thread(cdp_page, "page-1", "thread-1", "Lan", dry_run=True)
 
         assert result["status"] == "draft_failed"
         assert log_calls == []
@@ -195,7 +201,7 @@ class TestMainCompatibility:
         monkeypatch.setattr(runner, "setup_llm_env", lambda: None)
         monkeypatch.setattr(runner, "parse_page_id", lambda value: value)
         called = {}
-        monkeypatch.setattr(runner, "run_inbox_cycle", lambda page_id, dry_run=True, max_threads=5: called.update({
+        monkeypatch.setattr(runner, "run_inbox_cycle", lambda page_id, dry_run=True, max_threads=5, target_thread=None: called.update({
             "page_id": page_id,
             "dry_run": dry_run,
             "max_threads": max_threads,

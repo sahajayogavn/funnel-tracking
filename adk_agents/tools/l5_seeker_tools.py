@@ -102,14 +102,19 @@ def find_unreplied_threads(page_id: str, limit: int = 10) -> dict:
         conn = get_db_connection()
 
         rows = conn.execute('''
-            WITH latest_customer_messages AS (
+            WITH thread_latest_seq AS (
+                SELECT thread_id, MAX(seq) as max_seq
+                FROM messages
+                GROUP BY thread_id
+            ),
+            latest_message_details AS (
                 SELECT
                     m.thread_id,
-                    MAX(m.message_timestamp) AS latest_customer_message_timestamp,
-                    MAX(m.timestamp) AS latest_customer_recorded_at
+                    m.sender,
+                    m.message_timestamp,
+                    m.timestamp AS recorded_at
                 FROM messages m
-                WHERE m.sender = 'Customer'
-                GROUP BY m.thread_id
+                JOIN thread_latest_seq tls ON m.thread_id = tls.thread_id AND m.seq = tls.max_seq
             ),
             latest_acknowledgements AS (
                 SELECT
@@ -123,14 +128,15 @@ def find_unreplied_threads(page_id: str, limit: int = 10) -> dict:
                 t.id,
                 t.thread_name
             FROM threads t
-            JOIN latest_customer_messages lcm ON lcm.thread_id = t.id
+            JOIN latest_message_details lmd ON lmd.thread_id = t.id
             LEFT JOIN latest_acknowledgements la ON la.thread_id = t.id
             WHERE t.page_id = ?
+              AND lmd.sender IN ('Customer', 'Auto_Page')
               AND (
                     la.latest_acknowledged_customer_message_timestamp IS NULL
-                    OR lcm.latest_customer_message_timestamp > la.latest_acknowledged_customer_message_timestamp
+                    OR lmd.message_timestamp != la.latest_acknowledged_customer_message_timestamp
               )
-            ORDER BY lcm.latest_customer_recorded_at DESC
+            ORDER BY lmd.recorded_at DESC
             LIMIT ?
         ''', (page_id, limit)).fetchall()
         conn.close()

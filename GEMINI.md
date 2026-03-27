@@ -197,3 +197,9 @@ These rules are **absolute** and must never be violated:
 - Customer inbox replies must **never** be auto-sent by automation in any mode.
 - The `--live` flag must not change inbox replies into send behavior; if accepted for backward compatibility, inbox reply automation still stops at typed draft text.
 - A human operator (Steve) must review the drafted reply and manually press Enter/send.
+
+### 10.4 Page ID Configuration
+
+- The target main page for Inbox MAS automation is **Thiền Sahaja Yoga Việt Nam**.
+- The explicit numeric `page-id` (and `asset_id`) for this page is `1548373332058326`.
+- ALWAYS use this ID when invoking the runner (`--page-id 1548373332058326`) or generating E2E test scripts.

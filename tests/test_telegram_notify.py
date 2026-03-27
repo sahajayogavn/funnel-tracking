@@ -71,7 +71,7 @@ class TestTelegramNotify:
             "classification": "register and urgent",
             "reply_text": "Xin mời bạn gửi số điện thoại",
         })
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.navigate_to_thread", lambda page, page_id, thread_name: True)
+        monkeypatch.setattr("adk_agents.tools.facebook_tools.navigate_to_thread", lambda page, page_id, thread_name, thread_id: True)
         monkeypatch.setattr("adk_agents.tools.facebook_tools.send_reply_via_cdp", lambda page, reply_text, dry_run=True: True)
         auto_reply_calls = []
         monkeypatch.setattr("adk_agents.tools.facebook_tools.log_auto_reply", lambda *a, **k: auto_reply_calls.append({"args": a, "kwargs": k}) or None)
@@ -86,7 +86,10 @@ class TestTelegramNotify:
         notify_calls = []
         monkeypatch.setattr(runner, "_notify_telegram_if_needed", lambda thread_name, classification, reply_text: notify_calls.append((thread_name, classification, reply_text)))
 
-        result = runner.process_single_thread(object(), "page-1", "thread-1", "Lan", dry_run=True)
+        from unittest.mock import MagicMock
+        cdp_page = MagicMock()
+        cdp_page.evaluate.return_value = "Customer"
+        result = runner.process_single_thread(cdp_page, "page-1", "thread-1", "Lan", dry_run=True)
 
         assert result["status"] == "drafted"
         assert result["stage_result"]["promoted"] is True

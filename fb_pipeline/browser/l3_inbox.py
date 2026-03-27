@@ -178,15 +178,19 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                     pass
                 page.wait_for_timeout(500)
 
+            is_first_thread = (thread_counter == 1 and scroll_round == 1)
+
             if not url_changed:
                 try:
                     current_qs = parse_qs(urlparse(page.url).query)
                     fb_url = current_qs.get('selected_item_id', [''])[0]
                 except Exception:
                     fb_url = ""
-                if fb_url == prev_fb_url:
+                if fb_url == prev_fb_url and not is_first_thread:
                     logger.warning(f"URL selected_item_id did NOT change after clicking '{name}' (still {fb_url}). Setting fb_url to empty to avoid contamination.")
                     fb_url = ""
+                elif fb_url == prev_fb_url and is_first_thread:
+                    logger.info(f"URL did not change for the first thread '{name}' (already loaded). Keeping fb_url={fb_url}")
 
             panel_refreshed = False
             for _poll in range(20):
@@ -204,8 +208,12 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 page.wait_for_timeout(500)
 
             if not panel_refreshed:
-                logger.warning(f"Message panel text did NOT change after clicking '{name}'. Skipping thread to avoid contamination.")
-                continue
+                if is_first_thread:
+                    logger.info(f"Message panel text did not change for the first thread '{name}' (already loaded). Proceeding.")
+                    panel_refreshed = True
+                else:
+                    logger.warning(f"Message panel text did NOT change after clicking '{name}'. Skipping thread to avoid contamination.")
+                    continue
 
             page.wait_for_timeout(1000)
             logger.info(f"Thread '{name}': URL fb_url={fb_url}, panel_refreshed={panel_refreshed}")

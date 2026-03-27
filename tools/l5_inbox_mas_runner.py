@@ -333,9 +333,46 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
             break
 
     # 4. Navigate to thread in FB inbox
-    if not navigate_to_thread(cdp_page, page_id, thread_name):
+    if not navigate_to_thread(cdp_page, page_id, thread_name, thread_id):
         logger.warning(f"Could not navigate to thread {thread_name}")
         return {"status": "nav_failed", "reply_text": reply_text}
+
+    # 4.5. Real-time DOM Verification
+    # Ensure the SQLite DB isn't stale compared to the real thread.
+    # If the human already replied while the LLM was running, abort!
+    latest_dom_sender = cdp_page.evaluate('''() => {
+        let region = document.querySelector(
+            'div[aria-label*="Message list container"], ' +
+            'div[role="region"][aria-label*="message"]'
+        );
+        if (!region) return "Unknown";
+        let bubble = region.querySelector('.x1fqp7bg');
+        let messageArea = bubble ? bubble.parentElement : (region.querySelector('div.x1yrsyyn') || region);
+        let topDivs = Array.from(messageArea.children);
+        for (let i = topDivs.length - 1; i >= 0; i--) {
+            let div = topDivs[i];
+            if (div.classList.contains('x14vqqas') || div.querySelector('.x14vqqas')) continue;
+            if (div.classList.contains('xcxhlts') || div.querySelector('.xcxhlts')) continue;
+            if (!div.classList.contains('x1fqp7bg') && !div.querySelector('.x1fqp7bg')) continue;
+            let htmlStr = (div.outerHTML || "").substring(0, 500);
+            if (htmlStr.includes('x13a6bvl')) {
+                let text = div.innerText.trim();
+                let is_auto = text.includes("Chúng tôi có thể giúp gì cho bạn?") || 
+                              text.includes("Bạn để lại Họ tên và Số điện thoại") ||
+                              text.includes("Khóa học thiền ở Hà Nội") ||
+                              text.includes("Thời gian: 20h-21h30");
+                return is_auto ? "Auto_Page" : "Page";
+            }
+            if (htmlStr.includes('x1nhvcw1')) return "Customer";
+            let avatar = div.querySelector('img.img[alt]');
+            return avatar ? "Customer" : "Page";
+        }
+        return "Unknown";
+    }''')
+    
+    if latest_dom_sender == "Page":
+        logger.warning(f"DOM Verification Failed: Thread {thread_name} already has a Page reply in the DOM! Aborting.")
+        return {"status": "abort_already_replied", "reply_text": reply_text}
 
     # 5. Draft reply into the composer
     drafted = send_reply_via_cdp(cdp_page, reply_text, dry_run=True)
@@ -373,6 +410,10 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
         )
 
     _notify_telegram_if_needed(thread_name, classification, reply_text)
+    
+    logger.info("### USER REQUEST: HANGING CDP TAB OPEN FOR HUMAN INSPECTION. PRESS CTRL+C TO QUIT. ###")
+    import time
+    time.sleep(3600)
 
     return {
         "status": "drafted",
@@ -386,7 +427,7 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
 
 
 def run_inbox_cycle(page_id: str, dry_run: bool = True,
-                    max_threads: int = 5) -> dict:
+                    max_threads: int = 5, target_thread: str = None) -> dict:
     """Run one complete inbox cycle: fetch → find unreplied → process → draft.
 
     Args:
@@ -435,7 +476,13 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
 
             # Step 2: Find unreplied threads
             logger.info("Step 2: Finding unreplied threads...")
-            unreplied = find_unreplied_threads(page_id, limit=max_threads)
+            fetch_limit = 200 if target_thread else max_threads
+            unreplied = find_unreplied_threads(page_id, limit=fetch_limit)
+
+            if target_thread:
+                logger.info(f"Filtering to target thread: {target_thread}")
+                unreplied["threads"] = [t for t in unreplied["threads"] if t.get("thread_name") == target_thread]
+                unreplied["count"] = len(unreplied["threads"])
 
             if unreplied["status"] != "success" or unreplied["count"] == 0:
                 logger.info("No unreplied threads found. Cycle complete.")
@@ -514,6 +561,10 @@ def main():
         "--interval", type=int, default=POLL_INTERVAL,
         help=f"Polling interval in seconds (default: {POLL_INTERVAL})"
     )
+    parser.add_argument(
+        "--target-thread", type=str, default=None,
+        help="Target a specific thread by name for E2E testing."
+    )
 
     args = parser.parse_args()
     dry_run = True
@@ -533,7 +584,7 @@ def main():
     logger.info(f"Max threads/cycle: {args.max_threads}")
 
     if args.once:
-        result = run_inbox_cycle(page_id, dry_run=dry_run, max_threads=args.max_threads)
+        result = run_inbox_cycle(page_id, dry_run=dry_run, max_threads=args.max_threads, target_thread=args.target_thread)
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
     elif args.poll:
@@ -541,7 +592,8 @@ def main():
         while True:
             try:
                 result = run_inbox_cycle(page_id, dry_run=dry_run,
-                                         max_threads=args.max_threads)
+                                         max_threads=args.max_threads,
+                                         target_thread=args.target_thread)
                 logger.info(f"Cycle result: {result.get('status', 'unknown')}, "
                            f"processed: {result.get('processed', 0)}")
             except Exception as e:
