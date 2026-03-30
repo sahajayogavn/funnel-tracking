@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-30T18:42:43.561196",
+  "timestamp": "2026-03-30T21:23:19.004016",
   "page_id": "1548373332058326",
   "summary": {
     "total": 10,
@@ -7,6 +7,98 @@
     "failed": 0
   },
   "threads": [
+    {
+      "thread_name": "Chim Cánh Cụt",
+      "thread_id": "1548373332058326_1546008843204608600",
+      "dom_tool": {
+        "thread_name": "Chim Cánh Cụt",
+        "message_count": 34,
+        "senders": {
+          "Customer": 23,
+          "Page": 9,
+          "Unknown": 2
+        },
+        "phone": "0969677369",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
+          "Học phí",
+          "Khóa học thiền ở Hà Nội\n Thời gian: 20h-21h30, tối thứ 3 hàng tuần, bắt đầu từ 3"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Chim Cánh Cụt",
+        "message_count": 34,
+        "senders": {
+          "Customer": 23,
+          "Page": 9,
+          "Unknown": 2
+        },
+        "phone": "0969677369",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
+          "Học phí",
+          "Khóa học thiền ở Hà Nội\n Thời gian: 20h-21h30, tối thứ 3 hàng tuần, bắt đầu từ 3"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (34 vs 34, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Chim Cánh Cụt",
+      "thread_id": "1548373332058326_3417168231713322587",
+      "dom_tool": {
+        "thread_name": "Chim Cánh Cụt",
+        "message_count": 34,
+        "senders": {
+          "Customer": 23,
+          "Page": 9,
+          "Unknown": 2
+        },
+        "phone": "0969677369",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
+          "Học phí",
+          "Khóa học thiền ở Hà Nội\n Thời gian: 20h-21h30, tối thứ 3 hàng tuần, bắt đầu từ 3"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Chim Cánh Cụt",
+        "message_count": 34,
+        "senders": {
+          "Customer": 23,
+          "Page": 9,
+          "Unknown": 2
+        },
+        "phone": "0969677369",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
+          "Học phí",
+          "Khóa học thiền ở Hà Nội\n Thời gian: 20h-21h30, tối thứ 3 hàng tuần, bắt đầu từ 3"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (34 vs 34, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
     {
       "thread_name": "Thị Thứ Nguyễn",
       "thread_id": "1548373332058326_176486857383920137",
@@ -369,98 +461,6 @@
       "comparison": {
         "thread_name": "PASSED",
         "message_count": "PASSED (32 vs 32, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Quân Bùi",
-      "thread_id": "1548373332058326_8723829643142249986",
-      "dom_tool": {
-        "thread_name": "Quân Bùi",
-        "message_count": 30,
-        "senders": {
-          "Customer": 18,
-          "Page": 12,
-          "Unknown": 0
-        },
-        "phone": "0905630281",
-        "email": null,
-        "city": "TP. Hồ Chí Minh",
-        "sample_messages": [
-          "em chào page ạ",
-          "em được cô Khê giới thiệu chương trình CN tuần này ạ",
-          "cho em hỏi là bên mình còn bao nhiêu slot tham gia ạ"
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Quân Bùi",
-        "message_count": 30,
-        "senders": {
-          "Customer": 18,
-          "Page": 12,
-          "Unknown": 0
-        },
-        "phone": "0905630281",
-        "email": null,
-        "city": "TP. Hồ Chí Minh",
-        "sample_messages": [
-          "em chào page ạ",
-          "em được cô Khê giới thiệu chương trình CN tuần này ạ",
-          "cho em hỏi là bên mình còn bao nhiêu slot tham gia ạ"
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (30 vs 30, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Hong Nguyen Thi",
-      "thread_id": "1548373332058326_1503525887764063815",
-      "dom_tool": {
-        "thread_name": "Hong Nguyen Thi",
-        "message_count": 28,
-        "senders": {
-          "Customer": 16,
-          "Page": 12,
-          "Unknown": 0
-        },
-        "phone": "0915345272",
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "Có lớp nào cuoiis tuần ko a",
-          "Dạ có lớp cuối tuần đó ạ. Mình gửi thông tin về lớp thiền Sahaja Yoga 4 tuần ạ:\n",
-          "Lớp cuối tuần sẽ học vào 14h30-15h30 Chiều Chủ Nhật tại Hà Nội bạn ạ."
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Hong Nguyen Thi",
-        "message_count": 28,
-        "senders": {
-          "Customer": 16,
-          "Page": 12,
-          "Unknown": 0
-        },
-        "phone": "0915345272",
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "Có lớp nào cuoiis tuần ko a",
-          "Dạ có lớp cuối tuần đó ạ. Mình gửi thông tin về lớp thiền Sahaja Yoga 4 tuần ạ:\n",
-          "Lớp cuối tuần sẽ học vào 14h30-15h30 Chiều Chủ Nhật tại Hà Nội bạn ạ."
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (28 vs 28, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"

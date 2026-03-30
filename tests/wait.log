@@ -1,0 +1,12 @@
+2026-03-30 20:41:28,309 - INFO - TestLiveHitlBatch - Starting E2E Batch Wrapper isolating: Hung Bui (100001005716854)
+2026-03-30 20:41:28,310 - INFO - TestLiveHitlBatch - Resolved thread_id: 1548373332058326_100001005716854
+2026-03-30 20:41:28,310 - INFO - TestLiveHitlBatch - Transmitting Mock Batch Proposal to Telegram...
+2026-03-30 20:41:28,311 - WARNING - telegram_hitl - HITL skipped: missing config. Would have proposed: ⚙️ E2E Test Warmup proposal for 1 seeker:
+
+1. Hung
+2026-03-30 20:41:28,311 - ERROR - TestLiveHitlBatch - Failed to send proposal. Check TELEGRAM_BOT_TOKEN and GROUP ID.
+DEBUG: Error decoding key BOT_TOKEN: Incorrect padding
+DEBUG: Error decoding key SYVN_TELEGRAM_GROUP_ID: Invalid base64-encoded string: number of data characters (13) cannot be 1 more than a multiple of 4
+DEBUG: Credentials successfully loaded and decoded into environment variables.
+Polling .env file for changes...
+Detected changes in .env! Running test_live_hitl_batch.py...
