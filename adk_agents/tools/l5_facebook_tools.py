@@ -19,7 +19,12 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from fb_pipeline.browser.l2_actions import navigate_to_thread as shared_navigate_to_thread, send_reply_via_cdp as shared_send_reply_via_cdp
+from fb_pipeline.browser.l2_actions import (
+    navigate_to_thread as shared_navigate_to_thread, 
+    send_reply_via_cdp as shared_send_reply_via_cdp,
+    commit_reply_via_cdp as shared_commit_reply_via_cdp,
+    clear_composer_via_cdp as shared_clear_composer_via_cdp
+)
 from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
 
 
@@ -40,6 +45,15 @@ def send_reply_via_cdp(page, reply_text: str, dry_run: bool = True) -> bool:
         bool: True if reply text was drafted successfully.
     """
     return shared_send_reply_via_cdp(page, reply_text, dry_run=True)
+
+
+def commit_reply_via_cdp(page) -> bool:
+    """Hit Enter to send the drafted reply."""
+    return shared_commit_reply_via_cdp(page)
+
+def clear_composer_via_cdp(page) -> bool:
+    """Clear the composer content."""
+    return shared_clear_composer_via_cdp(page)
 
 
 def navigate_to_thread(page, page_id: str, thread_name: str, thread_id: str = None) -> bool:

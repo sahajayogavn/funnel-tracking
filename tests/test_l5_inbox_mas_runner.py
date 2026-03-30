@@ -111,9 +111,9 @@ class TestProcessSingleThread:
         navigate_calls = []
         draft_calls = []
         log_calls = []
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.navigate_to_thread", lambda *a, **k: navigate_calls.append((a, k)) or True)
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.send_reply_via_cdp", lambda *a, **k: draft_calls.append((a, k)) or True)
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.log_auto_reply", lambda *a, **k: log_calls.append((a, k)) or None)
+        monkeypatch.setattr("adk_agents.tools.l5_facebook_tools.navigate_to_thread", lambda *a, **k: navigate_calls.append((a, k)) or True)
+        monkeypatch.setattr("adk_agents.tools.l5_facebook_tools.send_reply_via_cdp", lambda *a, **k: draft_calls.append((a, k)) or True)
+        monkeypatch.setattr("adk_agents.tools.l5_facebook_tools.log_auto_reply", lambda *a, **k: log_calls.append((a, k)) or None)
 
         cdp_page = MagicMock()
         cdp_page.evaluate.return_value = "Customer"
@@ -141,15 +141,15 @@ class TestProcessSingleThread:
             "classification": "Intent: schedule",
             "reply_text": "Mời bạn xem lịch học mới nhất ạ",
         })
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.navigate_to_thread", lambda page, page_id, thread_name, thread_id: True)
+        monkeypatch.setattr("adk_agents.tools.l5_facebook_tools.navigate_to_thread", lambda page, page_id, thread_name, thread_id: True)
 
         draft_calls = []
         log_calls = []
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.send_reply_via_cdp", lambda *a, **k: draft_calls.append((a, k)) or True)
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.log_auto_reply", lambda *a, **k: log_calls.append({"args": a, "kwargs": k}) or None)
+        monkeypatch.setattr("adk_agents.tools.l5_facebook_tools.send_reply_via_cdp", lambda *a, **k: draft_calls.append((a, k)) or True)
+        monkeypatch.setattr("adk_agents.tools.l5_facebook_tools.log_auto_reply", lambda *a, **k: log_calls.append({"args": a, "kwargs": k}) or None)
         monkeypatch.setattr("adk_agents.tools.l5_stage_tools.evaluate_stage_gate", lambda thread_id: {"promoted": False})
         monkeypatch.setattr("fb_pipeline.persistence.l4_sqlite_store.log_mas_decision", lambda *a, **k: None)
-        monkeypatch.setattr(runner, "_notify_telegram_if_needed", lambda *a, **k: None)
+        monkeypatch.setattr("tools.l5_telegram_hitl.send_proposal_to_telegram", lambda *a, **k: None)
 
         cdp_page = MagicMock()
         cdp_page.evaluate.return_value = "Customer"
@@ -177,11 +177,11 @@ class TestProcessSingleThread:
             "classification": "Intent: greeting",
             "reply_text": "Xin chào bạn",
         })
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.navigate_to_thread", lambda page, page_id, thread_name, thread_id: True)
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.send_reply_via_cdp", lambda *a, **k: False)
+        monkeypatch.setattr("adk_agents.tools.l5_facebook_tools.navigate_to_thread", lambda page, page_id, thread_name, thread_id: True)
+        monkeypatch.setattr("adk_agents.tools.l5_facebook_tools.send_reply_via_cdp", lambda *a, **k: False)
 
         log_calls = []
-        monkeypatch.setattr("adk_agents.tools.facebook_tools.log_auto_reply", lambda *a, **k: log_calls.append((a, k)) or None)
+        monkeypatch.setattr("adk_agents.tools.l5_facebook_tools.log_auto_reply", lambda *a, **k: log_calls.append((a, k)) or None)
 
         cdp_page = MagicMock()
         cdp_page.evaluate.return_value = "Customer"

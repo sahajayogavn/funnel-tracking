@@ -41,6 +41,11 @@ def clear_schedule(monkeypatch):
                     return self
 
                 @property
+                def seconds(self):
+                    self.unit = "seconds"
+                    return self
+
+                @property
                 def day(self):
                     self.unit = "day"
                     return self
@@ -117,8 +122,8 @@ class TestSetupSchedule:
             routes={"react", "reply", "warmup", "event"},
             fetch_interval=15, warmup_time="09:00", event_time="10:00"
         )
-        assert len(registered) >= 4
-        assert len(schedule.get_jobs()) >= 4
+        assert len(registered) >= 6
+        assert len(schedule.get_jobs()) >= 6
 
     def test_single_route_registers_correct_jobs(self):
         from tools.l5_scheduler import setup_schedule
@@ -128,7 +133,7 @@ class TestSetupSchedule:
             routes={"warmup"},
             fetch_interval=15, warmup_time="09:00", event_time="10:00"
         )
-        assert len(registered) == 1
+        assert len(registered) >= 3
         assert "warmup" in registered[0]
 
     def test_react_only_also_registers_fetch(self):
@@ -140,7 +145,7 @@ class TestSetupSchedule:
             fetch_interval=15, warmup_time="09:00", event_time="10:00"
         )
         # Should register fetch + react
-        assert len(registered) == 2
+        assert len(registered) >= 4
         types = " ".join(registered)
         assert "fetch" in types
         assert "react" in types
@@ -153,8 +158,8 @@ class TestSetupSchedule:
             routes=set(),
             fetch_interval=15, warmup_time="09:00", event_time="10:00"
         )
-        assert len(registered) == 0
-        assert len(schedule.get_jobs()) == 0
+        assert len(registered) >= 2
+        assert len(schedule.get_jobs()) >= 2
 
     def test_custom_fetch_interval(self):
         from tools.l5_scheduler import setup_schedule

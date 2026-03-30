@@ -106,12 +106,13 @@ def setup_llm_env():
     logger.info(f"LLM configured: base={api_base[:30]}... model={os.environ.get('ADK_MODEL', 'openai/gpt-5.4')}")
 
 
-def run_adk_pipeline(thread_messages: list, seeker_context: dict) -> dict:
+def run_adk_pipeline(thread_messages: list, seeker_context: dict, feedback: str = None) -> dict:
     """Run the ADK classifier + responder pipeline on a thread.
 
     Args:
         thread_messages: List of messages [{sender, content, timestamp}].
         seeker_context: Seeker profile dict from CRM lookup.
+        feedback: Optional human feedback for rewriting the reply.
 
     Returns:
         dict: {classification, reply_text} from the pipeline.
@@ -158,6 +159,9 @@ def run_adk_pipeline(thread_messages: list, seeker_context: dict) -> dict:
         "Process this Facebook inbox thread using the provided session state. "
         "Use thread_messages, seeker_context, and knowledge_context when relevant."
     )
+    if feedback:
+        prompt += f"\n\nIMPORTANT HUMAN FEEDBACK FOR REVISION:\n{feedback}\nPlease rewrite the reply adhering strictly to this feedback."
+
     user_msg = types.Content(
         role="user",
         parts=[types.Part(text=prompt)]
@@ -245,38 +249,7 @@ def _sanitize_reply(text: str) -> str:
 
 
 
-# code:tool-inbox-mas-001:telegram-notify
-def _notify_telegram_if_needed(thread_name: str, classification: str, reply_text: str):
-    trigger_terms = ("escalate", "register", "phone", "urgent")
-    classification_text = (classification or "").lower()
-    if not any(term in classification_text for term in trigger_terms):
-        return
-
-    try:
-        from tools.env_manager import load_credentials
-
-        creds = load_credentials()
-        bot_token = creds.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = creds.get("TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID", "")
-        if not bot_token or not chat_id:
-            logger.warning("Telegram notification skipped: missing bot token or chat id")
-            return
-
-        message_text = (
-            f"Inbox MAS alert\n"
-            f"Thread: {thread_name}\n"
-            f"Classification: {classification}\n"
-            f"Reply draft: {reply_text}"
-        )
-        requests.post(
-            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            json={"chat_id": chat_id, "text": message_text},
-            timeout=10,
-        ).raise_for_status()
-        logger.info(f"Telegram notification sent for {thread_name}")
-    except Exception as exc:
-        logger.warning(f"Telegram notification failed for {thread_name}: {exc}")
-
+# _notify_telegram_if_needed removed in favor of HITL queue.
 
 def process_single_thread(cdp_page, page_id: str, thread_id: str,
                           thread_name: str, dry_run: bool = True) -> dict:
@@ -293,11 +266,14 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
         dict: Processing result.
     """
     from adk_agents.tools.seeker_tools import lookup_seeker, get_thread_messages
-    from adk_agents.tools.facebook_tools import (
-        navigate_to_thread, send_reply_via_cdp, log_auto_reply
+    from adk_agents.tools.l5_facebook_tools import (
+        navigate_to_thread, send_reply_via_cdp, log_auto_reply,
+        commit_reply_via_cdp, clear_composer_via_cdp
     )
     from adk_agents.tools.l5_stage_tools import evaluate_stage_gate
     from fb_pipeline.persistence.l4_sqlite_store import log_mas_decision
+    from tools.l5_telegram_hitl import send_proposal_to_telegram, poll_telegram_updates, check_hitl_status, mark_hitl_executed
+
 
     if not dry_run:
         logger.warning("--live is ignored for inbox replies; drafting only for human review.")
@@ -409,11 +385,41 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
             f"{stage_result.get('from_stage')} -> {stage_result.get('to_stage')}"
         )
 
-    _notify_telegram_if_needed(thread_name, classification, reply_text)
-    
-    logger.info("### USER REQUEST: HANGING CDP TAB OPEN FOR HUMAN INSPECTION. PRESS CTRL+C TO QUIT. ###")
-    import time
-    time.sleep(3600)
+    msg_id = send_proposal_to_telegram(
+        route="inbox",
+        thread_id=thread_id,
+        proposed_text=reply_text,
+        payload={"classification": classification}
+    )
+
+    if msg_id:
+        logger.info("### HANGING CDP TAB OPEN FOR TELEGRAM HITL APPROVAL. ###")
+        while True:
+            poll_telegram_updates()
+            decision, feedback = check_hitl_status(msg_id)
+            if decision == "approved":
+                logger.info("Telegram approval (LIKE) received. Hitting Enter.")
+                commit_reply_via_cdp(cdp_page)
+                mark_hitl_executed(msg_id)
+                break
+            elif decision == "rejected":
+                logger.info(f"Telegram rejection (REPLY) received: {feedback}. Regenerating draft.")
+                mark_hitl_executed(msg_id)
+                clear_composer_via_cdp(cdp_page)
+                
+                adk_result = run_adk_pipeline(msg_result["messages"], seeker, feedback=feedback)
+                reply_text = adk_result.get("reply_text", "")
+                classification = adk_result.get("classification", "")
+                send_reply_via_cdp(cdp_page, reply_text, dry_run=True)
+                
+                msg_id = send_proposal_to_telegram(
+                    route="inbox",
+                    thread_id=thread_id,
+                    proposed_text=reply_text,
+                    payload={"classification": classification, "is_revision": True, "feedback_addressed": feedback}
+                )
+            time.sleep(3)
+
 
     return {
         "status": "drafted",

@@ -42,6 +42,51 @@ def send_reply_via_cdp(page, reply_text: str, dry_run: bool = True) -> bool:
         logger.error(f"Draft typing failed: {e}")
         return False
 
+def commit_reply_via_cdp(page) -> bool:
+    """Press Enter to send the drafted reply."""
+    try:
+        reply_selector = (
+            'div[aria-label*="Reply"], '
+            'div[aria-label*="Nhắn tin"], '
+            'div[aria-label*="Trả lời"], '
+            'div[role="textbox"][contenteditable="true"]'
+        )
+        reply_box = page.wait_for_selector(reply_selector, timeout=8000)
+        if not reply_box:
+            logger.warning("Reply box not found for commit")
+            return False
+        reply_box.click()
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(500)
+        logger.info("Reply committed and sent via CDP.")
+        return True
+    except Exception as e:
+        logger.error(f"Commit typing failed: {e}")
+        return False
+
+def clear_composer_via_cdp(page) -> bool:
+    """Clear the contents of the composer box."""
+    try:
+        reply_selector = (
+            'div[aria-label*="Reply"], '
+            'div[aria-label*="Nhắn tin"], '
+            'div[aria-label*="Trả lời"], '
+            'div[role="textbox"][contenteditable="true"]'
+        )
+        reply_box = page.wait_for_selector(reply_selector, timeout=8000)
+        if not reply_box:
+            logger.warning("Reply box not found for clear")
+            return False
+        reply_box.click()
+        page.keyboard.press("Meta+A")
+        page.keyboard.press("Backspace")
+        page.wait_for_timeout(500)
+        logger.info("Composer cleared via CDP.")
+        return True
+    except Exception as e:
+        logger.error(f"Clear composer failed: {e}")
+        return False
+
 
 
 def navigate_to_thread(page, page_id: str, thread_name: str, thread_id: str = None) -> bool:
@@ -122,4 +167,4 @@ def navigate_to_thread(page, page_id: str, thread_name: str, thread_id: str = No
         return False
 
 
-__all__ = ["navigate_to_thread", "send_reply_via_cdp"]
+__all__ = ["navigate_to_thread", "send_reply_via_cdp", "commit_reply_via_cdp", "clear_composer_via_cdp"]

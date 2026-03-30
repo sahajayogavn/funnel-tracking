@@ -379,9 +379,23 @@ The MAS currently exposes one production-wired inbox ADK flow plus three schedul
 │  every day 9AM ─→ Route 2: strategy/template warm-up logging        │
 │  every day 10AM → Route 3: event targeting + notification logging   │
 │                                                                      │
-│  Shared state: FrankenSQLite + L5 wrappers; only inbox reply        │
-│  currently runs through an ADK Runner end-to-end                    │
+│  Telegram HITL  ─→ Listens to Telegram Group for LIKE/REPLY actions │
+│                    to approve/rewrite pending MAS outbox items.     │
+│                                                                      │
+│  Shared state: FrankenSQLite + L5 wrappers + Telegram Pending Queue │
 └──────────────────────────────────────────────────────────────────────┘
+```
+
+### Telegram Human-in-the-Loop (HITL) Workflow
+
+All MAS execution routes (Inbox, Comment Reply, Warm-up, and Event Advertising) are governed by a mandatory Human-in-the-Loop approval step via Telegram.
+
+- **Configuration**: Uses `SYVN_TELEGRAM_GROUP_ID` (-1003703002550) and `TELEGRAM_BOT_TOKEN` defined in `.env`.
+- **Workflow Mechanics**:
+  1. **Proposal Phase**: The agent (or scheduler route) drafts a response or formulates an execution plan (e.g., target list and message for warm-up) and sends it to the configured Telegram group.
+  2. **Listen Phase**: The MAS waits on that specific Telegram message.
+  3. **Reaction - LIKE (Approval)**: If an operator leaves a 👍 reaction on the proposal, the system receives the approval, removes the `dry_run` block, and performs the actual browser execution (e.g., navigating to the thread and hitting Enter).
+  4. **Reaction - REPLY (Revision)**: If the operator replies text directly to the proposal message with specific feedback, the agent ingests the reply via LLM to adapt and re-draft the response/plan. It then sends a *new* proposal to Telegram, restarting the listen phase until a LIKE is achieved.
 ```
 
 ### Inbox Reply (ADK-backed production flow)

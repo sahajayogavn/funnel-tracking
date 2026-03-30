@@ -454,7 +454,7 @@ def run_adk_reactor(item: dict, dry_run: bool = True) -> str:
     return ""
 
 
-def run_adk_warmup_composer(seeker: dict, strategy: dict, knowledge_context: str, dry_run: bool = True) -> str:
+def run_adk_warmup_composer(seeker: dict, strategy: dict, knowledge_context: str, dry_run: bool = True, feedback: str = None) -> str:
     """Run the WarmUpComposer ADK agent for a warm-up message."""
     from adk_agents.agent import warmup_composer
 
@@ -470,6 +470,9 @@ def run_adk_warmup_composer(seeker: dict, strategy: dict, knowledge_context: str
         ensure_ascii=False,
         indent=2,
     )
+    prompt = "Compose a warm-up message using the provided session state."
+    if feedback:
+        prompt += f"\n\nIMPORTANT HUMAN FEEDBACK FOR REVISION:\n{feedback}\nPlease rewrite the message adhering strictly to this feedback."
     events = _run_adk_route(
         agent=warmup_composer,
         app_name="sahajayoga_warmup",
@@ -481,7 +484,7 @@ def run_adk_warmup_composer(seeker: dict, strategy: dict, knowledge_context: str
             "knowledge_context": knowledge_context,
             "warmup_brief": warmup_brief,
         },
-        prompt="Compose a warm-up message using the provided session state.",
+        prompt=prompt,
     )
     for event in reversed(events):
         message_text = (event.get("text") or "").strip()
@@ -490,13 +493,16 @@ def run_adk_warmup_composer(seeker: dict, strategy: dict, knowledge_context: str
     return ""
 
 
-def run_adk_event_advertiser(event: dict, seeker: dict, knowledge_context: str, dry_run: bool = True) -> str:
+def run_adk_event_advertiser(event: dict, seeker: dict, knowledge_context: str, dry_run: bool = True, feedback: str = None) -> str:
     """Run the EventAdvertiser ADK agent for an event notification."""
     from adk_agents.agent import event_advertiser
 
     _ = dry_run
     event_details = json.dumps({**event, "knowledge_context": knowledge_context}, ensure_ascii=False, indent=2)
     seeker_context = json.dumps(seeker, ensure_ascii=False, indent=2)
+    prompt = "Compose an event notification using the provided session state."
+    if feedback:
+        prompt += f"\n\nIMPORTANT HUMAN FEEDBACK FOR REVISION:\n{feedback}\nPlease rewrite the message adhering strictly to this feedback."
     events = _run_adk_route(
         agent=event_advertiser,
         app_name="sahajayoga_event",
@@ -505,7 +511,7 @@ def run_adk_event_advertiser(event: dict, seeker: dict, knowledge_context: str, 
             "event_details": event_details,
             "seeker_context": seeker_context,
         },
-        prompt="Compose an event notification using the provided session state.",
+        prompt=prompt,
     )
     for event_output in reversed(events):
         message_text = (event_output.get("text") or "").strip()
@@ -551,6 +557,7 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
         processed = 0
         skipped = 0
         decisioned = 0
+        proposals = []
         for seeker in dormant["seekers"]:
             thread_id = seeker["thread_id"]
             source = seeker.get("source")
@@ -668,31 +675,35 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
                     subject_type,
                     thread_id,
                     "allowed",
-                    "eligible",
+                    "proposed_to_hitl",
                     dry_run=dry_run,
                     payload={**payload, "strategy_type": strategy["type"], "next_cool_step": next_cool_step},
                 )
                 decisioned += 1
-                log_warmup_campaign(
-                    thread_id=thread_id,
-                    seeker_name=seeker.get("name"),
-                    strategy_type=strategy["type"],
-                    message_text=message_text,
-                    dry_run=dry_run
-                )
-                _update_user_decision_state(
-                    thread_id,
-                    next_temperature,
-                    warmup_sent=not dry_run,
-                    cool_step=next_cool_step,
-                )
+                proposals.append({
+                    "seeker": seeker,
+                    "thread_id": thread_id,
+                    "seeker_name": seeker.get("name"),
+                    "strategy": strategy,
+                    "message_text": message_text,
+                    "next_temperature": next_temperature,
+                    "next_cool_step": next_cool_step,
+                    "dry_run": dry_run,
+                    "subject_type": subject_type
+                })
                 processed += 1
-                logger.info(
-                    f"[WARMUP] {'[DRY-RUN]' if dry_run else '[SENT]'} "
-                    f"Warmup for {seeker['name']}: {strategy['type']}"
-                )
 
-        return {"status": "complete", "processed": processed, "skipped": skipped, "decisioned": decisioned}
+        if proposals:
+            from tools.l5_telegram_hitl import send_proposal_to_telegram
+            summary = f"Warmup proposal for {len(proposals)} seekers:\n"
+            for i, p in enumerate(proposals[:5], 1):
+                summary += f"{i}. {p['seeker_name']}: {p['message_text'][:40]}...\n"
+            if len(proposals) > 5:
+                summary += f"...and {len(proposals) - 5} more."
+            send_proposal_to_telegram("warmup", "batch", summary, {"proposals": proposals, "page_id": page_id})
+            logger.info(f"[WARMUP] Proposed {len(proposals)} messages to Telegram HITL.")
+
+        return {"status": "complete", "processed": processed, "skipped": skipped, "decisioned": decisioned, "proposed": len(proposals)}
     except Exception as e:
         logger.error(f"[WARMUP] Failed: {e}")
         return {"status": "error", "error": str(e)}
@@ -719,6 +730,7 @@ def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
         total_sent = 0
         skipped = 0
         decisioned = 0
+        proposals = []
         for event in events["events"]:
             targets = find_target_seekers_for_event(
                 event_id=event["id"],
@@ -773,31 +785,144 @@ def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
                     knowledge_context,
                     dry_run=True,
                 ) or fallback_message_text
-                log_mas_decision(
-                    page_id,
-                    "event",
-                    subject_type,
-                    thread_id,
-                    "allowed",
-                    "eligible",
-                    dry_run=dry_run,
-                    payload=payload,
-                )
-                decisioned += 1
-                log_event_campaign(
-                    event_id=event["id"],
-                    thread_id=thread_id,
-                    seeker_name=seeker.get("name"),
-                    message_text=message_text,
-                    dry_run=dry_run
-                )
-                total_sent += 1
+                if message_text:
+                    log_mas_decision(
+                        page_id,
+                        "event",
+                        subject_type,
+                        thread_id,
+                        "allowed",
+                        "proposed_to_hitl",
+                        dry_run=dry_run,
+                        payload=payload,
+                    )
+                    decisioned += 1
+                    proposals.append({
+                        "seeker": seeker,
+                        "thread_id": thread_id,
+                        "seeker_name": seeker.get("name"),
+                        "event": event,
+                        "message_text": message_text,
+                        "dry_run": dry_run,
+                        "subject_type": subject_type
+                    })
+                    total_sent += 1
 
-        logger.info(f"[EVENT] Cycle complete. Sent: {total_sent}")
-        return {"status": "complete", "sent": total_sent, "skipped": skipped, "decisioned": decisioned}
+        if proposals:
+            from tools.l5_telegram_hitl import send_proposal_to_telegram
+            summary = f"Event proposal for {len(proposals)} seekers:\n"
+            for i, p in enumerate(proposals[:5], 1):
+                summary += f"{i}. {p['seeker_name']}: {p['message_text'][:40]}...\n"
+            if len(proposals) > 5:
+                summary += f"...and {len(proposals) - 5} more."
+            send_proposal_to_telegram("event", "batch", summary, {"proposals": proposals, "page_id": page_id})
+            logger.info(f"[EVENT] Proposed {len(proposals)} messages to Telegram HITL.")
+
+        return {"status": "complete", "sent": total_sent, "skipped": skipped, "decisioned": decisioned, "proposed": len(proposals)}
     except Exception as e:
         logger.error(f"[EVENT] Failed: {e}")
         return {"status": "error", "error": str(e)}
+
+
+        return {"status": "error", "error": str(e)}
+
+
+# --- HITL Executor ---
+# code:tool-scheduler-001:hitl-executor
+
+def telegram_poller_job():
+    from tools.l5_telegram_hitl import poll_telegram_updates
+    poll_telegram_updates()
+
+
+def hitl_execution_job(page_id: str, dry_run: bool = True):
+    from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+    from tools.l5_telegram_hitl import mark_hitl_executed, send_proposal_to_telegram
+    import json
+    
+    conn = get_db_connection()
+    try:
+        approved = conn.execute("SELECT * FROM telegram_hitl_queue WHERE status = 'approved' AND route IN ('warmup', 'event') LIMIT 10").fetchall()
+        if approved:
+            from playwright.sync_api import sync_playwright
+            from fb_pipeline.session.l2_bootstrap import attach_to_authorized_session
+            from adk_agents.tools.l5_facebook_tools import navigate_to_thread, send_reply_via_cdp, commit_reply_via_cdp
+            from adk_agents.tools.l5_warmup_tools import log_warmup_campaign
+            from adk_agents.tools.l5_event_tools import log_event_campaign
+            
+            for row in approved:
+                msg_id = row['telegram_message_id']
+                route = row['route']
+                payload = json.loads(row['payload_json'])
+                proposals = payload.get("proposals", [])
+                
+                if not proposals:
+                    mark_hitl_executed(msg_id)
+                    continue
+
+                logger.info(f"Executing approved {route} batch from HITL...")
+                with sync_playwright() as p:
+                    inbox_url = f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}"
+                    try:
+                        session = attach_to_authorized_session(p, page_id, inbox_url)
+                        cdp_page = session.page
+                        for prop in proposals:
+                            thread_id = prop['thread_id']
+                            message_text = prop['message_text']
+                            if navigate_to_thread(cdp_page, page_id, prop['seeker_name'], thread_id):
+                                send_reply_via_cdp(cdp_page, message_text, dry_run=True)
+                                commit_reply_via_cdp(cdp_page)
+                                
+                                if route == 'warmup':
+                                    log_warmup_campaign(thread_id, prop['seeker_name'], prop['strategy']['type'], message_text, dry_run=dry_run)
+                                    _update_user_decision_state(thread_id, prop['next_temperature'], warmup_sent=not dry_run, cool_step=prop['next_cool_step'])
+                                elif route == 'event':
+                                    log_event_campaign(prop['event']['id'], thread_id, prop['seeker_name'], message_text, dry_run=dry_run)
+                    except Exception as e:
+                        logger.error(f"HITL Execution failed for {route}: {e}")
+                    finally:
+                        if 'session' in locals() and session:
+                            session.close_page()
+                mark_hitl_executed(msg_id)
+
+        rejected = conn.execute("SELECT * FROM telegram_hitl_queue WHERE status = 'rejected' AND route IN ('warmup', 'event') LIMIT 10").fetchall()
+        for row in rejected:
+            msg_id = row['telegram_message_id']
+            route = row['route']
+            feedback = row['feedback_text']
+            payload = json.loads(row['payload_json'])
+            proposals = payload.get("proposals", [])
+            
+            if not proposals:
+                mark_hitl_executed(msg_id)
+                continue
+                
+            logger.info(f"Regenerating rejected {route} batch based on HITL feedback: {feedback}")
+            from tools.l5_inbox_mas_runner import load_knowledge_context
+            knowledge_context = load_knowledge_context()
+            
+            new_proposals = []
+            for prop in proposals:
+                if route == 'warmup':
+                    new_msg = run_adk_warmup_composer(prop['seeker'], prop['strategy'], knowledge_context, dry_run=True, feedback=feedback)
+                    if new_msg:
+                        prop['message_text'] = new_msg
+                        new_proposals.append(prop)
+                elif route == 'event':
+                    new_msg = run_adk_event_advertiser(prop['event'], prop['seeker'], knowledge_context, dry_run=True, feedback=feedback)
+                    if new_msg:
+                        prop['message_text'] = new_msg
+                        new_proposals.append(prop)
+
+            mark_hitl_executed(msg_id)
+            if new_proposals:
+                summary = f"Revised {route} proposal for {len(new_proposals)} seekers:\n"
+                for i, p in enumerate(new_proposals[:5], 1):
+                    summary += f"{i}. {p['seeker_name']}: {p['message_text'][:40]}...\n"
+                send_proposal_to_telegram(route, "batch", summary, {"proposals": new_proposals, "page_id": page_id})
+
+    finally:
+        conn.close()
 
 
 # --- Scheduler Setup ---
@@ -837,6 +962,12 @@ def setup_schedule(page_id: str, dry_run: bool, routes: set,
             run_event_cycle, page_id=page_id, dry_run=dry_run
         )
         registered.append(f"event daily at {event_time}")
+
+    schedule.every(10).seconds.do(telegram_poller_job)
+    registered.append("telegram_poller every 10s")
+    
+    schedule.every(30).seconds.do(hitl_execution_job, page_id=page_id, dry_run=dry_run)
+    registered.append("hitl_execution every 30s")
 
     return registered
 

@@ -329,6 +329,26 @@ def setup_database(conn: sqlite3.Connection, logger=None):
         CREATE INDEX IF NOT EXISTS idx_mas_decisions_subject_route_created
         ON mas_decisions(subject_type, subject_id, route, created_at)
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS telegram_hitl_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            route TEXT NOT NULL,
+            thread_id TEXT,
+            telegram_message_id TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            proposed_text TEXT,
+            feedback_text TEXT,
+            payload_json TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS telegram_offset (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_update_id INTEGER DEFAULT 0
+        )
+    ''')
     migrate_schema_v2(conn)
     conn.commit()
 
@@ -396,6 +416,26 @@ def setup_comment_database(conn: sqlite3.Connection):
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_comment_users_temperature_last_interaction
         ON comment_users(temperature, last_interaction)
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS telegram_hitl_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            route TEXT NOT NULL,
+            thread_id TEXT,
+            telegram_message_id TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            proposed_text TEXT,
+            feedback_text TEXT,
+            payload_json TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS telegram_offset (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_update_id INTEGER DEFAULT 0
+        )
     ''')
     migrate_schema_v2(conn)
     conn.commit()
