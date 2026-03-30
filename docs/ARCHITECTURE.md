@@ -393,10 +393,9 @@ All MAS execution routes (Inbox, Comment Reply, Warm-up, and Event Advertising) 
 - **Configuration**: Uses `SYVN_TELEGRAM_GROUP_ID` (-1003703002550) and `TELEGRAM_BOT_TOKEN` defined in `.env`.
 - **Workflow Mechanics**:
   1. **Proposal Phase**: The agent (or scheduler route) drafts a response or formulates an execution plan (e.g., target list and message for warm-up) and sends it to the configured Telegram group.
-  2. **Listen Phase**: The MAS waits on that specific Telegram message.
-  3. **Reaction - LIKE (Approval)**: If an operator leaves a 👍 reaction on the proposal, the system receives the approval, removes the `dry_run` block, and performs the actual browser execution (e.g., navigating to the thread and hitting Enter).
-  4. **Reaction - REPLY (Revision)**: If the operator replies text directly to the proposal message with specific feedback, the agent ingests the reply via LLM to adapt and re-draft the response/plan. It then sends a *new* proposal to Telegram, restarting the listen phase until a LIKE is achieved.
-```
+  2. **Queuing (Non-Blocking)**: The MAS instantly closes the headless browser and persists the AI context (chat history, seeker dict, strategy context) exclusively to the `telegram_hitl_queue` SQLite database. The Python scheduler seamlessly continues its operation unblocked.
+  3. **Reaction - LIKE (Approval)**: If an operator leaves a 👍 reaction on the proposal, the background `hitl_execution_job` detects the approval within 30 seconds. It re-launches Playwright, navigates perfectly to the specific Facebook thread, dynamically injects the draft text, and commits the `Enter` action. Finally, it drops a 💯 emoji reaction gracefully back on the exact Telegram Proposal to confirm task completion.
+  4. **Reaction - REPLY (Revision)**: If the operator replies text directly to the proposal message with specific feedback, the background orchestrator unpacks the persisted interaction history, injects the operator's reply as system feedback via an LLM instruction, regenerates the draft, and queues a *new* proposal to Telegram.
 
 ### Inbox Reply (ADK-backed production flow)
 
@@ -406,9 +405,9 @@ All MAS execution routes (Inbox, Comment Reply, Warm-up, and Event Advertising) 
 | Input | Persisted thread messages + seeker CRM context from FrankenSQLite |
 | ADK agents | `MessageClassifier` → `Responder` |
 | Knowledge source | `load_knowledge_context()` loads `SOUL.md`, `faq.md`, `lop-hoc.md`, `su-kien.md`, `research.md`, and `mas_strategy.md` into session `knowledge_context` |
-| Action | Drafts reply text, navigates to thread, and types the reply into the composer for human review only |
+| Action | AI statically determines the thread context and bundles it directly to the Telegram API. Execution typing deferral shifts 100% to the independent `hitl_execution_job()` async daemon pipeline. |
 
-Pipeline: persisted thread data → `run_adk_pipeline()` session state injection → `MessageClassifier` → `Responder` → `send_reply_via_cdp()` draft typing → `log_auto_reply()` draft audit
+Pipeline: persisted thread data → `run_adk_pipeline()` session state injection → `MessageClassifier` → `Responder` → `send_proposal_to_telegram()` queued insertion → **Telegram HITL Database Pipeline** → `hitl_execution_job()` Playwright re-hydration → `commit_reply_via_cdp()` firing → Telegram Completion (💯).
 
 ### Route 1: React (Reaction to New Messages/Comments)
 

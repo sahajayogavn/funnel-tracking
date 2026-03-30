@@ -272,7 +272,7 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
     )
     from adk_agents.tools.l5_stage_tools import evaluate_stage_gate
     from fb_pipeline.persistence.l4_sqlite_store import log_mas_decision
-    from tools.l5_telegram_hitl import send_proposal_to_telegram, poll_telegram_updates, check_hitl_status, mark_hitl_executed
+    from tools.l5_telegram_hitl import send_proposal_to_telegram
 
 
     if not dry_run:
@@ -389,36 +389,20 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
         route="inbox",
         thread_id=thread_id,
         proposed_text=reply_text,
-        payload={"classification": classification}
+        payload={
+            "classification": classification,
+            "msg_messages_json": msg_result["messages"],
+            "seeker_dict": seeker,
+            "proposals": [{
+                "thread_id": thread_id,
+                "seeker_name": thread_name,
+                "message_text": reply_text
+            }]
+        }
     )
 
     if msg_id:
-        logger.info("### HANGING CDP TAB OPEN FOR TELEGRAM HITL APPROVAL. ###")
-        while True:
-            poll_telegram_updates()
-            decision, feedback = check_hitl_status(msg_id)
-            if decision == "approved":
-                logger.info("Telegram approval (LIKE) received. Hitting Enter.")
-                commit_reply_via_cdp(cdp_page)
-                mark_hitl_executed(msg_id)
-                break
-            elif decision == "rejected":
-                logger.info(f"Telegram rejection (REPLY) received: {feedback}. Regenerating draft.")
-                mark_hitl_executed(msg_id)
-                clear_composer_via_cdp(cdp_page)
-                
-                adk_result = run_adk_pipeline(msg_result["messages"], seeker, feedback=feedback)
-                reply_text = adk_result.get("reply_text", "")
-                classification = adk_result.get("classification", "")
-                send_reply_via_cdp(cdp_page, reply_text, dry_run=True)
-                
-                msg_id = send_proposal_to_telegram(
-                    route="inbox",
-                    thread_id=thread_id,
-                    proposed_text=reply_text,
-                    payload={"classification": classification, "is_revision": True, "feedback_addressed": feedback}
-                )
-            time.sleep(3)
+        logger.info(f"### ASYNC INBOX: Proposal {msg_id} queued to HITL DB. Relinquishing CDP tab... ###")
 
 
     return {

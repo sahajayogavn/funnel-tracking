@@ -54,37 +54,32 @@ def mock_tools(monkeypatch):
         "nav": nav_mock, "send": send_mock, "commit": commit_mock, "clear": clear_mock
     }
 
-def test_hitl_approval_loop(mock_db, mock_tools, monkeypatch):
+def test_async_inbox_proposal_queueing(mock_db, mock_tools, monkeypatch):
     monkeypatch.setattr("tools.l5_telegram_hitl.get_telegram_credentials", lambda: ("t", "c"))
     
-    sleep_calls = 0
-    def fake_sleep(secs):
-        nonlocal sleep_calls
-        sleep_calls += 1
-        conn = mock_db()
-        if sleep_calls == 1:
-            conn.execute("UPDATE telegram_hitl_queue SET status='rejected', feedback_text='rewrite this' WHERE status='pending'")
-            conn.commit()
-        elif sleep_calls == 2:
-            conn.execute("UPDATE telegram_hitl_queue SET status='approved' WHERE status='pending'")
-            conn.commit()
-        conn.close()
-
-    monkeypatch.setattr("tools.l5_inbox_mas_runner.time.sleep", fake_sleep)
-    
     with patch("tools.l5_telegram_hitl.requests.post") as mock_post:
-        mock_response_1 = MagicMock()
-        mock_response_1.json.return_value = {"ok": True, "result": {"message_id": 100}}
-        mock_response_2 = MagicMock()
-        mock_response_2.json.return_value = {"ok": True, "result": {"message_id": 101}}
-        mock_post.side_effect = [mock_response_1, mock_response_2]
-        
-        monkeypatch.setattr("tools.l5_telegram_hitl.poll_telegram_updates", lambda: None)
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True, "result": {"message_id": 100}}
+        mock_post.return_value = mock_response
         
         page_mock = MagicMock()
         res = process_single_thread(page_mock, "mock_page", "mock_thread", "Test User", dry_run=True)
         
         assert res["status"] == "drafted"
-        assert mock_tools["clear"].call_count == 1
-        assert mock_tools["commit"].call_count == 1
-        assert mock_tools["send"].call_count == 2
+        
+        # In the async rewrite, it only drafts once visually via UI and does not commit
+        assert mock_tools["clear"].call_count == 0
+        assert mock_tools["commit"].call_count == 0
+        assert mock_tools["send"].call_count == 1
+        
+        conn = mock_db()
+        row = conn.execute("SELECT * FROM telegram_hitl_queue WHERE telegram_message_id = 100").fetchone()
+        assert row is not None
+        assert row["status"] == "pending"
+        
+        import json
+        payload = json.loads(row["payload_json"])
+        assert "proposals" in payload
+        assert "msg_messages_json" in payload
+        assert "seeker_dict" in payload
+        conn.close()

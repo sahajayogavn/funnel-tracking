@@ -842,7 +842,7 @@ def hitl_execution_job(page_id: str, dry_run: bool = True):
     
     conn = get_db_connection()
     try:
-        approved = conn.execute("SELECT * FROM telegram_hitl_queue WHERE status = 'approved' AND route IN ('warmup', 'event') LIMIT 10").fetchall()
+        approved = conn.execute("SELECT * FROM telegram_hitl_queue WHERE status = 'approved' AND route IN ('warmup', 'event', 'inbox') LIMIT 10").fetchall()
         if approved:
             from playwright.sync_api import sync_playwright
             from fb_pipeline.session.l2_bootstrap import attach_to_authorized_session
@@ -880,12 +880,15 @@ def hitl_execution_job(page_id: str, dry_run: bool = True):
                                     log_event_campaign(prop['event']['id'], thread_id, prop['seeker_name'], message_text, dry_run=dry_run)
                     except Exception as e:
                         logger.error(f"HITL Execution failed for {route}: {e}")
+                    else:
+                        from tools.l5_telegram_hitl import send_telegram_reaction
+                        send_telegram_reaction(msg_id, "💯")
                     finally:
                         if 'session' in locals() and session:
                             session.close_page()
                 mark_hitl_executed(msg_id)
 
-        rejected = conn.execute("SELECT * FROM telegram_hitl_queue WHERE status = 'rejected' AND route IN ('warmup', 'event') LIMIT 10").fetchall()
+        rejected = conn.execute("SELECT * FROM telegram_hitl_queue WHERE status = 'rejected' AND route IN ('warmup', 'event', 'inbox') LIMIT 10").fetchall()
         for row in rejected:
             msg_id = row['telegram_message_id']
             route = row['route']
@@ -910,6 +913,13 @@ def hitl_execution_job(page_id: str, dry_run: bool = True):
                         new_proposals.append(prop)
                 elif route == 'event':
                     new_msg = run_adk_event_advertiser(prop['event'], prop['seeker'], knowledge_context, dry_run=True, feedback=feedback)
+                    if new_msg:
+                        prop['message_text'] = new_msg
+                        new_proposals.append(prop)
+                elif route == 'inbox':
+                    from tools.l5_inbox_mas_runner import run_adk_pipeline
+                    adk_result = run_adk_pipeline(payload.get("msg_messages_json", []), payload.get("seeker_dict", prop.get("seeker", {})), feedback=feedback)
+                    new_msg = adk_result.get("reply_text")
                     if new_msg:
                         prop['message_text'] = new_msg
                         new_proposals.append(prop)
@@ -974,7 +984,8 @@ def setup_schedule(page_id: str, dry_run: bool, routes: set,
 
 def run_scheduler_loop():
     """Main scheduler event loop with graceful shutdown."""
-    logger.info("Scheduler loop started. Press Ctrl+C to stop.")
+    logger.info("Scheduler loop started. Triggering immediate first run. Press Ctrl+C to stop.")
+    schedule.run_all()
     while not _shutdown_requested:
         schedule.run_pending()
         time.sleep(10)

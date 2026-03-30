@@ -65,6 +65,27 @@ def send_proposal_to_telegram(route: str, thread_id: str, proposed_text: str, pa
         logger.error(f"Failed to send proposal to Telegram: {e}")
         return None
 
+def send_telegram_reaction(message_id: str, emoji: str = "💯") -> bool:
+    """Drop an emoji reaction on a proposal message instead of typing a full reply."""
+    bot_token, chat_id = get_telegram_credentials()
+    if not bot_token or not chat_id or not message_id:
+        return False
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/setMessageReaction",
+            json={
+                "chat_id": chat_id, 
+                "message_id": int(message_id),
+                "reaction": [{"type": "emoji", "emoji": emoji}]
+            },
+            timeout=10
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to set telegram emoji reaction on {message_id}: {e}")
+        return False
+
 def check_hitl_status(message_id: str) -> Tuple[str, str]:
     """Returns (status, feedback_text). Status is 'pending', 'approved', 'rejected'."""
     if not message_id:
