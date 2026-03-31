@@ -96,6 +96,7 @@ class TestUserAdIdsDB(unittest.TestCase):
 
 
 class TestMasSchemaMigrations(unittest.TestCase):
+    """# Gate 3: code:test-validation-001:l1-to-l4"""
     def setUp(self):
         self._tmp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self._tmp_dir, "test.db")

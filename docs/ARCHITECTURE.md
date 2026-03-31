@@ -242,7 +242,7 @@ USER / OPERATOR
 |    adk_agents/tools/l5_facebook_tools.py         |
 |     - navigate_to_thread()                       |
 |     - send_reply_via_cdp()                       |
-|       dry_run=True => type only, NO Enter/SEND   |
+|       (Draft-only semantics, NO Enter/SEND)      |
 +--------------------------------------------------+
     |
     v
@@ -303,7 +303,7 @@ In short:
 ```text
 L2 CDP9222 / browser handle
     -> L2/L3 Facebook DOM handler
-       -> crawl / click / navigate / type (dry-run = no SEND)
+       -> crawl / click / navigate / type (draft-only, NO SEND)
           -> L1/L3 parser for seeker/customer info
              -> L4 persistence / CRM lookup
                 -> L5 MAS reply flow
@@ -656,7 +656,12 @@ Comment CRM timing state:
 
 ## Cities
 
-The current keyword-based pipeline recognizes these location buckets:
+The pipeline uses an LLM-driven classifier (`detect_city_smart`) to determine the seeker's location by evaluating three signals in priority order:
+1. **Customer messages** (strongest signal: explicit mentions by the user)
+2. **Page replies** (medium signal: address info sent by the page)
+3. **Ad content** (weakest signal: the city mentioned in the ad the user clicked)
+
+If the LLM is unavailable, it falls back to a legacy keyword-based scanner. The system recognizes these location buckets:
 
 - Hà Nội
 - TP. Hồ Chí Minh
@@ -666,3 +671,16 @@ The current keyword-based pipeline recognizes these location buckets:
 - Nghệ An
 - Hải Phòng
 - Online
+## Validation Gates
+
+**Universal ID**: `doc:architecture-validation-001`
+
+To guarantee architectural integrity and safety, the pipeline implements strict validation gates between layers:
+- **Gate 1 (L2 → L3)**: Crawler Integrity (`test_l3_inbox_pipeline.py`)
+- **Gate 2 (L3 → L1)**: Normalization & Enrichment (`test_l1_inbox_contracts.py`)
+- **Gate 3 (L1 → L4)**: Persistence Boundary (`test_l4_inbox_persistence.py`)
+- **Gate 4 (L4 → L5)**: MAS Context Handoff (`test_l5_inbox_query_actions.py`)
+- **Gate 5 (L5 → Telegram)**: Agent & HITL Firewall Gate (`test_l5_inbox_mas_runner.py` / `test_telegram_hitl.py`)
+- **Gate 6 (Telegram HITL → L2)**: Execution Output Gate (`test_l2_inbox_draft_safety.py` / `test_async_inbox_hitl.py`)
+
+All boundary gates are backed by unit tests mapped via `# code:test-validation-001:*` universal IDs.

@@ -88,6 +88,7 @@ def get_thread_messages(thread_id: str, limit: int = 150) -> dict:
             messages.append({"sender": r["sender"], "content": content, "timestamp": r["message_timestamp"]})
             total_chars += char_cost
 
+        # Reverse so the order is chronological (Oldest -> Newest)
         messages.reverse()
         return {"status": "success", "messages": messages, "count": len(messages)}
     except Exception as e:

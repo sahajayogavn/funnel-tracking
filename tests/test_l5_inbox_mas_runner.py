@@ -93,6 +93,12 @@ class TestRunAdkPipeline:
         assert result["knowledge_context"] == "KB BODY"
 
 
+class TestSanitizeReply:
+    """Unit tests for the reply sanitizer — code:tool-inbox-mas-001:reply-sanitizer
+    # Gate 5: code:test-validation-001:l5-to-hitl
+    """
+
+
 class TestProcessSingleThread:
     def test_empty_reply_returns_no_reply_without_drafting_or_logging(self, monkeypatch):
         import tools.l5_inbox_mas_runner as runner

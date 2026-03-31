@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from fb_pipeline.contracts.l1_inbox import detect_city, extract_user_info, parse_ad_ids, parse_page_id
+from fb_pipeline.contracts.l1_inbox import detect_city, extract_user_info, parse_ad_ids, parse_page_id, detect_city_smart
 
 
 class TestParsePageId(unittest.TestCase):
@@ -51,7 +51,9 @@ class TestParseAdIds(unittest.TestCase):
 
 
 class TestExtractUserInfo(unittest.TestCase):
-    """Tests for phone/email extraction from messages."""
+    """Tests for phone/email extraction from messages.
+    # Gate 2: code:test-validation-001:l3-to-l1
+    """
 
     def test_extract_phone_from_customer(self):
         messages = [
@@ -88,35 +90,72 @@ class TestExtractUserInfo(unittest.TestCase):
         self.assertIsNone(info["email"])
 
 
-class TestDetectCity(unittest.TestCase):
-    """Tests for city detection from ad content."""
+class TestDetectCitySmart(unittest.TestCase):
+    """Tests for the detect_city_smart integration layer.
+    code:test-validation-001:l1-city-smart
+    """
 
-    def test_detect_hanoi(self):
-        ad = "Lớp thiền miễn phí tại số 40 Vương Thừa Vũ, Hà Nội"
-        self.assertEqual(detect_city(ad, []), "Hà Nội")
+    from unittest.mock import patch
 
-    def test_detect_hcm(self):
-        ad = "Thiền Sahaja Yoga tại TP.HCM"
-        self.assertEqual(detect_city(ad, []), "TP. Hồ Chí Minh")
+    @patch("fb_pipeline.contracts.l1_city_llm.detect_city_llm")
+    @patch.dict("os.environ", {"OPENAI_API_BASE": "mock", "OPENAI_API_KEY": "mock"})
+    def test_detect_smart_returns_llm_result(self, mock_detect_llm):
+        """When LLM returns a valid city, detect_city_smart should return it without fallback."""
+        mock_detect_llm.return_value = {
+            "city": "Đà Nẵng",
+            "confidence": "high",
+            "reasoning": "mock reasoning"
+        }
+        
+        result = detect_city_smart(
+            ad_context="Lớp thiền Hà Nội",
+            page_messages=[{"sender": "Page", "content": "Địa chỉ Hà Nội"}],
+            thread_name="Test Seeker",
+            customer_messages=[{"sender": "Customer", "content": "Mình đang ở Đà Nẵng, có lớp không?"}]
+        )
+        
+        self.assertEqual(result, "Đà Nẵng")
+        mock_detect_llm.assert_called_once()
 
-    def test_detect_danang(self):
-        ad = "Lớp thiền tại Đà Nẵng"
-        self.assertEqual(detect_city(ad, []), "Đà Nẵng")
+    @patch("fb_pipeline.contracts.l1_city_llm.detect_city_llm")
+    @patch.dict("os.environ", {"OPENAI_API_BASE": "mock", "OPENAI_API_KEY": "mock"})
+    def test_detect_smart_falls_back_on_unknown(self, mock_detect_llm):
+        """When LLM returns 'Unknown', the system should fallback to keyword-based detect_city."""
+        mock_detect_llm.return_value = {
+            "city": "Unknown",
+            "confidence": "low",
+            "reasoning": "Could not determine city"
+        }
+        
+        # 'Thủ Đức' is a keyword for 'TP. Hồ Chí Minh'
+        result = detect_city_smart(
+            ad_context="Lớp thì ở Quận Thủ Đức",
+            page_messages=[],
+            thread_name="Test User",
+            customer_messages=[]
+        )
+        
+        # The LLM failed, so fallback will read "Thủ Đức" and map it to "TP. Hồ Chí Minh"
+        self.assertEqual(result, "TP. Hồ Chí Minh")
+        mock_detect_llm.assert_called_once()
 
-    def test_detect_nghean(self):
-        ad = "Lớp tại Nghệ An"
-        self.assertEqual(detect_city(ad, []), "Nghệ An")
-
-    def test_detect_haiphong(self):
-        ad = "Thiền tại Hải Phòng"
-        self.assertEqual(detect_city(ad, []), "Hải Phòng")
-
-    def test_detect_from_page_message(self):
-        msgs = [{"sender": "Page", "content": "Địa chỉ: 02 Xô Viết Nghệ Tĩnh, Bình Thạnh"}]
-        self.assertEqual(detect_city("", msgs), "TP. Hồ Chí Minh")
-
-    def test_detect_unknown(self):
-        self.assertEqual(detect_city("Lớp thiền", []), "Unknown")
+    @patch("fb_pipeline.contracts.l1_city_llm.detect_city_llm")
+    @patch.dict("os.environ", {"OPENAI_API_BASE": "mock", "OPENAI_API_KEY": "mock"})
+    def test_detect_smart_falls_back_on_timeout(self, mock_detect_llm):
+        """When LLM throws an exception (e.g., timeout), the system should safely catch it and fallback."""
+        mock_detect_llm.side_effect = Exception("API Timeout")
+        
+        # 'Hà Nội' is present in ad context
+        result = detect_city_smart(
+            ad_context="Khóa học thiền miễn phí tại Hà Nội",
+            page_messages=[],
+            thread_name="Test User",
+            customer_messages=[]
+        )
+        
+        # Expected fallback logic
+        self.assertEqual(result, "Hà Nội")
+        mock_detect_llm.assert_called_once()
 
 
 if __name__ == '__main__':

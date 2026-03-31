@@ -55,6 +55,7 @@ def mock_tools(monkeypatch):
     }
 
 def test_async_inbox_proposal_queueing(mock_db, mock_tools, monkeypatch):
+    """# Gate 6: code:test-validation-001:hitl-to-l2"""
     monkeypatch.setattr("tools.l5_telegram_hitl.get_telegram_credentials", lambda: ("t", "c"))
     
     with patch("tools.l5_telegram_hitl.requests.post") as mock_post:

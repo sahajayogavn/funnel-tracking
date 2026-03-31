@@ -13,6 +13,7 @@ from fb_pipeline.persistence.l4_sqlite_store import setup_database
 
 
 class TestFindUnrepliedThreads(unittest.TestCase):
+    """# Gate 4: code:test-validation-001:l4-to-l5"""
     def setUp(self):
         self._tmp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self._tmp_dir, "frankensqlite.db")

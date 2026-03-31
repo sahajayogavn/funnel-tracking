@@ -19,6 +19,7 @@ class TestInboxContracts(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
 
+    # Gate 1 & 2: code:test-validation-001:l2-to-l3 and code:test-validation-001:l3-to-l1
     def test_build_thread_record_parses_visible_thread(self):
         record = build_thread_record("page1", {
             "domIndex": 3,
@@ -31,6 +32,7 @@ class TestInboxContracts(unittest.TestCase):
         self.assertEqual(record.dom_index, 3)
         self.assertTrue(record.thread_id.startswith("page1_"))
 
+    # Gate 2: code:test-validation-001:l3-to-l1
     def test_enrich_thread_record_builds_mas_payload(self):
         thread_record = build_thread_record("page1", {
             "name": "User A",
@@ -57,6 +59,7 @@ class TestInboxContracts(unittest.TestCase):
         self.assertEqual(enriched.mas_handoff.seeker.city, "Hà Nội")
         self.assertEqual(enriched.mas_handoff.ad_ids, ["ad_1"])
 
+    # Gate 3: code:test-validation-001:l1-to-l4
     def test_persist_thread_record_writes_all_boundaries(self):
         thread_record = enrich_thread_record(
             build_thread_record("page1", {"name": "User A", "text": "User A\nPreview"}),
@@ -90,6 +93,7 @@ class TestInboxContracts(unittest.TestCase):
         self.assertIn("--- [AD SOURCE]: Thiền miễn phí tại Hà Nội ---", msgs[0]["content"])
         self.assertEqual(msgs[1]["seq"], 1)
 
+    # Gate 3: code:test-validation-001:l1-to-l4 (CRM Timing State)
     def test_persist_thread_record_only_refreshes_last_synced_at_without_new_customer_message(self):
         thread_record = enrich_thread_record(
             build_thread_record("page1", {"name": "User A", "text": "User A\nPreview"}),

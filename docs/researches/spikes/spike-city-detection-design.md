@@ -215,7 +215,8 @@ These keywords exist in multiple cities and cause false matches:
 ### Phase 2: Per-User Detection (Short-term)
 - Implement `detect_city_for_user()` that scores per-user messages
 - Replace `propagate_city_from_ads()` with per-user batch detection
-- Add weighted scoring (customer × 3, page × 2, ad × 1)
+- Add `tools/classify_city.py` to retroactively fix the existing database
+- Write unit tests for proximity matches and edge cases like "Online"
 
 ### Phase 3: Proximity Disambiguation (Medium-term)
 - Add proximity rule for remaining ambiguous keywords
@@ -266,3 +267,10 @@ WHERE m.content LIKE '%Đà Nẵng%' AND u.city != 'Đà Nẵng'
 | **Signals** | Ad content only | Customer msgs + Page replies + Ad content |
 | **Propagation** | `ad → all linked users` | Each user independently |
 | **Future** | Keyword dict | LLM-based (via ADK Analyzer) |
+
+---
+
+## 8. Outcome (March 2026)
+
+Instead of building a complex keyword proximity engine, we successfully pivoted to using an **LLM-driven classifier** (`fb_pipeline/contracts/l1_city_llm.py`), orchestrated by `detect_city_smart`. 
+It evaluates the same 3 signals (Customer Messages, Page Replies, Ad Context) but leverages AI to understand intent, falling back to the legacy keyword scanner only if the LLM is unavailable or fails. This greatly improved classification accuracy by solving edge cases where multiple cities are mentioned or implied without relying on brittle proximity heuristics.

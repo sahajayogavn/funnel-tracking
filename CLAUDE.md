@@ -193,14 +193,20 @@ These rules are **absolute** and must never be violated:
 - A reply that starts with `**Crafting...`, `I need to...`, `Let me...`, or any chain-of-thought narration is a **reasoning leak** and must be blocked — never sent.
 - If `_sanitize_reply()` returns an empty string, the thread must be logged as `no_reply` and skipped. Do NOT type empty or reasoning-only text.
 
-### 10.3 Inbox Replies Are Always Draft-Only
+### 10.3 Inbox Replies MUST Be Pure Async (No Live CDP Drafting)
 
-- Customer inbox replies must **never** be auto-sent by automation in any mode.
-- The `--live` flag must not change inbox replies into send behavior; if accepted for backward compatibility, inbox reply automation still stops at typed draft text.
-- A human operator (Steve) must review the drafted reply and manually press Enter/send.
+- **Do not automatically type or send messages to users without Telegram HITL.**
+- The MAS Runner loop must strictly generate the AI response and queue the proposal to the Telegram DB (`telegram_hitl_queue`) and then quickly proceed to the next iteration without opening the Playwright browser interface.
+- The `navigate_to_thread` and `send_reply_via_cdp` functions are EXCLUSIVELY reserved for the independent `hitl_execution_job.py` daemon, which only triggers AFTER receiving a 👍 LIKE reaction from a human operator in Telegram.
+- You must never write MAS LLM evaluation logic that synchronously attempts to type out the draft in the UI before a human has approved the action.
 
 ### 10.4 Page ID Configuration
 
 - The target main page for Inbox MAS automation is **Thiền Sahaja Yoga Việt Nam**.
 - The explicit numeric `page-id` (and `asset_id`) for this page is `1548373332058326`.
 - ALWAYS use this ID when invoking the runner (`--page-id 1548373332058326`) or generating E2E test scripts.
+
+### 10.5 Architecture Layer Validation Gates
+
+- Any modifications to the inbox extraction, normalization, persistence, or MAS runner orchestrator must pass the strict Layer Validation Gates (`doc:architecture-validation-001`).
+- All validation tests enforcing these gates must carry the universal ID tag `# code:test-validation-001:<layer-name>`.

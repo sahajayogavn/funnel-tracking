@@ -620,8 +620,9 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
             conn.close()
 
             # Step 2: Find unreplied threads
+            # Step 2: Find unreplied threads
             logger.info("Step 2: Finding unreplied threads...")
-            fetch_limit = 200 if target_thread else max_threads
+            fetch_limit = 200  # Default to 200 internally to ensure we can skip invalid ones
             unreplied = find_unreplied_threads(page_id, limit=fetch_limit)
 
             if target_thread:
@@ -698,8 +699,13 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                     "thread_name": thread["thread_name"],
                     "seeker": seeker,
                     "messages": recent_messages,
-                    "full_messages_json": msg_result["messages"]
+                    "full_messages_json": msg_result["messages"],
+                    "latest_timestamp": msg_result["messages"][-1].get("timestamp")
                 })
+
+                if len(batch_payload) >= max_threads:
+                    logger.info(f"Reached max_threads ({max_threads}). Stopping batch assembly.")
+                    break
 
             if not batch_payload:
                 logger.info("No valid threads found to batch.")
@@ -765,45 +771,6 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                         results.append({"status": "out_of_scope", "thread_name": thread_name, "classification": classification})
                         continue
 
-                    if not navigate_to_thread(cdp_page, page_id, thread_name, thread_id):
-                        logger.warning(f"Could not navigate to thread {thread_name}")
-                        results.append({"status": "nav_failed", "reply_text": reply_text})
-                        continue
-
-                    latest_dom_sender = cdp_page.evaluate('''() => {
-                        let region = document.querySelector('div[aria-label*="Message list container"], div[role="region"][aria-label*="message"]');
-                        if (!region) return "Unknown";
-                        let bubble = region.querySelector('.x1fqp7bg');
-                        let messageArea = bubble ? bubble.parentElement : (region.querySelector('div.x1yrsyyn') || region);
-                        let topDivs = Array.from(messageArea.children);
-                        for (let i = topDivs.length - 1; i >= 0; i--) {
-                            let div = topDivs[i];
-                            if (div.classList.contains('x14vqqas') || div.querySelector('.x14vqqas')) continue;
-                            if (div.classList.contains('xcxhlts') || div.querySelector('.xcxhlts')) continue;
-                            if (!div.classList.contains('x1fqp7bg') && !div.querySelector('.x1fqp7bg')) continue;
-                            let htmlStr = (div.outerHTML || "").substring(0, 500);
-                            if (htmlStr.includes('x13a6bvl')) {
-                                let text = div.innerText.trim();
-                                let is_auto = text.includes("Chúng tôi có thể giúp gì cho bạn?") || text.includes("Bạn để lại Họ tên và Số điện thoại") || text.includes("Khóa học thiền ở Hà Nội") || text.includes("Thời gian: 20h-21h30");
-                                return is_auto ? "Auto_Page" : "Page";
-                            }
-                            if (htmlStr.includes('x1nhvcw1')) return "Customer";
-                            let avatar = div.querySelector('img.img[alt]');
-                            return avatar ? "Customer" : "Page";
-                        }
-                        return "Unknown";
-                    }''')
-
-                    if latest_dom_sender == "Page":
-                        logger.warning(f"DOM Verif Failed: {thread_name} already Page replied! Aborting.")
-                        results.append({"status": "abort_already_replied", "reply_text": reply_text})
-                        continue
-
-                    drafted = send_reply_via_cdp(cdp_page, reply_text, dry_run=True)
-                    if not drafted:
-                        logger.warning(f"Could not draft reply for {thread_name}")
-                        results.append({"status": "draft_failed", "reply_text": reply_text})
-                        continue
 
                     log_auto_reply(thread_id, reply_text, agent_name="responder", escalated=False, dry_run=True, customer_message_timestamp=latest_customer_message_timestamp)
                     

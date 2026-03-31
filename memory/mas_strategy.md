@@ -455,6 +455,8 @@ Bảng tổng hợp chiến lược warm-up theo stage và thời gian im lặng
 
 ## QA Check Gates — Kiểm soát Chất lượng MAS
 
+**Validation Universal ID**: `doc:architecture-validation-001`
+
 > Mỗi stage transition và mỗi MAS action đều phải qua **QA Gate** trước khi thực thi. Gate = điều kiện tối thiểu bắt buộc đạt trước khi cho phép chuyển tiếp hoặc gửi tin nhắn.
 
 ### Pipeline QA Flow
@@ -617,7 +619,7 @@ Mọi đề xuất hành động từ MAS (soạn tin nhắn inbox, reply commen
       │
       ├── fetch_fb_messages.py ──→ messages table  ──→ users table
       ├── webhook_comments.py  ──→ comments table  ──→ comment_users table
-      └── city classification  ──→ users.city_classified
+      └── LLM City classification (Ads, DMs, Replies) ──→ users.city
 
 
   PHASE 2: CLASSIFICATION (Phân loại)

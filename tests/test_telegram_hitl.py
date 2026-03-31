@@ -47,6 +47,7 @@ def mock_env(monkeypatch):
 
 @patch("tools.l5_telegram_hitl.requests.post")
 def test_send_proposal(mock_post, mock_env, mock_db):
+    """# Gate 5: code:test-validation-001:l5-to-hitl"""
     mock_response = MagicMock()
     mock_response.json.return_value = {"ok": True, "result": {"message_id": 999}}
     mock_response.raise_for_status = MagicMock()
