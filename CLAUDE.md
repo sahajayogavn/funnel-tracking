@@ -185,6 +185,7 @@ These rules are **absolute** and must never be violated:
 - When running any browser-based E2E test for the Inbox MAS pipeline (e.g. `inbox_mas_runner.py --once`), you **MUST** restrict the test to **Hung Bui's thread only** (`thread_name = "Hung Bui"`), because that is the developer's own Facebook account.
 - **NEVER** run a browser E2E test against real customer threads. Real customers must not receive any test, draft, or accidental messages.
 - To target Hung Bui specifically, pass `--max-threads 1` and confirm the first unreplied thread is Hung Bui before proceeding, or use a `--target-thread "Hung Bui"` flag if implemented.
+- **UI Parser Changes**: Whenever you implement modifications to the DOM parser or crawler module, you **MUST** run a test script specifically targeting "Hung Bui" to verify that parsing successfully extracts all messages without missing any, BEFORE you can commit any code.
 
 ### 10.2 Reply Sanitizer — Always Strip Reasoning Leaks
 

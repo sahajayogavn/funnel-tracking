@@ -58,12 +58,12 @@ def lookup_seeker(thread_id: str) -> dict:
         return {"status": "error", "error": str(e)}
 
 
-def get_thread_messages(thread_id: str, limit: int = 20) -> dict:
-    """Get the most recent messages from a specific thread.
+def get_thread_messages(thread_id: str, limit: int = 150) -> dict:
+    """Get the most recent messages from a specific thread up to ~3500 characters.
 
     Args:
         thread_id: The thread ID to fetch messages for.
-        limit: Maximum number of messages to return (default 20).
+        limit: DB query limit (default 150). Will dynamically cap around 3500 chars.
 
     Returns:
         dict: Status and list of messages with sender, content, timestamp.
@@ -77,11 +77,18 @@ def get_thread_messages(thread_id: str, limit: int = 20) -> dict:
         ).fetchall()
         conn.close()
 
-        messages = [
-            {"sender": r["sender"], "content": r["content"],
-             "timestamp": r["message_timestamp"]}
-            for r in reversed(rows)
-        ]
+        messages = []
+        total_chars = 0
+        for r in rows:
+            content = r["content"] or ""
+            # Calculate char cost, add buffer for JSON structure
+            char_cost = len(content) + 50
+            if total_chars + char_cost > 3500 and total_chars > 0:
+                break
+            messages.append({"sender": r["sender"], "content": content, "timestamp": r["message_timestamp"]})
+            total_chars += char_cost
+
+        messages.reverse()
         return {"status": "success", "messages": messages, "count": len(messages)}
     except Exception as e:
         logger.error(f"Message fetch failed: {e}")
@@ -131,9 +138,8 @@ def find_unreplied_threads(page_id: str, limit: int = 10) -> dict:
             JOIN latest_message_details lmd ON lmd.thread_id = t.id
             LEFT JOIN latest_acknowledgements la ON la.thread_id = t.id
             WHERE t.page_id = ?
-              AND lmd.sender IN ('Customer', 'Auto_Page')
-              AND (
-                    la.latest_acknowledged_customer_message_timestamp IS NULL
+              AND lmd.sender NOT IN ('Page')
+              AND (\n                    la.latest_acknowledged_customer_message_timestamp IS NULL
                     OR lmd.message_timestamp != la.latest_acknowledged_customer_message_timestamp
               )
             ORDER BY lmd.recorded_at DESC

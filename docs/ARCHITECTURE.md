@@ -405,6 +405,8 @@ All MAS execution routes (Inbox, Comment Reply, Warm-up, and Event Advertising) 
 | Input | Persisted thread messages + seeker CRM context from FrankenSQLite |
 | ADK agents | `MessageClassifier` → `Responder` |
 | Knowledge source | `load_knowledge_context()` loads `SOUL.md`, `faq.md`, `lop-hoc.md`, `su-kien.md`, `research.md`, and `mas_strategy.md` into session `knowledge_context` |
+| Optimization | **Grouped LLM Generation**: Combines multiple pending threads (A, B, C, D) into a single LLM request for rapid, parallelized reasoning. The batched response is then unpacked into individual Telegram HITL messages per thread. |
+| Filtering | **Out of MAS Range**: The LLM classifier explicitly detects non-meditation-related chatter (e.g. sales, random spam). If flagged as `[OUT_OF_SCOPE]`, the system completely skips CDP browser drafting and strictly emits an alert to the Telegram HITL queue. |
 | Action | AI statically determines the thread context and bundles it directly to the Telegram API. Execution typing deferral shifts 100% to the independent `hitl_execution_job()` async daemon pipeline. |
 
 Pipeline: persisted thread data → `run_adk_pipeline()` session state injection → `MessageClassifier` → `Responder` → `send_proposal_to_telegram()` queued insertion → **Telegram HITL Database Pipeline** → `hitl_execution_job()` Playwright re-hydration → `commit_reply_via_cdp()` firing → Telegram Completion (💯).

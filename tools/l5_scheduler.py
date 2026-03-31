@@ -695,13 +695,14 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
 
         if proposals:
             from tools.l5_telegram_hitl import send_proposal_to_telegram
-            summary = f"Warmup proposal for {len(proposals)} seekers:\n"
-            for i, p in enumerate(proposals[:5], 1):
-                summary += f"{i}. {p['seeker_name']}: {p['message_text'][:40]}...\n"
-            if len(proposals) > 5:
-                summary += f"...and {len(proposals) - 5} more."
-            send_proposal_to_telegram("warmup", "batch", summary, {"proposals": proposals, "page_id": page_id})
-            logger.info(f"[WARMUP] Proposed {len(proposals)} messages to Telegram HITL.")
+            logger.info(f"[WARMUP] Proposing {len(proposals)} individual messages to Telegram HITL.")
+            for p in proposals:
+                send_proposal_to_telegram(
+                    "warmup",
+                    p["thread_id"],
+                    f"Warmup proposal for {p['seeker_name']}:\n\n{p['message_text']}",
+                    {"proposals": [p], "page_id": page_id}
+                )
 
         return {"status": "complete", "processed": processed, "skipped": skipped, "decisioned": decisioned, "proposed": len(proposals)}
     except Exception as e:
@@ -1024,6 +1025,10 @@ def main():
         help=f"Daily event advertising time HH:MM (default: {DEFAULT_EVENT_TIME})"
     )
     parser.add_argument(
+        "--num", type=int, default=None,
+        help="Exact number of threads/seekers to process per cycle (alias for max-threads/max-seekers)"
+    )
+    parser.add_argument(
         "--run-once", action="store_true",
         help="Run all enabled routes once and exit (for testing)"
     )
@@ -1053,15 +1058,17 @@ def main():
     if args.run_once:
         logger.info("Running all enabled routes once...")
         results = {}
+        max_limit = args.num if args.num is not None else 5
+
         if "react" in routes:
             run_fetch_cycle(page_id, dry_run=dry_run)
             results["react"] = run_react_cycle(page_id, dry_run=dry_run)
         if "reply" in routes:
-            results["reply"] = run_reply_cycle(page_id, dry_run=dry_run)
+            results["reply"] = run_reply_cycle(page_id, dry_run=dry_run, max_threads=max_limit)
         if "warmup" in routes:
-            results["warmup"] = run_warmup_cycle(page_id, dry_run=dry_run)
+            results["warmup"] = run_warmup_cycle(page_id, dry_run=dry_run, max_seekers=max_limit)
         if "event" in routes:
-            results["event"] = run_event_cycle(page_id, dry_run=dry_run)
+            results["event"] = run_event_cycle(page_id, dry_run=dry_run, max_seekers=max_limit)
         print(json.dumps(results, indent=2, ensure_ascii=False))
         return
 

@@ -128,9 +128,25 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             row = cursor.fetchone()
 
             if row and row[0] == thread_record.preview_text:
-                logger.info(f"Skipping thread '{name}'. No new messages (preview matches).")
-                stats["skipped_threads"] += 1
-                continue
+                # code:tool-inbox-001:force-resync-page-reply
+                # Even if the preview matches, if the sidebar shows "You: ..."
+                # (admin reply) but our DB's last message is NOT from 'Page',
+                # we must re-sync to capture the missing Page message.
+                force_resync = False
+                preview_lower = (thread_record.preview_text or "").strip().lower()
+                if preview_lower.startswith("you:") or preview_lower.startswith("bạn:"):
+                    last_msg_row = cursor.execute(
+                        "SELECT sender FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1",
+                        (thread_record.thread_id,)
+                    ).fetchone()
+                    if last_msg_row and last_msg_row[0] != "Page":
+                        force_resync = True
+                        logger.info(f"Force re-sync thread '{name}': sidebar shows admin reply but DB last msg is '{last_msg_row[0]}'.")
+
+                if not force_resync:
+                    logger.info(f"Skipping thread '{name}'. No new messages (preview matches).")
+                    stats["skipped_threads"] += 1
+                    continue
 
             logger.info(f"Syncing thread '{name}' (#{thread_counter})...")
             prev_fb_url = ""
@@ -326,58 +342,70 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 if (!region) return [];
                 let results = [];
                 let currentTimestamp = "";
-                let bubble = region.querySelector('.x1fqp7bg');
-                let messageArea = bubble ? bubble.parentElement : (region.querySelector('div.x1yrsyyn') || region);
-                let topDivs = messageArea.children;
-                for (let div of topDivs) {
-                    if (div.classList.contains('x14vqqas') || div.querySelector('.x14vqqas')) {
-                        let tsEl = div.classList.contains('x14vqqas') ? div : div.querySelector('.x14vqqas');
-                        if (tsEl) {
-                            let ts = tsEl.innerText.trim();
-                            if (ts && ts.length < 50) currentTimestamp = ts;
-                        }
+                // Capture all bubbles and timestamps in document layout order!
+                // This ensures we jump over arbitrary Facebook wrapper group chunks.
+                let elements = region.querySelectorAll('.x14vqqas, .x1fqp7bg');
+                let processedBubbles = new Set();
+                
+                for (let el of elements) {
+                    if (el.classList.contains('x14vqqas')) {
+                        let ts = el.innerText.trim();
+                        if (ts && ts.length < 50) currentTimestamp = ts;
                         continue;
                     }
-                    if (div.classList.contains('xcxhlts') || div.querySelector('.xcxhlts')) {
-                        continue;
-                    }
-                    if (!div.classList.contains('x1fqp7bg') && !div.querySelector('.x1fqp7bg')) continue;
-                    let sender = "Unknown";
-                    let outerWrapper = div.querySelector('.xuk3077') || div;
-                    let htmlStr = outerWrapper.outerHTML.substring(0, 500);
-                    if (htmlStr.includes('x13a6bvl')) {
-                        sender = "Page";
-                    } else if (htmlStr.includes('x1nhvcw1')) {
-                        sender = "Customer";
-                    } else {
-                        let avatar = div.querySelector('img.img[alt]');
-                        sender = avatar ? "Customer" : "Page";
-                    }
-                    let textContainers = div.querySelectorAll('.x1y1aw1k');
-                    if (textContainers.length > 0) {
-                        for (let tc of textContainers) {
-                            let text = tc.innerText.trim();
-                            if (text && text.length > 0) {
-                                results.push({sender, text, timestamp: currentTimestamp});
+                    if (el.classList.contains('x1fqp7bg')) {
+                        // Prevent duplicated nesting (some bubbles contain inner divs with the same class)
+                        let isNested = false;
+                        let p = el.parentElement;
+                        while(p && p !== region) {
+                            if (p.classList.contains('x1fqp7bg') || processedBubbles.has(p)) {
+                                isNested = true;
+                                break;
                             }
+                            p = p.parentElement;
                         }
-                    } else {
-                        let spans = div.querySelectorAll('span > span');
-                        let found = false;
-                        if (spans.length > 0) {
-                            for (let sp of spans) {
-                                let t = sp.innerText.trim();
-                                if (t && t.length > 0) {
-                                    results.push({sender, text: t, timestamp: currentTimestamp});
-                                    found = true;
+                        if (isNested) continue;
+                        processedBubbles.add(el);
+                        
+                        let sender = "Unknown";
+                        let outerWrapper = el.parentElement || el;
+                        let htmlStr = outerWrapper.outerHTML.substring(0, 500);
+                        
+                        if (htmlStr.includes('x13a6bvl')) {
+                            sender = "Page";
+                        } else if (htmlStr.includes('x1nhvcw1')) {
+                            sender = "Customer";
+                        } else {
+                            let avatar = el.querySelector('img.img[alt]');
+                            sender = avatar ? "Customer" : "Page";
+                        }
+                        
+                        let textContainers = el.querySelectorAll('.x1y1aw1k');
+                        let texts = [];
+                        if (textContainers.length > 0) {
+                            for (let tc of textContainers) {
+                                let t = tc.innerText.trim();
+                                if (t) texts.push(t);
+                            }
+                        } else {
+                            let spans = el.querySelectorAll('span > span');
+                            let found = false;
+                            if (spans.length > 0) {
+                                for (let sp of spans) {
+                                    let t = sp.innerText.trim();
+                                    if (t) { texts.push(t); found = true; }
                                 }
                             }
-                        }
-                        if (!found) {
-                            let text = div.innerText.trim();
-                            if (text && text.length > 2 && text.length < 2000) {
-                                results.push({sender, text, timestamp: currentTimestamp});
+                            if (!found) {
+                                let text = el.innerText.trim();
+                                if (text && text.length > 2 && text.length < 2000) texts.push(text);
                             }
+                        }
+                        
+                        // Facebook might duplicate text nodes inside the bubble, just concatenate them seamlessly if needed
+                        // Alternatively, relying primarily on innerText is robust.
+                        for(let segment of texts) {
+                            results.push({sender, text: segment, timestamp: currentTimestamp});
                         }
                     }
                 }

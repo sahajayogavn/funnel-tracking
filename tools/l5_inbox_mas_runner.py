@@ -72,6 +72,14 @@ KNOWLEDGE_FILES = [
     "memory/mas_strategy.md",
 ]
 
+# Large files that should be truncated to save LLM context window tokens.
+# mas_strategy.md is 46KB but only the first ~250 lines (Stage 0-5 journey
+# definitions) are relevant for crafting inbox replies. The rest is operational
+# routing/technical architecture that the LLM doesn't need.
+KNOWLEDGE_FILE_MAX_LINES = {
+    "memory/mas_strategy.md": 250,
+}
+
 
 def load_knowledge_context() -> str:
     """Load markdown knowledge files into a single prompt context string."""
@@ -80,7 +88,12 @@ def load_knowledge_context() -> str:
         absolute_path = os.path.join(PROJECT_ROOT, relative_path)
         try:
             with open(absolute_path, "r", encoding="utf-8") as f:
-                sections.append(f"## Source: {relative_path}\n{f.read().strip()}")
+                max_lines = KNOWLEDGE_FILE_MAX_LINES.get(relative_path)
+                if max_lines:
+                    content = "".join(f.readlines()[:max_lines]).strip()
+                else:
+                    content = f.read().strip()
+                sections.append(f"## Source: {relative_path}\n{content}")
         except FileNotFoundError:
             logger.warning(f"Knowledge file missing: {relative_path}")
         except Exception as exc:
@@ -198,6 +211,142 @@ def run_adk_pipeline(thread_messages: list, seeker_context: dict, feedback: str 
     return result
 
 
+def run_adk_batch_pipeline(batch_payload: list, feedback: str = None) -> list:
+    """Run the ADK BatchInboxAgent for a list of grouped threads.
+    
+    Args:
+        batch_payload: List of dicts representing N threads and their messages.
+        feedback: Optional HITL feedback text.
+        
+    Returns:
+        List of dicts: [ { "thread_id": str, "classification": str, "reply_text": str } ]
+    """
+    from adk_agents.agent import batch_inbox_agent
+    from google.adk.runners import Runner
+    import json
+    from google.adk.sessions import InMemorySessionService
+    from google.genai import types
+    import asyncio
+
+    session_service = InMemorySessionService()
+    runner = Runner(
+        agent=batch_inbox_agent,
+        app_name="sahajayoga_batch_inbox",
+        session_service=session_service,
+    )
+    
+    knowledge_context = load_knowledge_context()
+
+    # Create a simplified version of payload to save token overhead
+    simplified_payload = []
+    for item in batch_payload:
+        simplified_payload.append({
+            "thread_id": item["thread_id"],
+            "seeker_context": item.get("seeker", {}),
+            "messages": item.get("messages", [])
+        })
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    session = loop.run_until_complete(
+        session_service.create_session(
+            app_name="sahajayoga_batch_inbox",
+            user_id="inbox_batch_runner",
+            state={
+                "batch_payload": json.dumps(simplified_payload, ensure_ascii=False),
+                "knowledge_context": knowledge_context
+            },
+        )
+    )
+
+    prompt = (
+        "Process this BATCH of Facebook inbox threads using the provided session state. "
+        "Use batch_payload and knowledge_context. Remember to output EXACTLY a valid JSON array."
+    )
+    if feedback:
+        prompt += f"\n\nIMPORTANT HUMAN FEEDBACK FOR REVISION:\n{feedback}\nPlease rewrite the replies adhering strictly to this feedback."
+
+    user_msg = types.Content(role="user", parts=[types.Part(text=prompt)])
+
+    batch_results = []
+    raw_response = ""
+
+    for event in runner.run(
+        user_id="inbox_batch_runner",
+        session_id=session.id,
+        new_message=user_msg
+    ):
+        if hasattr(event, 'content') and event.content and event.content.parts:
+            text = event.content.parts[0].text
+            raw_response = text  # ADK yields cumulative text, so assignment is correct.
+
+    def _extract_json_array(text: str) -> list | None:
+        """Try to extract a JSON array from LLM text output."""
+        import re
+        # Strategy 1: regex extract [...] block
+        match = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+                if isinstance(parsed, list):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        # Strategy 2: strip markdown fences
+        cleaned = text.strip()
+        for prefix in ('```json', '```'):
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):]
+        if cleaned.endswith('```'):
+            cleaned = cleaned[:-3]
+        try:
+            parsed = json.loads(cleaned.strip())
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        return None
+
+    logger.info(f"[ADK BATCH] Raw LLM Output:\n{raw_response}")
+
+    batch_results = _extract_json_array(raw_response) or []
+
+    # Retry once with a corrective prompt if first attempt failed
+    if not batch_results and raw_response.strip():
+        logger.warning("[ADK BATCH] First attempt returned no valid JSON. Retrying with corrective prompt...")
+        retry_msg = types.Content(
+            role="user",
+            parts=[types.Part(text=(
+                "Your previous response was NOT valid JSON. It contained reasoning text instead of the JSON array.\n"
+                "Please output ONLY the JSON array now. Start with '[' and end with ']'.\n"
+                "Do NOT include any explanation, planning, or markdown. ONLY the JSON array."
+            ))]
+        )
+        raw_retry = ""
+        for event in runner.run(
+            user_id="inbox_batch_runner",
+            session_id=session.id,
+            new_message=retry_msg
+        ):
+            if hasattr(event, 'content') and event.content and event.content.parts:
+                raw_retry = event.content.parts[0].text
+
+        logger.info(f"[ADK BATCH] Retry Raw LLM Output:\n{raw_retry}")
+        batch_results = _extract_json_array(raw_retry) or []
+
+    if batch_results:
+        logger.info(f"[ADK BATCH] Successfully parsed {len(batch_results)} thread replies.")
+    else:
+        logger.error(f"[ADK BATCH] Failed to extract JSON after retry. Raw: {raw_response[:500]}...")
+
+    return batch_results
+
+
+
 def _sanitize_reply(text: str) -> str:
     """Remove LLM reasoning-leak lines from a generated reply.
 
@@ -303,9 +452,11 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
         return {"status": "no_reply", "classification": classification}
 
     latest_customer_message_timestamp = None
+    latest_customer_message_text = ""
     for message in reversed(msg_result["messages"]):
         if message.get("sender") == "Customer":
             latest_customer_message_timestamp = message.get("timestamp")
+            latest_customer_message_text = message.get("content", "")
             break
 
     # 4. Navigate to thread in FB inbox
@@ -385,10 +536,14 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
             f"{stage_result.get('from_stage')} -> {stage_result.get('to_stage')}"
         )
 
+    combined_text = f"User: {latest_customer_message_text}\n\nOur Reply: {reply_text}"
+    if len(combined_text) > 4000:
+        combined_text = combined_text[:4000] + "... (truncated)"
+
     msg_id = send_proposal_to_telegram(
         route="inbox",
         thread_id=thread_id,
-        proposed_text=reply_text,
+        proposed_text=combined_text,
         payload={
             "classification": classification,
             "msg_messages_json": msg_result["messages"],
@@ -451,7 +606,7 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
             scrape_stats = scrape_inbox(
                 cdp_page,
                 page_id,
-                "1d",
+                "7d",
                 50,
                 conn,
                 logger,
@@ -493,19 +648,198 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
             except Exception as e:
                 logger.warning(f"Sidebar re-navigation failed (will try anyway): {e}")
 
-            # Step 3: Process each thread
+            # Step 3: Fetch DB context and assemble Batch Payload
+            batch_payload = []
+            from adk_agents.tools.seeker_tools import lookup_seeker, get_thread_messages
+            from adk_agents.tools.l5_facebook_tools import (
+                navigate_to_thread, send_reply_via_cdp, log_auto_reply,
+            )
+            from adk_agents.tools.l5_stage_tools import evaluate_stage_gate
+            from fb_pipeline.persistence.l4_sqlite_store import log_mas_decision
+            from tools.l5_telegram_hitl import send_proposal_to_telegram
+
             for thread in unreplied["threads"]:
+                thread_id = thread["thread_id"]
+                msg_result = get_thread_messages(thread_id)
+                if msg_result["status"] != "success" or msg_result["count"] == 0:
+                    logger.warning(f"No messages found for thread {thread['thread_name']}")
+                    continue
+
+                # code:tool-inbox-001:last-sender-guard
+                # Skip threads where the last message is from Page (admin already replied)
+                last_msg = msg_result["messages"][-1] if msg_result["messages"] else None
+                if last_msg and last_msg.get("sender") == "Page":
+                    logger.info(f"Skipping thread '{thread['thread_name']}': last message is from Page (admin already replied).")
+                    continue
+
+                # Also check the sidebar preview for "You:" which indicates an admin
+                # reply that hasn't been crawled into the DB yet
                 try:
-                    result = process_single_thread(
-                        cdp_page, page_id,
-                        thread["thread_id"], thread["thread_name"],
-                        dry_run=dry_run
-                    )
-                    results.append(result)
+                    sidebar_conn = get_db_connection()
+                    preview_row = sidebar_conn.execute(
+                        "SELECT last_synced_time FROM threads WHERE id = ?", (thread_id,)
+                    ).fetchone()
+                    sidebar_conn.close()
+                    if preview_row:
+                        preview = (preview_row[0] or "").strip().lower()
+                        if preview.startswith("you:") or preview.startswith("bạn:"):
+                            logger.info(f"Skipping thread '{thread['thread_name']}': sidebar preview shows admin reply ('{preview[:50]}...').")
+                            continue
                 except Exception as e:
-                    logger.error(f"Error processing {thread['thread_name']}: {e}")
-                    results.append({"status": "error", "error": str(e),
-                                    "thread_name": thread["thread_name"]})
+                    logger.warning(f"Could not check sidebar preview for {thread['thread_name']}: {e}")
+
+                seeker = lookup_seeker(thread_id)
+                
+                # Truncate messages to the last 15 to save context window tokens
+                recent_messages = msg_result["messages"][-15:] if len(msg_result["messages"]) > 15 else msg_result["messages"]
+                
+                batch_payload.append({
+                    "thread_id": thread_id,
+                    "thread_name": thread["thread_name"],
+                    "seeker": seeker,
+                    "messages": recent_messages,
+                    "full_messages_json": msg_result["messages"]
+                })
+
+            if not batch_payload:
+                logger.info("No valid threads found to batch.")
+                return {"status": "no_valid_threads", "scrape_stats": scrape_stats}
+
+            # Step 4: Run Batched ADK Pipeline (1 LLM request)
+            logger.info(f"Running Batched ADK Pipeline for {len(batch_payload)} threads...")
+            batch_results = run_adk_batch_pipeline(batch_payload)
+            
+            # Map results by thread_id for O(1) lookup
+            llm_replies = {item.get("thread_id"): item for item in batch_results if isinstance(item, dict) and item.get("thread_id")}
+
+            # Step 5: Process generated replies via CDP and Telegram HITL
+            for payload in batch_payload:
+                thread_id = payload["thread_id"]
+                thread_name = payload["thread_name"]
+                try:
+                    llm_output = llm_replies.get(thread_id)
+                    if not llm_output or not llm_output.get("reply_text"):
+                        logger.warning(f"No LLM reply generated for {thread_name}")
+                        results.append({"status": "no_reply", "thread_name": thread_name})
+                        continue
+
+                    reply_text = _sanitize_reply(llm_output.get("reply_text", ""))
+                    classification = llm_output.get("classification", "")
+
+                    if not reply_text:
+                        logger.warning(f"Sanitized reply is empty for {thread_name}")
+                        results.append({"status": "no_reply", "thread_name": thread_name})
+                        continue
+
+                    latest_customer_message_timestamp = None
+                    for message in reversed(payload["full_messages_json"]):
+                        if message.get("sender") == "Customer":
+                            latest_customer_message_timestamp = message.get("timestamp")
+                            break
+
+                    # Build Conversation Context for Telegram
+                    convo_lines = []
+                    for msg in payload["messages"]:
+                        sender_label = msg.get("sender", "Unknown")
+                        convo_lines.append(f"[{sender_label}]: {msg.get('content', '')}")
+                    convo_text = "\n".join(convo_lines)
+                    
+                    # Ensure convo_text fits within Telegram limits (leave ~1000 chars for the proposal)
+                    if len(convo_text) > 2500:
+                        convo_text = "...(truncated)...\n" + convo_text[-2500:]
+
+                    is_out_of_scope = (reply_text.strip() == "[OUT_OF_SCOPE]")
+                    stage_result = {}
+
+                    if is_out_of_scope:
+                        logger.info(f"Thread '{thread_name}' classified as OUT_OF_SCOPE. Skipping CDP drafting.")
+                        combined_text = f"🚨 [OUT OF SCOPE] Lời nhắn không thuộc phạm vi MAS (Sahaja Yoga):\n\n{convo_text}"
+                        
+                        msg_id = send_proposal_to_telegram(
+                            route="inbox", thread_id=thread_id, proposed_text=combined_text,
+                            payload={"classification": classification, "status": "out_of_scope"}
+                        )
+                        if msg_id:
+                            logger.info(f"### ASYNC INBOX: Out-of-scope alert {msg_id} sent to Telegram ###")
+                        
+                        results.append({"status": "out_of_scope", "thread_name": thread_name, "classification": classification})
+                        continue
+
+                    if not navigate_to_thread(cdp_page, page_id, thread_name, thread_id):
+                        logger.warning(f"Could not navigate to thread {thread_name}")
+                        results.append({"status": "nav_failed", "reply_text": reply_text})
+                        continue
+
+                    latest_dom_sender = cdp_page.evaluate('''() => {
+                        let region = document.querySelector('div[aria-label*="Message list container"], div[role="region"][aria-label*="message"]');
+                        if (!region) return "Unknown";
+                        let bubble = region.querySelector('.x1fqp7bg');
+                        let messageArea = bubble ? bubble.parentElement : (region.querySelector('div.x1yrsyyn') || region);
+                        let topDivs = Array.from(messageArea.children);
+                        for (let i = topDivs.length - 1; i >= 0; i--) {
+                            let div = topDivs[i];
+                            if (div.classList.contains('x14vqqas') || div.querySelector('.x14vqqas')) continue;
+                            if (div.classList.contains('xcxhlts') || div.querySelector('.xcxhlts')) continue;
+                            if (!div.classList.contains('x1fqp7bg') && !div.querySelector('.x1fqp7bg')) continue;
+                            let htmlStr = (div.outerHTML || "").substring(0, 500);
+                            if (htmlStr.includes('x13a6bvl')) {
+                                let text = div.innerText.trim();
+                                let is_auto = text.includes("Chúng tôi có thể giúp gì cho bạn?") || text.includes("Bạn để lại Họ tên và Số điện thoại") || text.includes("Khóa học thiền ở Hà Nội") || text.includes("Thời gian: 20h-21h30");
+                                return is_auto ? "Auto_Page" : "Page";
+                            }
+                            if (htmlStr.includes('x1nhvcw1')) return "Customer";
+                            let avatar = div.querySelector('img.img[alt]');
+                            return avatar ? "Customer" : "Page";
+                        }
+                        return "Unknown";
+                    }''')
+
+                    if latest_dom_sender == "Page":
+                        logger.warning(f"DOM Verif Failed: {thread_name} already Page replied! Aborting.")
+                        results.append({"status": "abort_already_replied", "reply_text": reply_text})
+                        continue
+
+                    drafted = send_reply_via_cdp(cdp_page, reply_text, dry_run=True)
+                    if not drafted:
+                        logger.warning(f"Could not draft reply for {thread_name}")
+                        results.append({"status": "draft_failed", "reply_text": reply_text})
+                        continue
+
+                    log_auto_reply(thread_id, reply_text, agent_name="responder", escalated=False, dry_run=True, customer_message_timestamp=latest_customer_message_timestamp)
+                    
+                    stage_result = evaluate_stage_gate(thread_id)
+                    if stage_result.get("promoted"):
+                        log_mas_decision(page_id, "stage_gate", "thread", thread_id, "promoted", stage_result.get("reason"), dry_run=dry_run, payload=stage_result)
+
+                    combined_text = f"📜 Cuộc hội thoại gần đây:\n{convo_text}\n\n🤖 Đề xuất trả lời (MAS):\n{reply_text}"
+                    if len(combined_text) > 3500:
+                        combined_text = combined_text[:3500] + "... (truncated)"
+
+                    msg_id = send_proposal_to_telegram(
+                        route="inbox", thread_id=thread_id, proposed_text=combined_text,
+                        payload={
+                            "classification": classification,
+                            "msg_messages_json": payload["full_messages_json"],
+                            "seeker_dict": payload["seeker"],
+                            "proposals": [{"thread_id": thread_id, "seeker_name": thread_name, "message_text": reply_text}]
+                        }
+                    )
+
+                    if msg_id:
+                        logger.info(f"### ASYNC INBOX: Proposal {msg_id} queued to HITL DB ###")
+
+                    results.append({
+                        "status": "drafted",
+                        "mode": "draft_only",
+                        "thread_name": thread_name,
+                        "classification": classification,
+                        "reply_text": reply_text,
+                        "stage_result": stage_result,
+                    })
+
+                except Exception as e:
+                    logger.error(f"Error processing resulting drafted reply for {thread_name}: {e}")
+                    results.append({"status": "error", "error": str(e), "thread_name": thread_name})
 
         finally:
             try:
@@ -548,6 +882,10 @@ def main():
         help="Max threads to process per cycle (default: 5)"
     )
     parser.add_argument(
+        "--num", type=int, default=None,
+        help="Exact number of threads to process per cycle (alias for --max-threads)"
+    )
+    parser.add_argument(
         "--interval", type=int, default=POLL_INTERVAL,
         help=f"Polling interval in seconds (default: {POLL_INTERVAL})"
     )
@@ -567,14 +905,16 @@ def main():
     # Setup LLM environment
     setup_llm_env()
 
+    max_threads_to_use = args.num if args.num is not None else args.max_threads
+
     mode_str = "[DRAFT-ONLY] Type replies for human review; automation never sends"
     logger.info(f"=== Inbox MAS Runner ===")
     logger.info(f"Page ID: {page_id}")
     logger.info(f"Mode: {mode_str}")
-    logger.info(f"Max threads/cycle: {args.max_threads}")
+    logger.info(f"Max threads/cycle: {max_threads_to_use}")
 
     if args.once:
-        result = run_inbox_cycle(page_id, dry_run=dry_run, max_threads=args.max_threads, target_thread=args.target_thread)
+        result = run_inbox_cycle(page_id, dry_run=dry_run, max_threads=max_threads_to_use, target_thread=args.target_thread)
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
     elif args.poll:
@@ -582,7 +922,7 @@ def main():
         while True:
             try:
                 result = run_inbox_cycle(page_id, dry_run=dry_run,
-                                         max_threads=args.max_threads,
+                                         max_threads=max_threads_to_use,
                                          target_thread=args.target_thread)
                 logger.info(f"Cycle result: {result.get('status', 'unknown')}, "
                            f"processed: {result.get('processed', 0)}")

@@ -157,6 +157,7 @@ Seeker đã chủ động inbox hoặc comment hỏi thông tin. Có 2 nhánh qu
 | Kênh | Hành động | MAS Route |
 | --- | --- | --- |
 | **Draft reply** | Soạn ngay câu trả lời khi seeker hỏi → cung cấp thông tin chương trình từ `lop-hoc.md` / `su-kien.md`; con người sẽ review và gửi thủ công | Inbox MAS |
+| **Out of Range (Spam)** | Lọc thả thính, sale, spam. Bỏ qua drafting, báo cáo trên Telegram cho đội hỗ trợ xem xét thủ công. | Inbox MAS |
 | **Event Advertising** | Nếu seeker ở đúng city có sự kiện → gửi thông báo event cá nhân hóa | Route 3: Event |
 | **Warm-up** | Nếu seeker hỏi rồi im lặng 3–7 ngày → gửi reminder nhẹ: _"Bạn ơi, lớp thiền miễn phí sắp khai giảng ngày [date] 🧘 Bạn còn muốn tham gia không?"_ | Route 2: Warm-up |
 | **Telegram** | Thông báo sang Telegram group để yogis follow-up gọi điện hoặc nhắn riêng | Inbox MAS |
@@ -581,7 +582,7 @@ Mọi đề xuất hành động từ MAS (soạn tin nhắn inbox, reply commen
      - Vòng lặp tiếp tục: Chỉ khi đề xuất _mới_ nhận được reaction **LIKE**, MAS mới thực thi lệnh gửi thực sự.
 
 ### Áp dụng cho các MAS Route
-- **Inbox MAS (Task 1)**: Soạn draft reply cho DM → gửi Telegram duyệt → LIKE → Hit Enter gửi Messenger.
+- **Inbox MAS (Task 1) - Grouped LLM Processing**: Để tối ưu tốc độ xử lý, thay vì tạo N requests độc lập cho N khách hàng (ví dụ A, B, C, D, E), hệ thống sẽ gộp (batch/concat) dữ liệu của cả N threads vào **1 LLM Request duy nhất**. Sau khi LLM trả về kết quả đồng loạt, hệ thống mới tách ra tạo thành **N Telegram HITL messages riêng biệt** để chờ phê duyệt (LIKE) độc lập cho từng user → Hit Enter gửi Messenger.
 - **Route 1 - React/Reply Comment (Task 2)**: Đề xuất nội dung trả lời comment Fanpage → gửi Telegram duyệt → LIKE → gửi reply comment thật trên Fanpage.
 - **Route 2 - Warm-up & Route 3 - Event (Task 3)**: Lên plan danh sách target và nội dung message mẫu → gửi Telegram duyệt → Administrator có thể reply để yêu cầu phân tích lại (vd: "Loại bỏ người dùng A", "Chỉnh lại văn phong dài hơn") → Agent lên lại plan mới theo yêu cầu → LIKE → thực thi gửi hàng loạt.
 
