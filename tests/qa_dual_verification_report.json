@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-30T21:23:19.004016",
+  "timestamp": "2026-03-31T14:32:16.440105",
   "page_id": "1548373332058326",
   "summary": {
     "total": 10,
@@ -56,6 +56,98 @@
     {
       "thread_name": "Chim Cánh Cụt",
       "thread_id": "1548373332058326_3417168231713322587",
+      "dom_tool": {
+        "thread_name": "Chim Cánh Cụt",
+        "message_count": 34,
+        "senders": {
+          "Customer": 23,
+          "Page": 9,
+          "Unknown": 2
+        },
+        "phone": "0969677369",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
+          "Học phí",
+          "Khóa học thiền ở Hà Nội\n Thời gian: 20h-21h30, tối thứ 3 hàng tuần, bắt đầu từ 3"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Chim Cánh Cụt",
+        "message_count": 34,
+        "senders": {
+          "Customer": 23,
+          "Page": 9,
+          "Unknown": 2
+        },
+        "phone": "0969677369",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
+          "Học phí",
+          "Khóa học thiền ở Hà Nội\n Thời gian: 20h-21h30, tối thứ 3 hàng tuần, bắt đầu từ 3"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (34 vs 34, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Chim Cánh Cụt",
+      "thread_id": "1548373332058326_3563346876299455482",
+      "dom_tool": {
+        "thread_name": "Chim Cánh Cụt",
+        "message_count": 34,
+        "senders": {
+          "Customer": 23,
+          "Page": 9,
+          "Unknown": 2
+        },
+        "phone": "0969677369",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
+          "Học phí",
+          "Khóa học thiền ở Hà Nội\n Thời gian: 20h-21h30, tối thứ 3 hàng tuần, bắt đầu từ 3"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Chim Cánh Cụt",
+        "message_count": 34,
+        "senders": {
+          "Customer": 23,
+          "Page": 9,
+          "Unknown": 2
+        },
+        "phone": "0969677369",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
+          "Học phí",
+          "Khóa học thiền ở Hà Nội\n Thời gian: 20h-21h30, tối thứ 3 hàng tuần, bắt đầu từ 3"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (34 vs 34, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Chim Cánh Cụt",
+      "thread_id": "1548373332058326_821825977775451356",
       "dom_tool": {
         "thread_name": "Chim Cánh Cụt",
         "message_count": 34,
@@ -369,98 +461,6 @@
       "comparison": {
         "thread_name": "PASSED",
         "message_count": "PASSED (33 vs 33, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Thị Thứ Nguyễn",
-      "thread_id": "1548373332058326_8433229852200065612",
-      "dom_tool": {
-        "thread_name": "Thị Thứ Nguyễn",
-        "message_count": 33,
-        "senders": {
-          "Customer": 13,
-          "Page": 19,
-          "Unknown": 1
-        },
-        "phone": "0779026129",
-        "email": null,
-        "city": "Đà Nẵng",
-        "sample_messages": [
-          "Thị Thứ Nguyễn replied to an ad.",
-          "Chào Thị Thứ! Chúng tôi có thể giúp gì cho bạn?",
-          "Gọi ngay để được phục vụ nhanh hơn."
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Thị Thứ Nguyễn",
-        "message_count": 33,
-        "senders": {
-          "Customer": 13,
-          "Page": 19,
-          "Unknown": 1
-        },
-        "phone": "0779026129",
-        "email": null,
-        "city": "Đà Nẵng",
-        "sample_messages": [
-          "Thị Thứ Nguyễn replied to an ad.",
-          "Chào Thị Thứ! Chúng tôi có thể giúp gì cho bạn?",
-          "Gọi ngay để được phục vụ nhanh hơn."
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (33 vs 33, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Bạch Dương",
-      "thread_id": "1548373332058326_7747368942518164125",
-      "dom_tool": {
-        "thread_name": "Bạch Dương",
-        "message_count": 32,
-        "senders": {
-          "Customer": 16,
-          "Page": 14,
-          "Unknown": 2
-        },
-        "phone": "0984534419",
-        "email": null,
-        "city": "Online",
-        "sample_messages": [
-          "Thời gian và địa điểm tổ chức lớp thiền định cụ thể là gì?",
-          "Lớp thiền miễn phí có giới hạn số lượng không?",
-          "Ngọc Loan replied to an ad."
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Bạch Dương",
-        "message_count": 32,
-        "senders": {
-          "Customer": 16,
-          "Page": 14,
-          "Unknown": 2
-        },
-        "phone": "0984534419",
-        "email": null,
-        "city": "Online",
-        "sample_messages": [
-          "Thời gian và địa điểm tổ chức lớp thiền định cụ thể là gì?",
-          "Lớp thiền miễn phí có giới hạn số lượng không?",
-          "Ngọc Loan replied to an ad."
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (32 vs 32, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"
