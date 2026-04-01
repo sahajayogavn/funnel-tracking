@@ -518,7 +518,8 @@ def _validate_quick_fetch_cache(visible_threads: list, conn, logger, page_id: st
 
 def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, logger,
                  record_fetch, extract_ad_id_labels, extract_user_info, detect_city,
-                 skip_navigation: bool = False, force_refresh: bool = False) -> dict:
+                 skip_navigation: bool = False, force_refresh: bool = False,
+                 allow_early_exit: bool = True) -> dict:
     from fb_pipeline.inbox.l3_pipeline import build_thread_record, enrich_thread_record, persist_thread_record
 
     """Core inbox scraping loop over the Facebook Business Suite thread list."""
@@ -683,11 +684,15 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                         stats["skipped_threads"] += 1
                         
                         if not force_refresh:
-                            consecutive_clean_threads += 1
-                            if consecutive_clean_threads >= 2:
-                                logger.info(f"Targeted Partial Fetch complete. Hit {consecutive_clean_threads} consecutive clean threads. Early exit triggered!")
-                                reached_date_limit = True
-                                break
+                            if allow_early_exit:
+                                consecutive_clean_threads += 1
+                                if consecutive_clean_threads >= 2:
+                                    logger.info(f"Targeted Partial Fetch complete. Hit {consecutive_clean_threads} consecutive clean threads. Early exit triggered!")
+                                    reached_date_limit = True
+                                    break
+                            else:
+                                logger.info(f"Thread '{name}' is clean, but Early-Exit is disabled. Skipping detail fetch and continuing scroll.")
+                                continue
                         continue
                 else:
                     consecutive_clean_threads = 0

@@ -601,8 +601,8 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
         try:
             conn = get_db_connection()
 
-            # Step 1: Fetch new inbox messages
-            logger.info(f"Step 1: Fetching inbox for page {page_id}...")
+            # Step 1: Fetch new inbox messages (JIT Pre-Flight Cache check)
+            logger.info(f"Step 1: Executing JIT Pre-Flight Cache validation for page {page_id}...")
             scrape_stats = scrape_inbox(
                 cdp_page,
                 page_id,

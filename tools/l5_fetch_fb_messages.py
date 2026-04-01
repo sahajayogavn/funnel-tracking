@@ -219,8 +219,9 @@ def persist_thread_record(conn: sqlite3.Connection, thread_record: dict) -> dict
 # --- Shared scraping helper ---
 # code:tool-fbmessages-001:scrape-inbox
 
-def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
-                  conn: sqlite3.Connection, skip_navigation: bool = False, force_refresh: bool = False) -> dict:
+def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn,
+                  skip_navigation: bool = False, force_refresh: bool = False,
+                  allow_early_exit: bool = True) -> dict:
     """Core scraping loop: scroll sidebar, click threads, extract messages."""
     return shared_scrape_inbox(
         page,
@@ -235,6 +236,7 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
         detect_city=detect_city,
         skip_navigation=skip_navigation,
         force_refresh=force_refresh,
+        allow_early_exit=allow_early_exit
     )
 
 
@@ -328,7 +330,7 @@ def _post_scrape_llm_city_classify(conn, page_id: str) -> dict:
 
 def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
                    show_browser: bool = True, force_refresh: bool = False,
-                   max_threads: int = 50, use_cdp: bool = False) -> dict:
+                   max_threads: int = 50, use_cdp: bool = False, allow_early_exit: bool = True) -> dict:
     page_id = parse_page_id(page_input)
     logger.info(f"Using Page ID: {page_id}, Time Range: {time_range}")
 
@@ -353,7 +355,7 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
                 run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
                 logger.info("Starting direct scrape...")
-                stats = _scrape_inbox(session.page, page_id, time_range, max_threads, conn, skip_navigation=True, force_refresh=force_refresh)
+                stats = _scrape_inbox(session.page, page_id, time_range, max_threads, conn, skip_navigation=True, force_refresh=force_refresh, allow_early_exit=allow_early_exit)
 
                 # Post-scrape LLM city classification
                 llm_stats = _post_scrape_llm_city_classify(conn, page_id)
@@ -440,7 +442,7 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
                 )
                 page = context.new_page()
 
-                stats = _scrape_inbox(page, page_id, time_range, max_threads, conn, force_refresh=force_refresh)
+                stats = _scrape_inbox(page, page_id, time_range, max_threads, conn, force_refresh=force_refresh, allow_early_exit=allow_early_exit)
 
                 # Post-scrape LLM city classification
                 llm_stats = _post_scrape_llm_city_classify(conn, page_id)
@@ -968,6 +970,7 @@ def main():
     parser.add_argument("--userId", default=None, help="User ID (thread_id, phone, or email) for fetch_message_by_user.")
     parser.add_argument("--maxThreads", type=int, default=200, help="Maximum number of threads to sync (default: 200).")
     parser.add_argument("--cdp", action="store_true", help="Scrape directly via CDP connection to Chrome on port 9222 (no cookie export/import).")
+    parser.add_argument("--no-early-exit", action="store_true", help="Disable the targeted early-exit algorithm, allowing deep retroactive UI scrolls.")
     
     args = parser.parse_args()
     page_id = parse_page_id(args.pageId)
@@ -979,7 +982,8 @@ def main():
         show_browser_flag = not args.headless
         result = fetch_messages(args.pageId, args.credential, args.time_range,
                                 show_browser=show_browser_flag, force_refresh=args.refresh,
-                                max_threads=args.maxThreads, use_cdp=args.cdp)
+                                max_threads=args.maxThreads, use_cdp=args.cdp,
+                                allow_early_exit=not args.no_early_exit)
     elif args.action == "get_list_unique_user":
         result = get_list_unique_user(page_id, args.time_range)
     elif args.action == "fetch_message_by_user":

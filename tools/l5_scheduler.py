@@ -541,6 +541,18 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
     """Route 2: Warm up dormant seekers."""
     logger.info(f"[WARMUP] {'[DRY-RUN]' if dry_run else '[LIVE]'} Starting warmup cycle...")
     try:
+        from tools.l5_fetch_fb_messages import fetch_messages
+        logger.info(f"[WARMUP] Executing JIT Pre-Flight Cache validation for page {page_id}...")
+        try:
+            fetch_result = fetch_messages(page_id, credential_id="env", time_range="3d", force_refresh=False, use_cdp=True)
+            if fetch_result.get("method") == "dynamic_cache_hit":
+                logger.info("[WARMUP] JIT Cache perfect. Proceeding to MAS.")
+            else:
+                new_msgs = fetch_result.get("data", {}).get("stats", {}).get("new_messages", 0)
+                logger.info(f"[WARMUP] JIT Synchronized {new_msgs} new messages.")
+        except Exception as e:
+            logger.warning(f"[WARMUP] JIT Validation failed (continuing with DB state): {e}")
+
         from adk_agents.tools.l5_warmup_tools import (
             find_dormant_seekers, was_recently_warmed_up,
             select_warmup_strategy, log_warmup_campaign
@@ -715,6 +727,18 @@ def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
     """Route 3: Advertise new events to matched seekers."""
     logger.info(f"[EVENT] {'[DRY-RUN]' if dry_run else '[LIVE]'} Starting event cycle...")
     try:
+        from tools.l5_fetch_fb_messages import fetch_messages
+        logger.info(f"[EVENT] Executing JIT Pre-Flight Cache validation for page {page_id}...")
+        try:
+            fetch_result = fetch_messages(page_id, credential_id="env", time_range="3d", force_refresh=False, use_cdp=True)
+            if fetch_result.get("method") == "dynamic_cache_hit":
+                logger.info("[EVENT] JIT Cache perfect. Proceeding to MAS.")
+            else:
+                new_msgs = fetch_result.get("data", {}).get("stats", {}).get("new_messages", 0)
+                logger.info(f"[EVENT] JIT Synchronized {new_msgs} new messages.")
+        except Exception as e:
+            logger.warning(f"[EVENT] JIT Validation failed (continuing with DB state): {e}")
+
         from adk_agents.tools.l5_event_tools import (
             get_upcoming_events, find_target_seekers_for_event,
             log_event_campaign
