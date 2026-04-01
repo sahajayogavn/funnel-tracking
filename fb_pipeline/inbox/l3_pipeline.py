@@ -1,3 +1,5 @@
+import hashlib
+
 from fb_pipeline.contracts.l1_inbox import (
     EnrichedThreadRecord,
     InboxMessage,
@@ -11,18 +13,56 @@ from fb_pipeline.contracts.l1_inbox import (
 )
 
 
+def _compute_thread_id(page_id: str, visible_thread: dict, name: str, preview_text: str,
+                       sidebar_time_text: str, sidebar_identity_key: str, selected_item_id: str) -> str:
+    stable_key = (
+        selected_item_id
+        or sidebar_identity_key
+        or "|".join([
+            page_id,
+            name,
+            preview_text,
+            sidebar_time_text,
+        ])
+    )
+    digest = hashlib.sha256(stable_key.encode("utf-8")).hexdigest()[:16]
+    return f"{page_id}_{digest}"
+
+
+
 def build_thread_record(page_id: str, visible_thread: dict) -> ThreadRecord:
     name = (visible_thread.get("name") or "").strip()
     thread_text_full = visible_thread.get("text", "")
     thread_lines = [l.strip() for l in thread_text_full.split('\n') if l.strip()]
-    preview_text = " ".join(thread_lines[1:]) if len(thread_lines) > 1 else ""
+    sidebar_time_text = (visible_thread.get("sidebarTimeText") or "").strip()
+    sidebar_time_kind = (visible_thread.get("sidebarTimeKind") or "").strip()
+    sidebar_identity_key = (visible_thread.get("sidebarIdentityKey") or "").strip()
+    selected_item_id = (visible_thread.get("selectedItemId") or "").strip()
+
+    preview_lines = list(thread_lines[1:]) if len(thread_lines) > 1 else []
+    if sidebar_time_text:
+        preview_lines = [line for line in preview_lines if line.strip() != sidebar_time_text]
+    preview_text = " ".join(preview_lines).strip()
+
     return ThreadRecord(
         page_id=page_id,
-        thread_id=f"{page_id}_{abs(hash(name))}",
+        thread_id=_compute_thread_id(
+            page_id,
+            visible_thread,
+            name,
+            preview_text,
+            sidebar_time_text,
+            sidebar_identity_key,
+            selected_item_id,
+        ),
         thread_name=name,
         preview_text=preview_text,
         thread_lines=thread_lines,
         dom_index=visible_thread.get("domIndex", 0),
+        sidebar_time_text=sidebar_time_text,
+        sidebar_time_kind=sidebar_time_kind,
+        sidebar_identity_key=sidebar_identity_key,
+        selected_item_id=selected_item_id,
     )
 
 
@@ -78,6 +118,10 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
         preview_text=thread_record.preview_text,
         thread_lines=thread_record.thread_lines,
         dom_index=thread_record.dom_index,
+        sidebar_time_text=thread_record.sidebar_time_text,
+        sidebar_time_kind=thread_record.sidebar_time_kind,
+        sidebar_identity_key=thread_record.sidebar_identity_key,
+        selected_item_id=thread_record.selected_item_id,
         fb_url=fb_url,
         ad_context=ad_context,
         ad_ids=list(ad_ids or []),

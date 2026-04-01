@@ -36,6 +36,10 @@ class ThreadRecord:
     preview_text: str
     thread_lines: list[str]
     dom_index: int
+    sidebar_time_text: str = ""
+    sidebar_time_kind: str = ""
+    sidebar_identity_key: str = ""
+    selected_item_id: str = ""
 
 
 @dataclass

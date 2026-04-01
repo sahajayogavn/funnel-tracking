@@ -176,18 +176,33 @@ class TestFetchMessagesHeadless(unittest.TestCase):
             ]
 
         mock_thread_data = [{
-            "index": 0,
+            "domIndex": 0,
             "name": thread_text.split('\n')[0].strip(),
             "text": thread_text,
-            "lines": [l.strip() for l in thread_text.split('\n') if l.strip()] + ["Today"]
+            "lines": [l.strip() for l in thread_text.split('\n') if l.strip()] + ["Today"],
+            "previewText": "This is a preview.",
+            "sidebarTimeText": "Today",
+            "sidebarTimeKind": "today",
+            "sidebarIdentityKey": "thread-1",
+            "selectedItemId": "9876",
         }]
 
         mock_mouse = MagicMock()
         mock_page.mouse = mock_mouse
 
-        call_count = {"collect": 0, "fingerprint": 0, "scroll_info": 0}
+        call_count = {"collect": 0, "fingerprint": 0, "scroll_info": 0, "sidebar_snapshot": 0}
 
         def evaluate_side_effect(script, args=None):
+            if isinstance(args, dict) and args.get("threadSelector"):
+                if "pickTimeToken" in script:
+                    call_count["collect"] += 1
+                    if call_count["collect"] <= 1:
+                        return mock_thread_data
+                    return []
+                call_count["sidebar_snapshot"] += 1
+                if call_count["sidebar_snapshot"] == 1:
+                    return {"count": 1, "loadingCount": 1, "fingerprint": "fp-a"}
+                return {"count": 1, "loadingCount": 0, "fingerprint": "fp-a"}
             if isinstance(args, dict) and "name" in args:
                 return True
             if isinstance(args, str):
@@ -207,11 +222,6 @@ class TestFetchMessagesHeadless(unittest.TestCase):
                 return ad_context
             elif "ad_id" in script and "innerText" in script:
                 return ""
-            elif "_5_n1" in script and "innerText" in script and "lines" in script:
-                call_count["collect"] += 1
-                if call_count["collect"] <= 1:
-                    return mock_thread_data
-                return []
             return ""
 
         mock_page.evaluate.side_effect = evaluate_side_effect
@@ -224,13 +234,13 @@ class TestFetchMessagesHeadless(unittest.TestCase):
 
         mock_thread.click = click_side_effect
 
-        return mock_p, mock_page
+        return mock_p, mock_page, call_count
 
     @patch('tools.l5_fetch_fb_messages.os.path.exists')
     @patch('tools.l5_fetch_fb_messages.sync_playwright')
     def test_headless_extracts_structured_messages(self, mock_sync_playwright, mock_exists):
         self._patch_sqlite()
-        mock_p, _ = self._setup_mock_playwright(mock_sync_playwright, mock_exists)
+        mock_p, _, _ = self._setup_mock_playwright(mock_sync_playwright, mock_exists)
         result = fetch_messages("123", "test_cred", force_refresh=True)
         self.assertTrue(result["success"])
         self.assertEqual(result["method"], "headless_fetch")
@@ -241,7 +251,7 @@ class TestFetchMessagesHeadless(unittest.TestCase):
     @patch('tools.l5_fetch_fb_messages.sync_playwright')
     def test_headless_no_messages(self, mock_sync_playwright, mock_exists):
         self._patch_sqlite()
-        self._setup_mock_playwright(mock_sync_playwright, mock_exists, js_messages=[])
+        _, _, _ = self._setup_mock_playwright(mock_sync_playwright, mock_exists, js_messages=[])
         result = fetch_messages("123", "test_cred", force_refresh=True)
         self.assertTrue(result["success"])
         self.assertEqual(result["data"]["stats"]["new_messages"], 0)
@@ -252,10 +262,23 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         self._patch_sqlite()
         ad_text = "Thiền miễn phí tại Hà Nội"
         messages = [{"sender": "Customer", "text": "0912345678", "timestamp": "Sat 7:19 PM"}]
-        self._setup_mock_playwright(mock_sync_playwright, mock_exists, js_messages=messages, ad_context=ad_text)
+        _, _, _ = self._setup_mock_playwright(mock_sync_playwright, mock_exists, js_messages=messages, ad_context=ad_text)
         result = fetch_messages("123", "test_cred", force_refresh=True)
         self.assertTrue(result["success"])
         self.assertEqual(result["data"]["stats"]["new_messages"], 1)
+
+    @patch('tools.l5_fetch_fb_messages.os.path.exists')
+    @patch('tools.l5_fetch_fb_messages.sync_playwright')
+    def test_headless_uses_single_sidebar_scroll_and_waits_for_load(self, mock_sync_playwright, mock_exists):
+        self._patch_sqlite()
+        _, mock_page, call_count = self._setup_mock_playwright(mock_sync_playwright, mock_exists)
+        result = fetch_messages("123", "test_cred", force_refresh=True)
+        self.assertTrue(result["success"])
+        sidebar_wheels = [call for call in mock_page.mouse.wheel.call_args_list if call.args == (0, 700)]
+        self.assertGreaterEqual(len(sidebar_wheels), 1)
+        self.assertGreaterEqual(call_count["sidebar_snapshot"], 2)
+        wait_calls = [call.args[0] for call in mock_page.wait_for_timeout.call_args_list if call.args]
+        self.assertIn(1000, wait_calls)
 
     @patch('tools.l5_fetch_fb_messages.os.path.exists')
     @patch('tools.l5_fetch_fb_messages.sync_playwright')

@@ -1,6 +1,408 @@
+import hashlib
 import re
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
+
+
+THREAD_LIST_CONTAINER_SELECTORS = [
+    'div[data-pagelet="GenericBizInboxThreadListViewBody"]',
+    'div[data-pagelet="BizP13NInboxUinifiedThreadListView"]',
+    'div[aria-label="Inbox"]',
+]
+THREAD_CARD_SELECTORS = [
+    'div._5_n1',
+    'div[role="listitem"]',
+    'a[role="link"][href*="selected_item_id"]',
+]
+MESSAGE_REGION_SELECTOR = 'div[aria-label*="Message list container"], div[role="region"][aria-label*="message"]'
+LOADING_INDICATOR_SELECTORS = [
+    '[aria-busy="true"]',
+    'div[role="progressbar"]',
+    'svg[aria-label*="Loading"]',
+]
+DAY_NAMES = {
+    "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+}
+TIME_TODAY = {"today", "hôm nay"}
+TIME_YESTERDAY = {"yesterday", "hôm qua"}
+MONTH_DAY_RE = re.compile(r'^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}$', re.I)
+
+
+def _thread_card_selector() -> str:
+    return ", ".join(THREAD_CARD_SELECTORS)
+
+
+def _wait_for_inbox_shell(page, logger, timeout_ms: int = 30000) -> str:
+    """Wait for the thread list container pagelet to appear in the DOM."""
+    selector = ", ".join(THREAD_LIST_CONTAINER_SELECTORS)
+    try:
+        page.wait_for_selector(selector, timeout=timeout_ms)
+        logger.info("Thread list container detected.")
+        return selector
+    except Exception:
+        logger.info(f"Thread list pagelet not found within {timeout_ms}ms, proceeding with fallback...")
+        return ""
+
+
+def _wait_for_initial_threads(page, logger, timeout_ms: int = 30000, poll_ms: int = 1000) -> dict:
+    """Poll until at least 1 thread card is visible in the DOM.
+
+    This ensures Facebook's SPA hydration has completed rendering the thread
+    list before any scrolling or processing begins.
+    """
+    start = time.time()
+    logger.info(f"initial_threads_wait_start timeout_ms={timeout_ms}")
+    while True:
+        snapshot = _sidebar_loading_snapshot(page)
+        elapsed_ms = int((time.time() - start) * 1000)
+        if snapshot["count"] > 0:
+            logger.info(
+                f"initial_threads_ready count={snapshot['count']} "
+                f"fingerprint={snapshot['fingerprint']} elapsed_ms={elapsed_ms}"
+            )
+            snapshot["elapsed_ms"] = elapsed_ms
+            return snapshot
+        if elapsed_ms >= timeout_ms:
+            logger.warning(f"initial_threads_timeout count=0 elapsed_ms={elapsed_ms}")
+            snapshot["elapsed_ms"] = elapsed_ms
+            return snapshot
+        page.wait_for_timeout(poll_ms)
+
+
+def _extract_visible_threads(page) -> list[dict]:
+    selector = _thread_card_selector()
+    return page.evaluate(
+        r'''(config) => {
+            const threadSelector = config.threadSelector;
+            const candidates = Array.from(document.querySelectorAll(threadSelector));
+
+            function pickTimeToken(lines) {
+                for (let i = lines.length - 1; i >= 1; i--) {
+                    const token = (lines[i] || '').trim();
+                    if (!token) continue;
+                    if (/^\d+[smhdw]$/i.test(token)) return token;
+                    if (/^(today|yesterday|hôm nay|hôm qua)$/i.test(token)) return token;
+                    if (/^(mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(token)) return token;
+                    if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}$/i.test(token)) return token;
+                }
+                return '';
+            }
+
+            return candidates.map((el, idx) => {
+                const text = (el.innerText || '').trim();
+                const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+                const name = lines[0] || '';
+                const sidebarTimeText = pickTimeToken(lines);
+                const previewLines = lines.slice(1).filter(line => line !== sidebarTimeText);
+                const hrefEl = el.closest('a[href]') || el.querySelector('a[href]');
+                const href = hrefEl ? (hrefEl.getAttribute('href') || '') : '';
+                let selectedItemId = '';
+                try {
+                    if (href) {
+                        const absolute = new URL(href, window.location.origin);
+                        selectedItemId = absolute.searchParams.get('selected_item_id') || '';
+                    }
+                } catch (_) {}
+
+                const attrs = [];
+                for (const attr of Array.from(el.attributes || [])) {
+                    if (!attr || !attr.name) continue;
+                    if (attr.name.startsWith('data-') || attr.name.startsWith('aria-') || attr.name === 'href') {
+                        attrs.push(`${attr.name}=${attr.value || ''}`);
+                    }
+                }
+                const identityParts = [name, previewLines.join(' | '), sidebarTimeText, selectedItemId, href, attrs.join('|')].filter(Boolean);
+                const sidebarIdentityKey = identityParts.join(' || ');
+                return {
+                    domIndex: idx,
+                    name,
+                    text,
+                    lines,
+                    previewText: previewLines.join(' ').trim(),
+                    sidebarTimeText,
+                    sidebarIdentityKey,
+                    selectedItemId,
+                    href,
+                };
+            }).filter(item => item.name || item.text);
+        }''',
+        {"threadSelector": selector},
+    )
+
+
+def _sidebar_loading_snapshot(page) -> dict:
+    selector = _thread_card_selector()
+    loading_selector = ", ".join(LOADING_INDICATOR_SELECTORS)
+    container_selector = ", ".join(THREAD_LIST_CONTAINER_SELECTORS)
+    snapshot = page.evaluate(
+        r'''(config) => {
+            const cards = Array.from(document.querySelectorAll(config.threadSelector));
+            const visibleTexts = cards.map(el => (el.innerText || '').trim()).filter(Boolean);
+            const allLoadingNodes = config.loadingSelector
+                ? Array.from(document.querySelectorAll(config.loadingSelector))
+                : [];
+            const container = config.containerSelector
+                ? document.querySelector(config.containerSelector)
+                : null;
+            const containerLoading = container
+                ? allLoadingNodes.filter(node => container.contains(node)).length
+                : 0;
+            const digestSource = visibleTexts.slice(0, 25).join('\n---\n');
+            let fingerprint = '';
+            if (digestSource) {
+                fingerprint = digestSource;
+            }
+            return {
+                count: visibleTexts.length,
+                loadingCount: containerLoading,
+                globalLoadingCount: allLoadingNodes.length,
+                hasContainer: Boolean(container),
+                fingerprint,
+            };
+        }''',
+        {
+            "threadSelector": selector,
+            "loadingSelector": loading_selector,
+            "containerSelector": container_selector,
+        },
+    )
+    digest = hashlib.sha256((snapshot.get("fingerprint") or "").encode("utf-8")).hexdigest()[:12]
+    snapshot["fingerprint"] = digest
+    return snapshot
+
+
+def _sidebar_loading_count(snapshot: dict) -> int:
+    if snapshot.get("hasContainer"):
+        return int(snapshot.get("loadingCount") or 0)
+    return int(snapshot.get("globalLoadingCount") or snapshot.get("loadingCount") or 0)
+
+
+def _wait_for_sidebar_threads(page, logger, timeout_ms: int = 60000, poll_ms: int = 1000) -> dict:
+    start = time.time()
+    stable_polls = 0
+    saw_growth = False
+    last_snapshot = None
+    logger.info(f"sidebar_load_start timeout_ms={timeout_ms}")
+
+    while True:
+        snapshot = _sidebar_loading_snapshot(page)
+        effective_loading = _sidebar_loading_count(snapshot)
+        changed = (
+            last_snapshot is None
+            or snapshot["count"] != last_snapshot["count"]
+            or snapshot["fingerprint"] != last_snapshot["fingerprint"]
+        )
+        if last_snapshot and snapshot["count"] > last_snapshot["count"]:
+            saw_growth = True
+        if changed:
+            stable_polls = 0
+        else:
+            stable_polls += 1
+
+        elapsed_ms = int((time.time() - start) * 1000)
+        logger.info(
+            "sidebar_load_poll "
+            f"count={snapshot['count']} fingerprint={snapshot['fingerprint']} "
+            f"loading={effective_loading} container_loading={snapshot.get('loadingCount', 0)} "
+            f"global_loading={snapshot.get('globalLoadingCount', 0)} stable_polls={stable_polls} elapsed_ms={elapsed_ms}"
+        )
+
+        if snapshot["count"] > 0 and effective_loading == 0 and stable_polls >= 2:
+            logger.info(
+                "sidebar_load_complete "
+                f"count={snapshot['count']} elapsed_ms={elapsed_ms}"
+            )
+            snapshot["elapsed_ms"] = elapsed_ms
+            return snapshot
+
+        if snapshot["count"] > 0 and saw_growth and stable_polls >= 2:
+            logger.info(
+                "sidebar_load_complete "
+                f"count={snapshot['count']} elapsed_ms={elapsed_ms} reason=stable_after_growth"
+            )
+            snapshot["elapsed_ms"] = elapsed_ms
+            return snapshot
+
+        if elapsed_ms >= timeout_ms:
+            logger.warning(
+                "sidebar_load_timeout "
+                f"count={snapshot['count']} loading={effective_loading} elapsed_ms={elapsed_ms}"
+            )
+            snapshot["elapsed_ms"] = elapsed_ms
+            return snapshot
+
+        last_snapshot = snapshot
+        page.wait_for_timeout(poll_ms)
+
+
+def _scroll_sidebar_and_wait(page, logger, scroll_round: int,
+                              timeout_ms: int = 60000, poll_ms: int = 1000) -> dict:
+    """Move mouse to left sidebar, scroll once, wait for loading indicators,
+    then wait up to timeout_ms for new threads to appear and stabilize.
+
+    Returns a sidebar loading snapshot dict.
+    """
+    # 1. Snapshot before scroll
+    pre_snapshot = _sidebar_loading_snapshot(page)
+    pre_count = pre_snapshot["count"]
+    pre_fingerprint = pre_snapshot["fingerprint"]
+
+    # 2. Move mouse to left sidebar center (x=200 is within the ~360px sidebar)
+    try:
+        page.mouse.move(200, 400)
+    except Exception:
+        pass
+
+    # 3. Single scroll down
+    try:
+        page.mouse.wheel(0, 600)
+        logger.info(f"sidebar_scroll_performed round={scroll_round} pre_count={pre_count}")
+    except Exception as e:
+        logger.warning(f"sidebar_scroll_failed round={scroll_round}: {e}")
+        pre_snapshot["elapsed_ms"] = 0
+        return pre_snapshot
+
+    # 4. Brief pause to let Facebook's loading indicator appear
+    page.wait_for_timeout(500)
+
+    # 5. Wait: loading-indicator phase + new-threads phase (up to timeout_ms total)
+    start = time.time()
+    stable_polls = 0
+    saw_loading = False
+
+    while True:
+        snapshot = _sidebar_loading_snapshot(page)
+        effective_loading = _sidebar_loading_count(snapshot)
+        elapsed_ms = int((time.time() - start) * 1000)
+
+        if effective_loading > 0:
+            saw_loading = True
+            stable_polls = 0
+            logger.info(
+                f"sidebar_scroll_wait round={scroll_round} loading={effective_loading} "
+                f"count={snapshot['count']} elapsed_ms={elapsed_ms}"
+            )
+        else:
+            changed = (
+                snapshot["count"] != pre_count
+                or snapshot["fingerprint"] != pre_fingerprint
+            )
+            if changed:
+                stable_polls = 0
+                pre_count = snapshot["count"]
+                pre_fingerprint = snapshot["fingerprint"]
+            else:
+                stable_polls += 1
+
+            if stable_polls >= 2:
+                reason = "stable_after_loading" if saw_loading else "no_change"
+                logger.info(
+                    f"sidebar_scroll_complete round={scroll_round} "
+                    f"count={snapshot['count']} reason={reason} elapsed_ms={elapsed_ms}"
+                )
+                snapshot["elapsed_ms"] = elapsed_ms
+                return snapshot
+
+        if elapsed_ms >= timeout_ms:
+            logger.warning(
+                f"sidebar_scroll_timeout round={scroll_round} "
+                f"count={snapshot['count']} loading={effective_loading} elapsed_ms={elapsed_ms}"
+            )
+            snapshot["elapsed_ms"] = elapsed_ms
+            return snapshot
+
+        page.wait_for_timeout(poll_ms)
+
+
+# Legacy shim — kept for backward compatibility with callers outside this module
+def _scroll_sidebar_once(page, logger, scroll_round: int) -> bool:
+    """Deprecated: use _scroll_sidebar_and_wait instead."""
+    result = _scroll_sidebar_and_wait(page, logger, scroll_round, timeout_ms=60000)
+    return result.get("count", 0) > 0
+
+
+def _parse_sidebar_time_token(token: str, now: datetime | None = None) -> dict:
+    token = (token or "").strip()
+    if not token:
+        return {"kind": "unknown", "token": "", "days_ago": None, "parsed_at": None}
+
+    now = now or datetime.now()
+    lower = token.lower()
+    if lower in TIME_TODAY:
+        return {"kind": "today", "token": token, "days_ago": 0, "parsed_at": now.date().isoformat()}
+    if lower in TIME_YESTERDAY:
+        return {"kind": "yesterday", "token": token, "days_ago": 1, "parsed_at": (now.date() - timedelta(days=1)).isoformat()}
+    if lower in DAY_NAMES:
+        return {"kind": "weekday", "token": token, "days_ago": 6, "parsed_at": None}
+    if MONTH_DAY_RE.match(token):
+        parsed = datetime.strptime(f"{token} {now.year}", "%b %d %Y")
+        days_ago = (now - parsed).days
+        if days_ago < 0:
+            parsed = datetime.strptime(f"{token} {now.year - 1}", "%b %d %Y")
+            days_ago = (now - parsed).days
+        return {"kind": "month_day", "token": token, "days_ago": days_ago, "parsed_at": parsed.date().isoformat()}
+    return {"kind": "unknown", "token": token, "days_ago": None, "parsed_at": None}
+
+
+def _is_thread_older_than_range(parsed_time: dict, max_days: int) -> bool:
+    days_ago = parsed_time.get("days_ago")
+    if days_ago is None:
+        return False
+    return days_ago > max_days
+
+
+def _verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fingerprint: str,
+                          is_first_thread: bool) -> tuple[str, bool]:
+    fb_url = ""
+    url_changed = False
+    for _poll in range(20):
+        try:
+            current_qs = parse_qs(urlparse(page.url).query)
+            candidate = current_qs.get('selected_item_id', [''])[0]
+            if candidate and candidate != prev_fb_url:
+                fb_url = candidate
+                url_changed = True
+                logger.info(f"thread_switch_verified method=selected_item_id thread='{name}'")
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+
+    if not url_changed:
+        try:
+            current_qs = parse_qs(urlparse(page.url).query)
+            fb_url = current_qs.get('selected_item_id', [''])[0]
+        except Exception:
+            fb_url = ""
+
+    panel_refreshed = False
+    for _poll in range(20):
+        post_click_fingerprint = page.evaluate('''() => {
+            let r = document.querySelector(
+                'div[aria-label*="Message list container"], ' +
+                'div[role="region"][aria-label*="message"]'
+            );
+            if (!r) return "";
+            return (r.innerText || "").substring(0, 200);
+        }''')
+        if post_click_fingerprint != pre_click_fingerprint:
+            panel_refreshed = True
+            if not url_changed:
+                logger.info(f"thread_switch_verified method=panel_fingerprint thread='{name}'")
+            break
+        page.wait_for_timeout(500)
+
+    if not panel_refreshed and is_first_thread:
+        logger.info(f"thread_switch_verified method=first_thread_already_loaded thread='{name}'")
+        return fb_url, True
+
+    if not panel_refreshed and not url_changed:
+        logger.warning(f"thread_switch_failed thread='{name}' reason=no_url_change_no_panel_refresh")
+        return "", False
+
+    return fb_url, True
 
 
 def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, logger,
@@ -12,34 +414,19 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
 
     logger.info(f"Navigating to {inbox_url}")
     page.goto(inbox_url, wait_until="networkidle", timeout=60000)
-    page.wait_for_timeout(3000)
+    page.wait_for_timeout(2000)
 
-    logger.info("Inbox loaded successfully. Scanning for threads...")
-    try:
-        page.wait_for_selector(
-            'div[data-pagelet="GenericBizInboxThreadListViewBody"], '
-            'div[data-pagelet="BizP13NInboxUinifiedThreadListView"], '
-            'div[aria-label="Inbox"]',
-            timeout=10000
-        )
-    except Exception:
-        logger.info("Thread list pagelet not found within 10s, proceeding with fallback...")
+    # Phase 1: Wait for the inbox shell container to appear in DOM (up to 30s)
+    logger.info("Waiting for inbox shell...")
+    _wait_for_inbox_shell(page, logger, timeout_ms=30000)
 
-    thread_items_found = False
-    for wait_attempt in range(1, 6):
-        try:
-            page.wait_for_selector('div._5_n1', timeout=5000)
-            thread_items_found = True
-            logger.info(f"Thread items (_5_n1) appeared after wait attempt {wait_attempt}.")
-            break
-        except Exception:
-            logger.info(f"Wait attempt {wait_attempt}/5: _5_n1 not visible yet, retrying in 3s...")
-            page.wait_for_timeout(3000)
+    # Phase 2: Wait for at least 1 thread card to render (SPA hydration, up to 30s)
+    logger.info("Waiting for initial threads to appear...")
+    initial_snapshot = _wait_for_initial_threads(page, logger, timeout_ms=30000)
 
-    if not thread_items_found:
-        logger.warning("Thread items (_5_n1) never appeared after 5 attempts. Will proceed but may find 0 threads.")
+    # Phase 3: One controlled sidebar scroll to load more threads + wait up to 60s
+    initial_sidebar = _scroll_sidebar_and_wait(page, logger, scroll_round=0, timeout_ms=60000)
 
-    page.wait_for_timeout(1000)
     logger.info(f"Starting sidebar scroll-and-process within {time_range}...")
 
     range_map = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "180d": 180, "365d": 365}
@@ -54,13 +441,26 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
     logger.info(f"Time range resolved to {max_days} day(s).")
 
     cursor = conn.cursor()
-    processed_names = set()
+    processed_thread_keys = set()
     scroll_round = 0
     max_scroll_rounds = 50
     reached_date_limit = False
     last_new_round = 0
     thread_counter = 0
-    stats = {"new_threads": 0, "new_messages": 0, "skipped_threads": 0}
+    sidebar_scrolls = 1 if initial_sidebar.get("count", 0) >= 0 else 0
+    sidebar_wait_ms = initial_sidebar.get("elapsed_ms", 0)
+    stats = {
+        "new_threads": 0,
+        "new_messages": 0,
+        "skipped_threads": 0,
+        "threads_seen": 0,
+        "threads_processed": 0,
+        "threads_skipped_duplicate": 0,
+        "threads_skipped_cutoff": 0,
+        "threads_skipped_click_verify": 0,
+        "sidebar_scrolls": sidebar_scrolls,
+        "sidebar_wait_ms": sidebar_wait_ms,
+    }
 
     while scroll_round < max_scroll_rounds and not reached_date_limit:
         scroll_round += 1
@@ -68,58 +468,52 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             logger.info(f"Reached max threads ({max_threads}). Stopping.")
             break
 
-        visible_threads = page.evaluate(r'''() => {
-            let items = document.querySelectorAll('._5_n1');
-            return Array.from(items).map((el, idx) => {
-                let text = el.innerText || '';
-                let lines = text.split('\n').map(l => l.trim()).filter(l => l);
-                return {
-                    domIndex: idx,
-                    name: lines[0] || '',
-                    text: text,
-                    lines: lines
-                };
-            });
-        }''')
-
+        visible_threads = _extract_visible_threads(page)
+        stats["threads_seen"] += len(visible_threads)
         if not visible_threads:
-            logger.info(f"Round {scroll_round}: no _5_n1 items visible.")
+            logger.info(f"Round {scroll_round}: no thread cards visible.")
             break
 
         new_in_round = 0
         for vt in visible_threads:
-            name = vt.get("name", "").strip()
-            if not name or name in processed_names:
+            name = (vt.get("name") or "").strip()
+            if not name:
+                logger.info("sidebar_candidate_skipped reason=missing_name")
                 continue
             if thread_counter >= max_threads:
                 break
 
-            for line in vt.get("lines", []):
-                line_lower = line.lower().strip()
-                if line_lower in ("today",):
-                    pass
-                elif line_lower in ("yesterday",):
-                    if max_days < 1:
-                        reached_date_limit = True
-                elif line_lower in ("mon", "tue", "wed", "thu", "fri", "sat", "sun",
-                                    "monday", "tuesday", "wednesday", "thursday",
-                                    "friday", "saturday", "sunday"):
-                    if max_days < 7:
-                        reached_date_limit = True
-                elif re.match(r'^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}$', line_lower):
-                    try:
-                        parsed = datetime.strptime(f"{line} {datetime.now().year}", "%b %d %Y")
-                        days_ago = (datetime.now() - parsed).days
-                        if days_ago > max_days:
-                            reached_date_limit = True
-                            logger.info(f"Date cutoff: '{line}' is {days_ago}d ago (limit: {max_days}d).")
-                    except Exception:
-                        pass
+            parsed_time = _parse_sidebar_time_token(vt.get("sidebarTimeText", ""))
+            vt["sidebarTimeKind"] = parsed_time.get("kind", "unknown")
+            thread_key = vt.get("selectedItemId") or vt.get("sidebarIdentityKey") or "|".join([
+                name,
+                vt.get("previewText", ""),
+                vt.get("sidebarTimeText", ""),
+                str(vt.get("domIndex", 0)),
+            ])
+            vt["sidebarIdentityKey"] = thread_key
 
-            if reached_date_limit:
+            logger.info(
+                "sidebar_candidate "
+                f"key={thread_key[:80]} name={name!r} time_text={vt.get('sidebarTimeText', '')!r} "
+                f"time_kind={vt.get('sidebarTimeKind', '')!r} preview={vt.get('previewText', '')[:80]!r} dom_index={vt.get('domIndex', 0)}"
+            )
+
+            if thread_key in processed_thread_keys:
+                stats["threads_skipped_duplicate"] += 1
+                logger.info(f"sidebar_candidate_skipped reason=duplicate_key key={thread_key[:80]}")
+                continue
+
+            if _is_thread_older_than_range(parsed_time, max_days):
+                reached_date_limit = True
+                stats["threads_skipped_cutoff"] += 1
+                logger.info(
+                    f"Date cutoff: '{vt.get('sidebarTimeText', '')}' is {parsed_time.get('days_ago')}d ago "
+                    f"(limit: {max_days}d)."
+                )
                 break
 
-            processed_names.add(name)
+            processed_thread_keys.add(thread_key)
             new_in_round += 1
             thread_counter += 1
 
@@ -128,10 +522,6 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             row = cursor.fetchone()
 
             if row and row[0] == thread_record.preview_text:
-                # code:tool-inbox-001:force-resync-page-reply
-                # Even if the preview matches, if the sidebar shows "You: ..."
-                # (admin reply) but our DB's last message is NOT from 'Page',
-                # we must re-sync to capture the missing Page message.
                 force_resync = False
                 preview_lower = (thread_record.preview_text or "").strip().lower()
                 if preview_lower.startswith("you:") or preview_lower.startswith("bạn:"):
@@ -166,73 +556,35 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             }''')
 
             try:
-                thread_el = page.locator('div._5_n1').nth(thread_record.dom_index)
+                thread_el = page.locator(_thread_card_selector()).nth(thread_record.dom_index)
                 thread_el.click(force=True, timeout=5000)
             except Exception as e:
+                stats["threads_skipped_click_verify"] += 1
                 logger.warning(f"Could not click thread '{name}': {e}. Skipping.")
                 continue
 
-            msg_region_selector = 'div[aria-label*="Message list container"], div[role="region"][aria-label*="message"]'
             try:
-                page.wait_for_selector(msg_region_selector, timeout=10000)
+                page.wait_for_selector(MESSAGE_REGION_SELECTOR, timeout=10000)
                 page.wait_for_timeout(1000)
             except Exception:
                 logger.warning(f"Message region not found within 10s for thread '{name}'. Falling back to timeout.")
                 page.wait_for_timeout(4000)
 
-            fb_url = ""
-            url_changed = False
-            for _poll in range(20):
-                try:
-                    current_qs = parse_qs(urlparse(page.url).query)
-                    candidate = current_qs.get('selected_item_id', [''])[0]
-                    if candidate and candidate != prev_fb_url:
-                        fb_url = candidate
-                        url_changed = True
-                        break
-                except Exception:
-                    pass
-                page.wait_for_timeout(500)
-
             is_first_thread = (thread_counter == 1 and scroll_round == 1)
-
-            if not url_changed:
-                try:
-                    current_qs = parse_qs(urlparse(page.url).query)
-                    fb_url = current_qs.get('selected_item_id', [''])[0]
-                except Exception:
-                    fb_url = ""
-                if fb_url == prev_fb_url and not is_first_thread:
-                    logger.warning(f"URL selected_item_id did NOT change after clicking '{name}' (still {fb_url}). Setting fb_url to empty to avoid contamination.")
-                    fb_url = ""
-                elif fb_url == prev_fb_url and is_first_thread:
-                    logger.info(f"URL did not change for the first thread '{name}' (already loaded). Keeping fb_url={fb_url}")
-
-            panel_refreshed = False
-            for _poll in range(20):
-                post_click_fingerprint = page.evaluate('''() => {
-                    let r = document.querySelector(
-                        'div[aria-label*="Message list container"], ' +
-                        'div[role="region"][aria-label*="message"]'
-                    );
-                    if (!r) return "";
-                    return (r.innerText || "").substring(0, 200);
-                }''')
-                if post_click_fingerprint != pre_click_fingerprint:
-                    panel_refreshed = True
-                    break
-                page.wait_for_timeout(500)
-
-            if not panel_refreshed:
-                if is_first_thread:
-                    logger.info(f"Message panel text did not change for the first thread '{name}' (already loaded). Proceeding.")
-                    panel_refreshed = True
-                else:
-                    logger.warning(f"Message panel text did NOT change after clicking '{name}'. Skipping thread to avoid contamination.")
-                    continue
+            fb_url, verified = _verify_thread_switch(
+                page,
+                logger,
+                name,
+                prev_fb_url,
+                pre_click_fingerprint,
+                is_first_thread,
+            )
+            if not verified:
+                stats["threads_skipped_click_verify"] += 1
+                continue
 
             page.wait_for_timeout(1000)
-            logger.info(f"Thread '{name}': URL fb_url={fb_url}, panel_refreshed={panel_refreshed}")
+            logger.info(f"Thread '{name}': URL fb_url={fb_url}, panel_refreshed={verified}")
 
             ad_context = page.evaluate('''() => {
                 let links = Array.from(document.querySelectorAll('a, div[role="button"]'));
@@ -328,7 +680,9 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                         scrollable.scrollTop = newTop;
                         scrollable.dispatchEvent(new Event('scroll', {bubbles: true}));
                     }''')
-                    page.mouse.wheel(0, -2000)
+                    # NOTE: mouse.wheel removed — JS scrollTop above handles message
+                    # panel scrolling. mouse.wheel leaked into the sidebar causing
+                    # erratic scrollbar jumps during thread history loading.
                 except Exception:
                     pass
                 page.wait_for_timeout(1500)
@@ -342,11 +696,9 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 if (!region) return [];
                 let results = [];
                 let currentTimestamp = "";
-                // Capture all bubbles and timestamps in document layout order!
-                // This ensures we jump over arbitrary Facebook wrapper group chunks.
                 let elements = region.querySelectorAll('.x14vqqas, .x1fqp7bg');
                 let processedBubbles = new Set();
-                
+
                 for (let el of elements) {
                     if (el.classList.contains('x14vqqas')) {
                         let ts = el.innerText.trim();
@@ -354,7 +706,6 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                         continue;
                     }
                     if (el.classList.contains('x1fqp7bg')) {
-                        // Prevent duplicated nesting (some bubbles contain inner divs with the same class)
                         let isNested = false;
                         let p = el.parentElement;
                         while(p && p !== region) {
@@ -366,11 +717,11 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                         }
                         if (isNested) continue;
                         processedBubbles.add(el);
-                        
+
                         let sender = "Unknown";
                         let outerWrapper = el.parentElement || el;
                         let htmlStr = outerWrapper.outerHTML.substring(0, 500);
-                        
+
                         if (htmlStr.includes('x13a6bvl')) {
                             sender = "Page";
                         } else if (htmlStr.includes('x1nhvcw1')) {
@@ -379,7 +730,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                             let avatar = el.querySelector('img.img[alt]');
                             sender = avatar ? "Customer" : "Page";
                         }
-                        
+
                         let textContainers = el.querySelectorAll('.x1y1aw1k');
                         let texts = [];
                         if (textContainers.length > 0) {
@@ -401,9 +752,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                                 if (text && text.length > 2 && text.length < 2000) texts.push(text);
                             }
                         }
-                        
-                        // Facebook might duplicate text nodes inside the bubble, just concatenate them seamlessly if needed
-                        // Alternatively, relying primarily on innerText is robust.
+
                         for(let segment of texts) {
                             results.push({sender, text: segment, timestamp: currentTimestamp});
                         }
@@ -437,6 +786,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             )
             persist_result = persist_thread_record(conn, enriched_record, detect_city=detect_city)
             stats["new_messages"] += persist_result["messages_added"]
+            stats["threads_processed"] += 1
 
             if row is None:
                 stats["new_threads"] += 1
@@ -453,16 +803,13 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
         else:
             last_new_round = scroll_round
 
-        try:
-            page.mouse.move(200, 500)
-            for _ in range(5):
-                page.mouse.wheel(0, 600)
-                page.wait_for_timeout(300)
-            logger.info(f"Scrolled sidebar via mouse.wheel (round {scroll_round}).")
-        except Exception as e:
-            logger.warning(f"Mouse wheel scroll failed: {e}. Stopping.")
+        if thread_counter >= max_threads:
             break
-        page.wait_for_timeout(3000)
+
+        # Scroll sidebar for next batch of threads
+        scroll_result = _scroll_sidebar_and_wait(page, logger, scroll_round=scroll_round, timeout_ms=60000)
+        stats["sidebar_scrolls"] += 1
+        stats["sidebar_wait_ms"] += scroll_result.get("elapsed_ms", 0)
 
     logger.info(f"Scroll-and-process complete. Processed {thread_counter} threads. Stats: {stats}")
     record_fetch(page_id, stats["new_threads"] + stats["skipped_threads"], stats["new_messages"], conn)
@@ -517,4 +864,13 @@ def extract_ad_id_labels(page) -> list:
 
 scrape_inbox_ui = scrape_inbox
 
-__all__ = ["extract_ad_id_labels", "scrape_inbox", "scrape_inbox_ui"]
+__all__ = [
+    "extract_ad_id_labels",
+    "scrape_inbox",
+    "scrape_inbox_ui",
+    "_extract_visible_threads",
+    "_wait_for_sidebar_threads",
+    "_wait_for_initial_threads",
+    "_scroll_sidebar_and_wait",
+    "_parse_sidebar_time_token",
+]

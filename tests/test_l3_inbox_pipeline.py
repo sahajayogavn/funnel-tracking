@@ -2,10 +2,12 @@ import os
 import sqlite3
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from fb_pipeline.contracts.l1_inbox import detect_city, extract_user_info
+from fb_pipeline.browser.l3_inbox import _parse_sidebar_time_token, _sidebar_loading_count, scrape_inbox
 from fb_pipeline.inbox.l3_pipeline import build_thread_record, enrich_thread_record, persist_thread_record
 from fb_pipeline.persistence.l4_sqlite_store import setup_database
 
@@ -25,12 +27,131 @@ class TestInboxContracts(unittest.TestCase):
             "domIndex": 3,
             "name": " User A ",
             "text": " User A \nHello there\nToday ",
+            "sidebarTimeText": "Today",
+            "sidebarTimeKind": "today",
+            "sidebarIdentityKey": "thread-a",
         })
         self.assertEqual(record.page_id, "page1")
         self.assertEqual(record.thread_name, "User A")
-        self.assertEqual(record.preview_text, "Hello there Today")
+        self.assertEqual(record.preview_text, "Hello there")
         self.assertEqual(record.dom_index, 3)
+        self.assertEqual(record.sidebar_time_text, "Today")
+        self.assertEqual(record.sidebar_time_kind, "today")
+        self.assertEqual(record.sidebar_identity_key, "thread-a")
         self.assertTrue(record.thread_id.startswith("page1_"))
+
+    def test_build_thread_record_is_deterministic_and_distinguishes_same_name_threads(self):
+        record_a1 = build_thread_record("page1", {
+            "name": "User A",
+            "text": "User A\nPreview one\nToday",
+            "sidebarTimeText": "Today",
+            "sidebarIdentityKey": "thread-a",
+        })
+        record_a2 = build_thread_record("page1", {
+            "name": "User A",
+            "text": "User A\nPreview one\nToday",
+            "sidebarTimeText": "Today",
+            "sidebarIdentityKey": "thread-a",
+        })
+        record_b = build_thread_record("page1", {
+            "name": "User A",
+            "text": "User A\nPreview two\nToday",
+            "sidebarTimeText": "Today",
+            "sidebarIdentityKey": "thread-b",
+        })
+        self.assertEqual(record_a1.thread_id, record_a2.thread_id)
+        self.assertNotEqual(record_a1.thread_id, record_b.thread_id)
+
+    def test_parse_sidebar_time_token_handles_supported_formats(self):
+        now = __import__("datetime").datetime(2026, 4, 1)
+        self.assertEqual(_parse_sidebar_time_token("Today", now)["days_ago"], 0)
+        self.assertEqual(_parse_sidebar_time_token("Yesterday", now)["days_ago"], 1)
+        self.assertEqual(_parse_sidebar_time_token("Mon", now)["kind"], "weekday")
+        self.assertEqual(_parse_sidebar_time_token("Mar 15", now)["kind"], "month_day")
+        self.assertEqual(_parse_sidebar_time_token("??", now)["kind"], "unknown")
+
+    def test_sidebar_loading_count_prefers_container_scoped_spinner(self):
+        self.assertEqual(
+            _sidebar_loading_count({"hasContainer": True, "loadingCount": 0, "globalLoadingCount": 3}),
+            0,
+        )
+        self.assertEqual(
+            _sidebar_loading_count({"hasContainer": False, "loadingCount": 0, "globalLoadingCount": 3}),
+            3,
+        )
+
+    def test_scrape_inbox_performs_one_sidebar_scroll_and_one_wait_cycle(self):
+        # code:test-validation-001:l3-sidebar-loading
+        class _Mouse:
+            def __init__(self):
+                self.moves = []
+                self.wheels = []
+
+            def move(self, x, y):
+                self.moves.append((x, y))
+
+            def wheel(self, dx, dy):
+                self.wheels.append((dx, dy))
+
+        class _Page:
+            def __init__(self):
+                self.mouse = _Mouse()
+                self.goto_calls = []
+                self.wait_for_timeout_calls = []
+
+            def goto(self, url, wait_until=None, timeout=None):
+                self.goto_calls.append((url, wait_until, timeout))
+
+            def wait_for_timeout(self, ms):
+                self.wait_for_timeout_calls.append(ms)
+
+        class _Logger:
+            def __init__(self):
+                self.messages = []
+
+            def info(self, msg):
+                self.messages.append(("info", msg))
+
+            def warning(self, msg):
+                self.messages.append(("warning", msg))
+
+        page = _Page()
+        logger = _Logger()
+        record_fetch_calls = []
+
+        def _record_fetch(page_id, total_threads, new_messages, conn):
+            record_fetch_calls.append((page_id, total_threads, new_messages))
+
+        with patch("fb_pipeline.browser.l3_inbox._wait_for_inbox_shell", return_value=""), \
+             patch("fb_pipeline.browser.l3_inbox._wait_for_initial_threads", return_value={
+                 "count": 2, "elapsed_ms": 1500, "fingerprint": "fp-0",
+             }), \
+             patch("fb_pipeline.browser.l3_inbox._sidebar_loading_snapshot", return_value={
+                 "count": 2,
+                 "loadingCount": 0,
+                 "globalLoadingCount": 0,
+                 "hasContainer": True,
+                 "fingerprint": "fp-1",
+             }), \
+             patch("fb_pipeline.browser.l3_inbox._extract_visible_threads", return_value=[]):
+            stats = scrape_inbox(
+                page=page,
+                page_id="1548373332058326",
+                time_range="7d",
+                max_threads=5,
+                conn=self.conn,
+                logger=logger,
+                record_fetch=_record_fetch,
+                extract_ad_id_labels=lambda _page: [],
+                extract_user_info=extract_user_info,
+                detect_city=detect_city,
+            )
+
+        # Initial scroll uses mouse.wheel(0, 600) at sidebar position (200, 400)
+        self.assertEqual(page.mouse.wheels, [(0, 600)])
+        self.assertIn((200, 400), page.mouse.moves)
+        self.assertEqual(record_fetch_calls, [("1548373332058326", 0, 0)])
+        self.assertIn(("info", "Round 1: no thread cards visible."), logger.messages)
 
     # Gate 2: code:test-validation-001:l3-to-l1
     def test_enrich_thread_record_builds_mas_payload(self):
