@@ -220,7 +220,7 @@ def persist_thread_record(conn: sqlite3.Connection, thread_record: dict) -> dict
 # code:tool-fbmessages-001:scrape-inbox
 
 def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
-                  conn: sqlite3.Connection, skip_navigation: bool = False) -> dict:
+                  conn: sqlite3.Connection, skip_navigation: bool = False, force_refresh: bool = False) -> dict:
     """Core scraping loop: scroll sidebar, click threads, extract messages."""
     return shared_scrape_inbox(
         page,
@@ -234,6 +234,7 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
         extract_user_info=extract_user_info,
         detect_city=detect_city,
         skip_navigation=skip_navigation,
+        force_refresh=force_refresh,
     )
 
 
@@ -341,20 +342,6 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
         logger.info("CDP Direct Mode: Connecting to Chrome at http://127.0.0.1:9222")
         conn = get_db_connection(memory_dir)
 
-        # Cache check (same as headless mode)
-        if not force_refresh and not should_fetch(page_id, conn):
-            last_row = conn.execute(
-                "SELECT fetched_at, threads_found, messages_found FROM fetch_log WHERE page_id=? ORDER BY id DESC LIMIT 1",
-                (page_id,)
-            ).fetchone()
-            logger.info(f"Cache hit: Last fetch at {last_row['fetched_at']}. Use --refresh to force.")
-            conn.close()
-            return {
-                "success": True, "method": "cache_hit",
-                "message": f"Using cached data from {last_row['fetched_at']}. Use --refresh to force a new fetch.",
-                "data": {"last_fetch": last_row["fetched_at"], "threads": last_row["threads_found"], "messages": last_row["messages_found"]}
-            }
-
         with sync_playwright() as p:
             session = None
             try:
@@ -366,7 +353,7 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
                 run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
                 logger.info("Starting direct scrape...")
-                stats = _scrape_inbox(session.page, page_id, time_range, max_threads, conn, skip_navigation=True)
+                stats = _scrape_inbox(session.page, page_id, time_range, max_threads, conn, skip_navigation=True, force_refresh=force_refresh)
 
                 # Post-scrape LLM city classification
                 llm_stats = _post_scrape_llm_city_classify(conn, page_id)
@@ -444,20 +431,6 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
             # --- Mode 3: Headful/Headless fetch with saved credentials ---
             conn = get_db_connection(memory_dir)
 
-            # code:tool-fbmessages-002:cache
-            if not force_refresh and not should_fetch(page_id, conn):
-                last_row = conn.execute(
-                    "SELECT fetched_at, threads_found, messages_found FROM fetch_log WHERE page_id=? ORDER BY id DESC LIMIT 1",
-                    (page_id,)
-                ).fetchone()
-                logger.info(f"Cache hit: Last fetch at {last_row['fetched_at']} ({last_row['threads_found']} threads, {last_row['messages_found']} messages). Use --refresh to force.")
-                conn.close()
-                return {
-                    "success": True, "method": "cache_hit",
-                    "message": f"Using cached data from {last_row['fetched_at']}. Use --refresh to force a new fetch.",
-                    "data": {"last_fetch": last_row["fetched_at"], "threads": last_row["threads_found"], "messages": last_row["messages_found"]}
-                }
-
             logger.info(f"Credential '{credential_id}' found. Launching {'headful' if show_browser else 'headless'} browser.")
             try:
                 browser = p.chromium.launch(headless=not show_browser)
@@ -467,7 +440,7 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
                 )
                 page = context.new_page()
 
-                stats = _scrape_inbox(page, page_id, time_range, max_threads, conn)
+                stats = _scrape_inbox(page, page_id, time_range, max_threads, conn, force_refresh=force_refresh)
 
                 # Post-scrape LLM city classification
                 llm_stats = _post_scrape_llm_city_classify(conn, page_id)

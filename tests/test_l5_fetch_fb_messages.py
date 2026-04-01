@@ -101,26 +101,6 @@ class TestFetchMessagesCDPDirect(unittest.TestCase):
         mock_browser.close.assert_not_called()
         mock_attach.assert_called_once()
 
-    @patch('tools.l5_fetch_fb_messages._scrape_inbox')
-    @patch('tools.l5_fetch_fb_messages.sync_playwright')
-    def test_cdp_direct_cache_hit(self, mock_sync_playwright, mock_scrape):
-        """CDP direct mode also respects the cache."""
-        self._patch_sqlite()
-        tmp_db = os.path.join(self._tmp_dir, "frankensqlite.db")
-        conn = sqlite3.connect(tmp_db)
-        setup_database(conn)
-        conn.execute(
-            "INSERT INTO fetch_log (page_id, fetched_at, threads_found, messages_found) VALUES (?, ?, 5, 20)",
-            ("123", datetime.now().isoformat())
-        )
-        conn.commit()
-        conn.close()
-
-        result = fetch_messages("123", "test_cred", force_refresh=False, use_cdp=True)
-
-        self.assertTrue(result["success"])
-        self.assertEqual(result["method"], "cache_hit")
-        mock_scrape.assert_not_called()
 
 
 class TestFetchMessagesHeadless(unittest.TestCase):
@@ -262,6 +242,45 @@ class TestFetchMessagesHeadless(unittest.TestCase):
 
     @patch('tools.l5_fetch_fb_messages.os.path.exists')
     @patch('tools.l5_fetch_fb_messages.sync_playwright')
+    def test_headless_deduplicates_overlapping_messages(self, mock_sync_playwright, mock_exists):
+        """Test the monotonic sequence deduplication suffix-matching algorithm."""
+        self._patch_sqlite()
+        messages_run_1 = [
+            {"sender": "Customer", "text": "Hello", "timestamp": "1:00 PM"},
+            {"sender": "Page", "text": "Hi", "timestamp": "1:01 PM"},
+        ]
+        self._setup_mock_playwright(mock_sync_playwright, mock_exists, js_messages=messages_run_1)
+        result1 = fetch_messages("123", "test_cred", force_refresh=True)
+        self.assertTrue(result1["success"])
+        self.assertEqual(result1["data"]["stats"]["new_messages"], 2)
+
+        # Simulating run 2 where an extra message is loaded from the top (user scrolled higher in DOM?) 
+        # Actually our algorithm suffix matches so let's simulate a NEW message arriving at the bottom!
+        messages_run_2 = [
+            {"sender": "Customer", "text": "Hello", "timestamp": "1:00 PM"},
+            {"sender": "Page", "text": "Hi", "timestamp": "1:01 PM"},
+            {"sender": "Customer", "text": "Pushed a new message", "timestamp": "1:05 PM"},
+        ]
+        self._setup_mock_playwright(mock_sync_playwright, mock_exists, thread_text="Test User\nPushed a new message", js_messages=messages_run_2)
+        result2 = fetch_messages("123", "test_cred", force_refresh=True)
+        self.assertTrue(result2["success"])
+        # Only the net-new message should be imported!
+        self.assertEqual(result2["data"]["stats"]["new_messages"], 1)
+
+        tmp_db = os.path.join(self._tmp_dir, "frankensqlite.db")
+        conn = sqlite3.connect(tmp_db)
+        cursor = conn.cursor()
+        cursor.execute("SELECT content, seq FROM messages ORDER BY seq ASC")
+        rows = cursor.fetchall()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0][0], "Hello")
+        self.assertEqual(rows[0][1], 0)
+        self.assertEqual(rows[2][0], "Pushed a new message")
+        self.assertEqual(rows[2][1], 2)
+        conn.close()
+
+    @patch('tools.l5_fetch_fb_messages.os.path.exists')
+    @patch('tools.l5_fetch_fb_messages.sync_playwright')
     def test_headless_with_ad_context(self, mock_sync_playwright, mock_exists):
         self._patch_sqlite()
         ad_text = "Thiền miễn phí tại Hà Nội"
@@ -283,28 +302,6 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         self.assertGreaterEqual(call_count["sidebar_snapshot"], 2)
         wait_calls = [call.args[0] for call in mock_page.wait_for_timeout.call_args_list if call.args]
         self.assertIn(1000, wait_calls)
-
-    @patch('tools.l5_fetch_fb_messages.os.path.exists')
-    @patch('tools.l5_fetch_fb_messages.sync_playwright')
-    def test_cache_hit_skips_browser(self, mock_sync_playwright, mock_exists):
-        """When cache is fresh and --refresh is NOT set, browser should NOT launch."""
-        self._patch_sqlite()
-        mock_exists.return_value = True
-        tmp_db = os.path.join(self._tmp_dir, "frankensqlite.db")
-        conn = sqlite3.connect(tmp_db)
-        setup_database(conn)
-        fresh_time = datetime.now().isoformat()
-        conn.execute(
-            "INSERT INTO fetch_log (page_id, fetched_at, threads_found, messages_found) VALUES (?, ?, 2, 20)",
-            ("123", fresh_time)
-        )
-        conn.commit()
-        conn.close()
-
-        result = fetch_messages("123", "test_cred", force_refresh=False)
-        self.assertTrue(result["success"])
-        self.assertEqual(result["method"], "cache_hit")
-        mock_sync_playwright.return_value.__enter__.return_value.chromium.launch.assert_not_called()
 
 
 if __name__ == '__main__':

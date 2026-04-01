@@ -168,7 +168,8 @@ def _sidebar_loading_snapshot(page) -> dict:
             "containerSelector": container_selector,
         },
     )
-    digest = hashlib.sha256((snapshot.get("fingerprint") or "").encode("utf-8")).hexdigest()[:12]
+    fingerprint_val = snapshot.get("fingerprint", "")
+    digest = hashlib.sha256(str(fingerprint_val).encode("utf-8")).hexdigest()[:12]
     snapshot["fingerprint"] = digest
     return snapshot
 
@@ -453,9 +454,71 @@ def _verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_f
     return "", False
 
 
+def _validate_quick_fetch_cache(visible_threads: list, conn, logger, page_id: str) -> bool:
+    """Validate if the top visible threads exactly match the database to trigger a dynamic cache hit."""
+    if not visible_threads:
+        logger.info("Quick Cache: No visible threads found.")
+        return False
+        
+    cursor = conn.cursor()
+    # Validate the top 3 threads
+    threads_to_check = visible_threads[:3]
+    from fb_pipeline.inbox.l3_pipeline import build_thread_record
+    
+    hit_logs = []
+    
+    for vt in threads_to_check:
+        thread_record = build_thread_record(page_id, vt)
+        cursor.execute("SELECT last_synced_time FROM threads WHERE id = ?", (thread_record.thread_id,))
+        row = cursor.fetchone()
+        
+        # New thread found
+        if not row:
+            logger.info(f"Quick Cache Miss: Thread {thread_record.thread_id} not found in DB.")
+            return False
+            
+        # Message preview mismatch (handle variable viewport truncation using robust alphanumeric matching)
+        def _normalize(s):
+            return ''.join(c.lower() for c in s if c.isalnum())
+            
+        db_orig = row[0] or ""
+        ui_orig = thread_record.preview_text or ""
+        db_norm = _normalize(db_orig)
+        ui_norm = _normalize(ui_orig)
+        
+        min_len = min(len(db_norm), len(ui_norm))
+        if min_len > 0:
+            if db_norm[:min_len] != ui_norm[:min_len]:
+                logger.info(f"Quick Cache Miss: Thread {thread_record.thread_name} preview mismatch. DB_NORM='{db_norm}' vs UI_NORM='{ui_norm}'")
+                return False
+        elif db_norm != ui_norm:
+            logger.info(f"Quick Cache Miss: Thread {thread_record.thread_name} preview mismatch (empty). DB='{db_orig}' vs UI='{ui_orig}'")
+            return False
+            
+        # Check signal mismatch for unreplied customer vs Admin response
+        preview_lower = (thread_record.preview_text or "").strip().lower()
+        sender_label = "Customer"
+        if preview_lower.startswith("you:") or preview_lower.startswith("bạn:"):
+            sender_label = "Admin reply"
+            last_msg_row = cursor.execute(
+                "SELECT sender FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1",
+                (thread_record.thread_id,)
+            ).fetchone()
+            if last_msg_row and last_msg_row[0] != "Page":
+                logger.info(f"Quick Cache Miss: Thread {thread_record.thread_name} has admin preview but DB last msg is {last_msg_row[0]}")
+                return False  # Force resync needed
+        
+        prev_30 = (thread_record.preview_text or "").replace("\n", " ")[:30].strip()
+        dt_text = vt.get("sidebarTimeText", "")
+        hit_logs.append(f"[{thread_record.thread_name}]: {prev_30}... [{dt_text}] [{sender_label}]")
+                
+    logger.info("CACHE HIT => Skip scraping for these threads:\n" + "\n".join(hit_logs))
+    return True
+
+
 def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, logger,
                  record_fetch, extract_ad_id_labels, extract_user_info, detect_city,
-                 skip_navigation: bool = False) -> dict:
+                 skip_navigation: bool = False, force_refresh: bool = False) -> dict:
     from fb_pipeline.inbox.l3_pipeline import build_thread_record, enrich_thread_record, persist_thread_record
 
     """Core inbox scraping loop over the Facebook Business Suite thread list."""
@@ -475,6 +538,19 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
     # Phase 2: Wait for at least 1 thread card to render (SPA hydration, up to 30s)
     logger.info("Waiting for initial threads to appear...")
     initial_snapshot = _wait_for_initial_threads(page, logger, timeout_ms=30000)
+
+    # NEW Phase 2.5: Dynamic Quick Fetch Cache Validation
+    if not force_refresh:
+        first_glance_threads = _extract_visible_threads(page)
+        is_cache_hit = _validate_quick_fetch_cache(first_glance_threads, conn, logger, page_id)
+        if is_cache_hit:
+            return {
+                "new_threads": 0, "new_messages": 0, "skipped_threads": len(first_glance_threads),
+                "threads_seen": len(first_glance_threads), "threads_processed": 0,
+                "threads_skipped_duplicate": 0, "threads_skipped_cutoff": 0, "threads_skipped_click_verify": 0,
+                "sidebar_scrolls": 0, "sidebar_wait_ms": initial_snapshot.get("elapsed_ms", 0),
+                "method": "dynamic_cache_hit"
+            }
 
     # Phase 3: One controlled sidebar scroll to load more threads + wait up to 60s
     initial_sidebar = _scroll_sidebar_and_wait(page, logger, scroll_round=0, timeout_ms=60000)
@@ -499,6 +575,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
     reached_date_limit = False
     last_new_round = 0
     thread_counter = 0
+    consecutive_clean_threads = 0
     sidebar_scrolls = 1 if initial_sidebar.get("count", 0) >= 0 else 0
     sidebar_wait_ms = initial_sidebar.get("elapsed_ms", 0)
     stats = {
@@ -573,23 +650,47 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             cursor.execute("SELECT last_synced_time FROM threads WHERE id = ?", (thread_record.thread_id,))
             row = cursor.fetchone()
 
-            if row and row[0] == thread_record.preview_text:
-                force_resync = False
-                preview_lower = (thread_record.preview_text or "").strip().lower()
-                if preview_lower.startswith("you:") or preview_lower.startswith("bạn:"):
-                    last_msg_row = cursor.execute(
-                        "SELECT sender FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1",
-                        (thread_record.thread_id,)
-                    ).fetchone()
-                    if last_msg_row and last_msg_row[0] != "Page":
-                        force_resync = True
-                        logger.info(f"Force re-sync thread '{name}': sidebar shows admin reply but DB last msg is '{last_msg_row[0]}'.")
+            if row:
+                def _normalize(s):
+                    return ''.join(c.lower() for c in s if c.isalnum())
+                
+                db_orig = row[0] or ""
+                ui_orig = thread_record.preview_text or ""
+                db_norm = _normalize(db_orig)
+                ui_norm = _normalize(ui_orig)
+                
+                min_len = min(len(db_norm), len(ui_norm))
+                is_match = False
+                if min_len > 0:
+                    is_match = db_norm[:min_len] == ui_norm[:min_len]
+                else:
+                    is_match = db_norm == ui_norm
 
-                if not force_resync:
-                    logger.info(f"Skipping thread '{name}'. No new messages (preview matches).")
-                    stats["skipped_threads"] += 1
-                    continue
+                if is_match:
+                    force_resync = False
+                    preview_lower = (thread_record.preview_text or "").strip().lower()
+                    if preview_lower.startswith("you:") or preview_lower.startswith("bạn:"):
+                        last_msg_row = cursor.execute(
+                            "SELECT sender FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1",
+                            (thread_record.thread_id,)
+                        ).fetchone()
+                        if last_msg_row and last_msg_row[0] != "Page":
+                            force_resync = True
+                            logger.info(f"Force re-sync thread '{name}': sidebar shows admin reply but DB last msg is '{last_msg_row[0]}'.")
 
+                    if not force_resync:
+                        logger.info(f"Skipping thread '{name}'. No new messages (preview matches).")
+                        stats["skipped_threads"] += 1
+                        
+                        if not force_refresh:
+                            consecutive_clean_threads += 1
+                            if consecutive_clean_threads >= 2:
+                                logger.info(f"Targeted Partial Fetch complete. Hit {consecutive_clean_threads} consecutive clean threads. Early exit triggered!")
+                                reached_date_limit = True
+                                break
+                        continue
+                else:
+                    consecutive_clean_threads = 0
             logger.info(f"Syncing thread '{name}' (#{thread_counter})...")
             prev_fb_url = ""
             try:
@@ -993,4 +1094,5 @@ __all__ = [
     "_wait_for_initial_threads",
     "_scroll_sidebar_and_wait",
     "_parse_sidebar_time_token",
+    "_validate_quick_fetch_cache",
 ]

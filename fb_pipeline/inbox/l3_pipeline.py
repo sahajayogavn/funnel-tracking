@@ -138,21 +138,51 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     new_customer_message_added = False
     ad_context = thread_record.ad_context
 
-    for idx, msg in enumerate(thread_record.messages):
+    cursor.execute("SELECT sender, content, seq FROM messages WHERE thread_id=? ORDER BY seq ASC", (thread_record.thread_id,))
+    existing_msgs = cursor.fetchall()
+    
+    import re
+    def _normalize(s):
+        s = re.sub(r'^---\s*\[AD SOURCE\]:.*?---\s*', '', s, flags=re.DOTALL)
+        return re.sub(r'\s+', '', str(s).lower())
+
+    existing_tuples = [(_normalize(row['sender']), _normalize(row['content'])) for row in existing_msgs]
+    
+    new_tuples = []
+    for msg in thread_record.messages:
+        content = msg.content
+        sender = msg.sender
+        if sender == "Page":
+            if ("Chúng tôi có thể" in content or 
+                "Họ tên và Số điện thoại" in content or
+                "Khóa học thiền ở Hà Nội" in content or
+                "Thời gian: 20h-21h30" in content):
+                sender = "Auto_Page"
+        new_tuples.append((_normalize(sender), _normalize(content)))
+        
+    max_overlap = min(len(existing_tuples), len(new_tuples))
+    best_overlap = 0
+    # Try all possible overlap lengths. We want the LARGEST overlap.
+    for i in range(1, max_overlap + 1):
+        if existing_tuples[-i:] == new_tuples[:i]:
+            best_overlap = i
+            
+    next_seq = existing_msgs[-1]['seq'] + 1 if existing_msgs else 0
+    msgs_to_insert = thread_record.messages[best_overlap:]
+
+    for idx, msg in enumerate(msgs_to_insert):
         msg_content_to_save = msg.content
         sender_to_save = msg.sender
         
-        # Heuristically classify Facebook's automated responses
         if sender_to_save == "Page":
-            if ("Chúng tôi có thể giúp gì cho bạn?" in msg_content_to_save or 
-                "Bạn để lại Họ tên và Số điện thoại để đăng ký" in msg_content_to_save or
+            if ("Chúng tôi có thể" in msg_content_to_save or 
+                "Họ tên và Số điện thoại" in msg_content_to_save or
                 "Khóa học thiền ở Hà Nội" in msg_content_to_save or
                 "Thời gian: 20h-21h30" in msg_content_to_save):
                 sender_to_save = "Auto_Page"
 
         if messages_added == 0 and ad_context:
             msg_content_to_save = f"--- [AD SOURCE]: {ad_context} ---\n\n{msg_content_to_save}"
-            # Also ensure ad_source injections don't shadow Customer intent
             if sender_to_save == "Page": sender_to_save = "Auto_Page"
             
         cursor.execute(
@@ -162,14 +192,13 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
                 sender_to_save,
                 msg_content_to_save,
                 msg.message_timestamp,
-                msg.seq if msg.seq is not None else idx,
+                next_seq + idx,
             )
         )
         if cursor.rowcount > 0:
             messages_added += 1
             if msg.sender == "Customer":
                 new_customer_message_added = True
-
     cursor.execute('''
         INSERT INTO threads (id, page_id, thread_name, last_synced_time)
         VALUES (?, ?, ?, ?)
@@ -248,7 +277,8 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
 
 
 def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, logger,
-                 record_fetch, extract_ad_id_labels, extract_user_info, detect_city) -> dict:
+                 record_fetch, extract_ad_id_labels, extract_user_info, detect_city,
+                 skip_navigation: bool = False, force_refresh: bool = False) -> dict:
     from fb_pipeline.browser.l3_inbox import scrape_inbox_ui
 
     return scrape_inbox_ui(
@@ -262,6 +292,8 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
         extract_ad_id_labels,
         extract_user_info,
         detect_city,
+        skip_navigation=skip_navigation,
+        force_refresh=force_refresh,
     )
 
 
