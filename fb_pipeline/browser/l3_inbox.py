@@ -406,15 +406,19 @@ def _verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_f
 
 
 def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, logger,
-                 record_fetch, extract_ad_id_labels, extract_user_info, detect_city) -> dict:
+                 record_fetch, extract_ad_id_labels, extract_user_info, detect_city,
+                 skip_navigation: bool = False) -> dict:
     from fb_pipeline.inbox.l3_pipeline import build_thread_record, enrich_thread_record, persist_thread_record
 
     """Core inbox scraping loop over the Facebook Business Suite thread list."""
     inbox_url = f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}"
 
-    logger.info(f"Navigating to {inbox_url}")
-    page.goto(inbox_url, wait_until="networkidle", timeout=60000)
-    page.wait_for_timeout(2000)
+    if not skip_navigation:
+        logger.info(f"Navigating to {inbox_url}")
+        page.goto(inbox_url, wait_until="networkidle", timeout=60000)
+        page.wait_for_timeout(2000)
+    else:
+        logger.info(f"Page is already correctly positioned at {inbox_url}. Skipping navigation.")
 
     # Phase 1: Wait for the inbox shell container to appear in DOM (up to 30s)
     logger.info("Waiting for inbox shell...")

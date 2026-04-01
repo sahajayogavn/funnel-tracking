@@ -220,7 +220,7 @@ def persist_thread_record(conn: sqlite3.Connection, thread_record: dict) -> dict
 # code:tool-fbmessages-001:scrape-inbox
 
 def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
-                  conn: sqlite3.Connection) -> dict:
+                  conn: sqlite3.Connection, skip_navigation: bool = False) -> dict:
     """Core scraping loop: scroll sidebar, click threads, extract messages."""
     return shared_scrape_inbox(
         page,
@@ -233,6 +233,7 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int,
         extract_ad_id_labels=extract_ad_id_labels,
         extract_user_info=extract_user_info,
         detect_city=detect_city,
+        skip_navigation=skip_navigation,
     )
 
 
@@ -365,7 +366,7 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
                 run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
                 logger.info("Starting direct scrape...")
-                stats = _scrape_inbox(session.page, page_id, time_range, max_threads, conn)
+                stats = _scrape_inbox(session.page, page_id, time_range, max_threads, conn, skip_navigation=True)
 
                 # Post-scrape LLM city classification
                 llm_stats = _post_scrape_llm_city_classify(conn, page_id)
