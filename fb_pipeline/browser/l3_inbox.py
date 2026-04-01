@@ -354,18 +354,47 @@ def _is_thread_older_than_range(parsed_time: dict, max_days: int) -> bool:
 
 
 def _verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fingerprint: str,
-                          is_first_thread: bool) -> tuple[str, bool]:
+                          is_first_thread: bool, thread_record) -> tuple[str, bool]:
     fb_url = ""
     url_changed = False
+    name_matched = False
+    target_item_id = getattr(thread_record, "selected_item_id", "")
+
     for _poll in range(20):
         try:
             current_qs = parse_qs(urlparse(page.url).query)
             candidate = current_qs.get('selected_item_id', [''])[0]
-            if candidate and candidate != prev_fb_url:
+            
+            # Check center panel name
+            header_text = page.evaluate('''() => {
+                let main = document.querySelector('div[role="main"]');
+                if (!main) main = document.body;
+                let h2s = Array.from(main.querySelectorAll('h2[dir="auto"], h1, h3, div[role="heading"]'));
+                for(let h of h2s) {
+                    if (h.innerText && h.innerText.length > 0) return h.innerText.trim();
+                }
+                let main_text = main.innerText || "";
+                return main_text.substring(0, 500);
+            }''')
+
+            clean_name = name.lower().strip()
+            clean_header = header_text.lower().strip()
+            if clean_name and clean_name in clean_header:
+                name_matched = True
+            elif clean_header and clean_header in clean_name:
+                name_matched = True
+
+            if candidate and target_item_id and candidate == target_item_id:
                 fb_url = candidate
                 url_changed = True
-                logger.info(f"thread_switch_verified method=selected_item_id thread='{name}'")
-                break
+            elif candidate and candidate != prev_fb_url:
+                fb_url = candidate
+                url_changed = True
+
+            if url_changed and name_matched:
+                logger.info(f"thread_switch_verified method=selected_item_id_and_name_match thread='{name}'")
+                return fb_url, True
+
         except Exception:
             pass
         page.wait_for_timeout(500)
@@ -379,6 +408,20 @@ def _verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_f
 
     panel_refreshed = False
     for _poll in range(20):
+        header_text = page.evaluate('''() => {
+            let main = document.querySelector('div[role="main"]');
+            if (!main) main = document.body;
+            let h2s = Array.from(main.querySelectorAll('h2[dir="auto"], h1, h3, div[role="heading"]'));
+            for(let h of h2s) {
+                if (h.innerText && h.innerText.length > 0) return h.innerText.trim();
+            }
+            return (main.innerText || "").substring(0, 500);
+        }''')
+        clean_name = name.lower().strip()
+        clean_header = header_text.lower().strip()
+        if clean_name and clean_name in clean_header:
+            name_matched = True
+
         post_click_fingerprint = page.evaluate('''() => {
             let r = document.querySelector(
                 'div[aria-label*="Message list container"], ' +
@@ -389,20 +432,25 @@ def _verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_f
         }''')
         if post_click_fingerprint != pre_click_fingerprint:
             panel_refreshed = True
-            if not url_changed:
-                logger.info(f"thread_switch_verified method=panel_fingerprint thread='{name}'")
-            break
+            if name_matched:
+                logger.info(f"thread_switch_verified method=panel_fingerprint_and_name_match thread='{name}'")
+                return fb_url, True
         page.wait_for_timeout(500)
+
+    if not panel_refreshed and not url_changed and not name_matched:
+        logger.warning(f"thread_switch_failed thread='{name}' reason=no_url_change_no_panel_refresh_no_name_match")
+        return "", False
+        
+    if name_matched:
+        logger.info(f"thread_switch_verified method=name_matched_fallback thread='{name}'")
+        return fb_url, True
 
     if not panel_refreshed and is_first_thread:
         logger.info(f"thread_switch_verified method=first_thread_already_loaded thread='{name}'")
         return fb_url, True
 
-    if not panel_refreshed and not url_changed:
-        logger.warning(f"thread_switch_failed thread='{name}' reason=no_url_change_no_panel_refresh")
-        return "", False
-
-    return fb_url, True
+    logger.warning(f"thread_switch_failed thread='{name}' reason=name_not_matched_in_center_panel")
+    return "", False
 
 
 def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, logger,
@@ -560,8 +608,75 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             }''')
 
             try:
-                thread_el = page.locator(_thread_card_selector()).nth(thread_record.dom_index)
-                thread_el.click(force=True, timeout=5000)
+                # Use evaluate to find the matching element by exact identity key
+                clicked = page.evaluate('''({sidebarIdentityKey, domIndex, threadSelector}) => {
+                    let candidates = Array.from(document.querySelectorAll(threadSelector));
+                    
+                    function getIdentity(el) {
+                        const text = (el.innerText || '').trim();
+                        const lines = text.split('\\n').map(l => l.trim()).filter(Boolean);
+                        const name = lines[0] || '';
+                        
+                        function pickTimeToken(lines) {
+                            for (let i = lines.length - 1; i >= 1; i--) {
+                                const token = (lines[i] || '').trim();
+                                if (!token) continue;
+                                if (/^\\d+[smhdw]$/i.test(token)) return token;
+                                if (/^(today|yesterday|hôm nay|hôm qua)$/i.test(token)) return token;
+                                if (/^(mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(token)) return token;
+                                if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\\s+\\d{1,2}$/i.test(token)) return token;
+                            }
+                            return '';
+                        }
+                        
+                        const sidebarTimeText = pickTimeToken(lines);
+                        const previewLines = lines.slice(1).filter(line => line !== sidebarTimeText);
+                        const hrefEl = el.closest('a[href]') || el.querySelector('a[href]');
+                        const href = hrefEl ? (hrefEl.getAttribute('href') || '') : '';
+                        let selectedItemId = '';
+                        try {
+                            if (href) {
+                                const absolute = new URL(href, window.location.origin);
+                                selectedItemId = absolute.searchParams.get('selected_item_id') || '';
+                            }
+                        } catch (_) {}
+
+                        const attrs = [];
+                        for (const attr of Array.from(el.attributes || [])) {
+                            if (!attr || !attr.name) continue;
+                            if (attr.name.startsWith('data-') || attr.name.startsWith('aria-') || attr.name === 'href') {
+                                attrs.push(`${attr.name}=${attr.value || ''}`);
+                            }
+                        }
+                        const identityParts = [name, previewLines.join(' | '), sidebarTimeText, selectedItemId, href, attrs.join('|')].filter(Boolean);
+                        return identityParts.join(' || ');
+                    }
+
+                    // Strict matching first
+                    for (let c of candidates) {
+                        if (getIdentity(c) === sidebarIdentityKey) {
+                            c.scrollIntoView({block: "center"});
+                            c.click();
+                            return true;
+                        }
+                    }
+                    // Fallback to domIndex
+                    if (candidates[domIndex]) {
+                        candidates[domIndex].scrollIntoView({block: "center"});
+                        candidates[domIndex].click();
+                        return true;
+                    }
+                    return false;
+                }''', {
+                    "sidebarIdentityKey": thread_record.sidebar_identity_key, 
+                    "domIndex": thread_record.dom_index,
+                    "threadSelector": _thread_card_selector()
+                })
+                
+                if not clicked:
+                    logger.warning(f"Could not find thread '{name}' in DOM to click (identity key or dom_index).")
+                    stats["threads_skipped_click_verify"] += 1
+                    continue
             except Exception as e:
                 stats["threads_skipped_click_verify"] += 1
                 logger.warning(f"Could not click thread '{name}': {e}. Skipping.")
@@ -582,6 +697,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 prev_fb_url,
                 pre_click_fingerprint,
                 is_first_thread,
+                thread_record,
             )
             if not verified:
                 stats["threads_skipped_click_verify"] += 1

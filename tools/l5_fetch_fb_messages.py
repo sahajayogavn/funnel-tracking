@@ -480,7 +480,8 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
                 browser.close()
                 return {"success": True, "method": "headless_fetch", "data": {"stats": stats}}
             except Exception as e:
-                logger.error(f"Error while waiting for inbox or extracting messages: {e}")
+                import traceback
+                logger.error(f"Error while waiting for inbox or extracting messages: {e}\n{traceback.format_exc()}")
                 return {"success": False, "error": str(e)}
 
 

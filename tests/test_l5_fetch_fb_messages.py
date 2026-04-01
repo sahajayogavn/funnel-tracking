@@ -193,6 +193,8 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         call_count = {"collect": 0, "fingerprint": 0, "scroll_info": 0, "sidebar_snapshot": 0}
 
         def evaluate_side_effect(script, args=None):
+            if "scrollIntoView" in script and "c.click()" in script:
+                return True
             if isinstance(args, dict) and args.get("threadSelector"):
                 if "pickTimeToken" in script:
                     call_count["collect"] += 1
@@ -207,7 +209,9 @@ class TestFetchMessagesHeadless(unittest.TestCase):
                 return True
             if isinstance(args, str):
                 return True
-            if "innerText" in script and "substring(0, 200)" in script:
+            if "return (r.innerText || \"\").substring(0, 200)" in script or "return (main.innerText || \"\").substring(0, 500)" in script or "let main_text = main.innerText || \"\";" in script:
+                if "querySelector('div[role=\"main\"]')" in script:
+                    return "Test User\nThis is a mock header."
                 call_count["fingerprint"] += 1
                 if call_count["fingerprint"] <= 1:
                     return ""
@@ -274,7 +278,7 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         _, mock_page, call_count = self._setup_mock_playwright(mock_sync_playwright, mock_exists)
         result = fetch_messages("123", "test_cred", force_refresh=True)
         self.assertTrue(result["success"])
-        sidebar_wheels = [call for call in mock_page.mouse.wheel.call_args_list if call.args == (0, 700)]
+        sidebar_wheels = [call for call in mock_page.mouse.wheel.call_args_list if call.args == (0, 600)]
         self.assertGreaterEqual(len(sidebar_wheels), 1)
         self.assertGreaterEqual(call_count["sidebar_snapshot"], 2)
         wait_calls = [call.args[0] for call in mock_page.wait_for_timeout.call_args_list if call.args]
