@@ -10,7 +10,7 @@ Danh sách này lưu trữ mọi thông tin về các khóa học để Agent Bo
 
 ---
 
-## Lớp Offline tại Hà Nội — Tối Thứ 3
+## Thiền Sahaja Yoga - Hà Nội (Số 72 ngõ 106 Hoàng Quốc Việt) - 20h00 Thứ 3
 
 - **Khu vực**: Hà Nội
 - **Thời gian**: 20h00 – 21h30, tối thứ 3 hàng tuần
@@ -26,7 +26,7 @@ Danh sách này lưu trữ mọi thông tin về các khóa học để Agent Bo
 
 ---
 
-## Lớp Offline tại Hà Nội — Chiều Chủ Nhật
+## Thiền Sahaja Yoga - Hà Nội (40 Vương Thừa Vũ) - 14h30 Chủ Nhật
 
 - **Khu vực**: Hà Nội
 - **Thời gian**: 14h30, Chủ Nhật hàng tuần
@@ -42,7 +42,7 @@ Danh sách này lưu trữ mọi thông tin về các khóa học để Agent Bo
 
 ---
 
-## Lớp Offline tại Hà Nội — Tối Thứ 6 (Mỹ Đình Sông Đà)
+## Thiền Sahaja Yoga - Hà Nội (Mỹ Đình) - 20h00 Thứ 6
 
 - **Khu vực**: Hà Nội
 - **Khóa học**: 📢 BUỔI KHAI MỞ LỚP THIỀN
@@ -58,7 +58,7 @@ Danh sách này lưu trữ mọi thông tin về các khóa học để Agent Bo
 
 ---
 
-## Lớp Online Định Kỳ (Basic Online Course)
+## Thiền Sahaja Yoga - Online - 20h15 Thứ 3 & Thứ 5
 
 - **Khu vực**: Online (toàn quốc)
 - **Thời gian**: Tối thứ 3 & thứ 5 hằng tuần, 20h15 – 21h15
@@ -78,7 +78,7 @@ Danh sách này lưu trữ mọi thông tin về các khóa học để Agent Bo
 
 ---
 
-## Lớp Online Sáng (Thứ 2 đến Thứ 7)
+## Thiền Sahaja Yoga - Online - 5h30 Thứ 2 đến Thứ 7
 
 - **Khu vực**: Online (toàn quốc)
 - **Thời gian**: 5h30 sáng, từ Thứ 2 đến Thứ 7 hàng tuần
@@ -88,7 +88,7 @@ Danh sách này lưu trữ mọi thông tin về các khóa học để Agent Bo
 
 ---
 
-## Lớp Online Tối (Thứ 3, Thứ 5, Thứ Bảy)
+## Thiền Sahaja Yoga - Online - 21h00 Thứ 3, Thứ 5, Thứ 7
 
 - **Khu vực**: Online (toàn quốc)
 - **Thời gian**: 21h00 – 21h30, Thứ 3, Thứ 5, Thứ Bảy hàng tuần
@@ -99,7 +99,7 @@ Danh sách này lưu trữ mọi thông tin về các khóa học để Agent Bo
 
 ---
 
-## Lớp Offline tại Đà Nẵng — Sáng Chủ Nhật
+## Thiền Sahaja Yoga - Đà Nẵng - 8h30 Chủ Nhật
 
 - **Khu vực**: Đà Nẵng
 - **Thời gian**: 8h30 – 10h30, Chủ Nhật hàng tuần
@@ -116,7 +116,7 @@ Danh sách này lưu trữ mọi thông tin về các khóa học để Agent Bo
 
 ---
 
-## Lớp Offline tại Nghệ An — Sáng Chủ Nhật
+## Thiền Sahaja Yoga - Nghệ An - 9h00 Chủ Nhật
 
 - **Khu vực**: Nghệ An
 - **Khóa học**: 🧘 🌺 KHÓA THIỀN ĐỊNH MIỄN PHÍ 8 TUẦN
