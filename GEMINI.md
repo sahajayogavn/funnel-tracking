@@ -186,6 +186,7 @@ These rules are **absolute** and must never be violated:
 - **NEVER** run a browser E2E test against real customer threads. Real customers must not receive any test, draft, or accidental messages.
 - To target Hung Bui specifically, pass `--max-threads 1` and confirm the first unreplied thread is Hung Bui before proceeding, or use a `--target-thread "Hung Bui"` flag if implemented.
 - **UI Parser Changes**: Whenever you implement modifications to the DOM parser or crawler module, you **MUST** run a test script specifically targeting "Hung Bui" to verify that parsing successfully extracts all messages without missing any, BEFORE you can commit any code.
+- **Snapshot Consistency Gate**: The extracted message output for the "Hung Bui" thread (e.g. `tests/hungbui_test_output.json`) MUST be 100% consistent across test runs. If successive test executions yield different message arrays or identical texts extracted varying numbers of times, the DOM fetching logic is considered FAILED. You must root-cause the extraction variance before committing.
 
 ### 10.2 Reply Sanitizer — Always Strip Reasoning Leaks
 
