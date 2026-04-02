@@ -469,6 +469,7 @@ def get_db_connection(memory_dir: str = None, logger=None) -> sqlite3.Connection
     os.makedirs(memory_dir, exist_ok=True)
     db_path = os.path.join(memory_dir, "frankensqlite.db")
     conn = sqlite3.connect(db_path)
+    conn.execute('PRAGMA journal_mode=WAL;')
     conn.row_factory = sqlite3.Row
     setup_database(conn, logger=logger)
     return conn
@@ -480,6 +481,7 @@ def get_comment_db_connection(memory_dir: str = None) -> sqlite3.Connection:
     os.makedirs(memory_dir, exist_ok=True)
     db_path = os.path.join(memory_dir, "frankensqlite.db")
     conn = sqlite3.connect(db_path)
+    conn.execute('PRAGMA journal_mode=WAL;')
     conn.row_factory = sqlite3.Row
     setup_comment_database(conn)
     return conn
