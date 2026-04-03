@@ -62,7 +62,7 @@ function fbProfileLink(url: string) {
 export function SeekersTable({ initialSeekers }: SeekersTableProps) {
   const router = useRouter();
   const [seekers] = useState(initialSeekers);
-  const [sortField, setSortField] = useState<keyof Seeker>('lastInteraction');
+  const [sortField, setSortField] = useState<keyof Seeker | 'lastMessageTimestampText'>('lastMessageTimestampText');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [search, setSearch] = useState('');
   const [hoveredSeeker, setHoveredSeeker] = useState<string | null>(null);
@@ -108,13 +108,18 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
         s.email?.toLowerCase().includes(q);
     })
     .sort((a, b) => {
-      const aVal = a[sortField] ?? '';
-      const bVal = b[sortField] ?? '';
+      if (sortField === 'lastInteraction' || sortField === 'lastMessageTimestampText' || sortField === 'firstSeen') {
+        const timeA = new Date(a[sortField as keyof Seeker] || 0).getTime() || 0;
+        const timeB = new Date(b[sortField as keyof Seeker] || 0).getTime() || 0;
+        return sortDir === 'asc' ? timeA - timeB : timeB - timeA;
+      }
+      const aVal = a[sortField as keyof Seeker] ?? '';
+      const bVal = b[sortField as keyof Seeker] ?? '';
       const cmp = String(aVal).localeCompare(String(bVal));
       return sortDir === 'asc' ? cmp : -cmp;
     });
 
-  const handleSort = (field: keyof Seeker) => {
+  const handleSort = (field: keyof Seeker | 'lastMessageTimestampText') => {
     if (sortField === field) {
       setSortDir(d => d === 'asc' ? 'desc' : 'asc');
     } else {
@@ -195,7 +200,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                 <th onClick={() => handleSort('name')}>Name {sortField === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}</th>
                 <th>FB Profile</th>
                 <th onClick={() => handleSort('phone')}>Phone</th>
-                <th onClick={() => handleSort('email')}>Email</th>
+                <th onClick={() => handleSort('lastMessageTimestampText')}>Last Message</th>
                 <th>Activity</th>
                 <th onClick={() => handleSort('city')}>City</th>
                 <th onClick={() => handleSort('leadStage')}>Stage</th>
@@ -238,7 +243,11 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                       ) : '—'}
                     </td>
                     <td>{seeker.phone || '—'}</td>
-                    <td>{seeker.email || '—'}</td>
+                    <td>
+                      <span style={{ fontSize: '11px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                        {seeker.lastMessageTimestampText || '—'}
+                      </span>
+                    </td>
                     <td><InteractionHistogram data={activityData[seeker.name] || []} /></td>
                     <td><span className="badge" style={{ background: cityStyle.bg, color: cityStyle.text }}>{seeker.city}</span></td>
                     <td><span className="badge" style={{ background: stageStyle.bg, color: stageStyle.text }}>{seeker.leadStage}</span></td>
@@ -293,8 +302,11 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
               }}>{selectedSeeker.leadStage}</span>
             </div>
             <div>
-              <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>First Seen</div>
-              <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{selectedSeeker.firstSeen || '—'}</div>
+              <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>First / Last Msg</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+                <span style={{ color: 'var(--text-muted)' }}>First:</span> {selectedSeeker.firstSeen ? (selectedSeeker.firstSeen.split(' ')[0] || '') : '—'}<br/>
+                <span style={{ color: 'var(--text-muted)' }}>Last:</span> {selectedSeeker.lastMessageTimestampText || '—'}
+              </div>
             </div>
           </div>
 

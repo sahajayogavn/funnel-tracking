@@ -34,7 +34,7 @@ interface GraphData {
 }
 
 interface HoveredNodeDetails {
-  profile?: Record<string, any>;
+  profile?: Record<string, unknown>;
   messages?: { sender: string; content: string; message_timestamp: string }[];
   post?: { post_name: string; post_url: string; created_at: string; last_synced_time: string; is_orphan?: boolean };
   stats?: { total: number; unique_users: number };
@@ -47,6 +47,10 @@ export function NetworkGraph() {
   const [hoveredNodeDetails, setHoveredNodeDetails] = useState<HoveredNodeDetails | null>(null);
   const fgRef = useRef<{ d3Force: (name: string) => { strength: (s: number) => void } | undefined }>(null);
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Double-click manually tracked
+  const clickNodeIdRef = useRef<string | null>(null);
+  const clickTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Fetch detailed data when hovering over a node for more than 400ms
   const fetchNodeDetails = useCallback(async (node: GraphNode) => {
@@ -178,12 +182,27 @@ export function NetworkGraph() {
           linkWidth={1.5}
           onNodeHover={handleNodeHover}
           onNodeClick={(node: GraphNode) => {
-            if (node.type === 'user' && node.dbId) {
-              // Navigate to seeker detail page with clean numeric ID
-              window.location.href = `/seekers/${node.dbId}`;
-            } else if (node.fbUrl) {
-              const url = node.fbUrl.startsWith('http') ? node.fbUrl : `https://facebook.com/${node.fbUrl}`;
-              window.open(url, '_blank');
+            if (clickNodeIdRef.current === node.id && clickTimerRef.current) {
+              // Double click detected
+              clearTimeout(clickTimerRef.current);
+              clickTimerRef.current = null;
+              clickNodeIdRef.current = null;
+              
+              if (node.type === 'user' && node.dbId) {
+                // Navigate to seeker detail page with clean numeric ID
+                window.location.href = `/seekers/${node.dbId}`;
+              } else if (node.fbUrl) {
+                const url = node.fbUrl.startsWith('http') ? node.fbUrl : `https://facebook.com/${node.fbUrl}`;
+                window.open(url, '_blank');
+              }
+            } else {
+              // Single click (start timer)
+              if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+              clickNodeIdRef.current = node.id;
+              clickTimerRef.current = setTimeout(() => {
+                clickTimerRef.current = null;
+                clickNodeIdRef.current = null;
+              }, 300);
             }
           }}
           backgroundColor="#1a1a2e"
@@ -259,7 +278,7 @@ export function NetworkGraph() {
               <div style={{ fontSize: '12px', fontWeight: 600, color: '#e2e8f0', marginBottom: '8px' }}>Chat History</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 {Array.isArray(hoveredNodeDetails.messages) && hoveredNodeDetails.messages.length > 0 ? (
-                  hoveredNodeDetails.messages.map((msg: Record<string, any>, i: number) => {
+                  hoveredNodeDetails.messages.map((msg: { sender: string; content?: string }, i: number) => {
                     const isPage = msg.sender === '1548373332058326';
                     return (
                       <div key={i} style={{
@@ -299,7 +318,7 @@ export function NetworkGraph() {
 
               <div style={{ fontSize: '12px', fontWeight: 600, color: '#e2e8f0', marginBottom: '8px' }}>Recent Comments</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                {Array.isArray(hoveredNodeDetails.comments) && hoveredNodeDetails.comments.slice(0, 10).map((c: Record<string, any>, i: number) => (
+                {Array.isArray(hoveredNodeDetails.comments) && hoveredNodeDetails.comments.slice(0, 10).map((c: { commenter_name: string; comment_text?: string }, i: number) => (
                   <div key={i} style={{ fontSize: '12px', background: 'rgba(255,255,255,0.03)', padding: '6px 8px', borderRadius: '6px' }}>
                     <div style={{ color: '#cbd5e1', fontWeight: 600, marginBottom: '2px' }}>{c.commenter_name}</div>
                     <div style={{ color: 'var(--text-muted)' }}>{c.comment_text}</div>

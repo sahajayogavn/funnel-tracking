@@ -304,6 +304,10 @@ def extract_thread_messages(page) -> list[dict]:
             continue
         if "you can now call each other" in low_text or "giờ đây, các bạn có thể gọi" in low_text:
             continue
+        if "lead stage set to" in low_text or "trạng thái khách hàng được đặt" in low_text: # Lead stage notifications
+            continue
+        if low_text.strip() == "learn more" or low_text.strip() == "tìm hiểu thêm": # Frequently embedded ad CTA button text
+            continue
             
         sender = detect_sender(raw["htmlStr"], raw["bg"])
         final_messages.append({

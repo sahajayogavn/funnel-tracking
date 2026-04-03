@@ -94,26 +94,15 @@ def parse_page_id(input_str: str) -> str:
 
 
 def extract_user_info(messages: list, thread_name: str, ad_context: str = "") -> dict:
-    all_text = " ".join([m.get("content", "") for m in messages]) + " " + ad_context
+    customer_texts = [m.get("content", "") for m in messages if m.get("sender") == "Customer"]
+    all_text = " ".join(customer_texts) + " " + ad_context
 
     phone_match = re.findall(r'(?:0\d{9,10}|\+84\d{9,10})', all_text)
     email_match = re.findall(r'[\w.+-]+@[\w.-]+\.\w+', all_text)
 
-    customer_phone = None
-    customer_email = None
-    for message in messages:
-        if message.get("sender") == "Customer":
-            content = message.get("content", "")
-            phones = re.findall(r'(?:0\d{9,10}|\+84\d{9,10})', content)
-            emails = re.findall(r'[\w.+-]+@[\w.-]+\.\w+', content)
-            if phones and not customer_phone:
-                customer_phone = phones[0]
-            if emails and not customer_email:
-                customer_email = emails[0]
-
     return {
-        "phone": customer_phone or (phone_match[0] if phone_match else None),
-        "email": customer_email or (email_match[0] if email_match else None),
+        "phone": phone_match[0] if phone_match else None,
+        "email": email_match[0] if email_match else None,
     }
 
 

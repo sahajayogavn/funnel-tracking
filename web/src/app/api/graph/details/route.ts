@@ -28,7 +28,7 @@ export async function GET(request: Request) {
         FROM users u
         JOIN threads t ON u.thread_id = t.id
         WHERE u.thread_name = ?
-      `).get(id) as any;
+      `).get(id) as unknown;
 
       if (!userInfo) {
         db.close();
@@ -64,7 +64,7 @@ export async function GET(request: Request) {
       let adContent = null;
       
       if (type === 'ad') {
-        const adInfo = db.prepare(`SELECT post_id, ad_content FROM ad_posts WHERE ad_id = ?`).get(id) as any;
+        const adInfo = db.prepare(`SELECT post_id, ad_content FROM ad_posts WHERE ad_id = ?`).get(id) as unknown;
         if (adInfo) {
           if (adInfo.post_id) {
             postId = adInfo.post_id;
@@ -78,10 +78,10 @@ export async function GET(request: Request) {
         SELECT post_name, post_url, created_at, last_synced_time
         FROM posts
         WHERE id = ?
-      `).get(postId) as any;
+      `).get(postId) as unknown;
 
       // 2. Get comments for this post
-      let comments: any[] = [];
+      let comments: unknown[] = [];
       let commentStats = { total: 0, unique_users: 0 };
       
       if (postInfo) {
@@ -97,7 +97,7 @@ export async function GET(request: Request) {
           SELECT COUNT(id) as total, COUNT(DISTINCT commenter_name) as unique_users
           FROM comments
           WHERE post_id = ? AND commenter_name != ?
-        `).get(postId, PAGE_NAME) as any;
+        `).get(postId, PAGE_NAME) as unknown;
         
         if (statsRow) {
           commentStats = statsRow;
