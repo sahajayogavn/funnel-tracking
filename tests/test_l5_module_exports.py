@@ -42,7 +42,6 @@ MODULE_EXPORTS = {
     'fb_pipeline.comments.l3_pipeline': ['build_post_record', 'enrich_post_record', 'persist_post_record'],
     'fb_pipeline.comments.pipeline': ['build_post_record', 'enrich_post_record', 'persist_post_record'],
     'fb_pipeline.browser.l3_inbox': ['scrape_inbox', 'scrape_inbox_ui', 'extract_ad_id_labels'],
-    'fb_pipeline.browser.inbox': ['scrape_inbox', 'scrape_inbox_ui', 'extract_ad_id_labels'],
     'fb_pipeline.browser.l3_comments': ['scrape_comments', 'scrape_comments_ui'],
     'fb_pipeline.browser.comments': ['scrape_comments', 'scrape_comments_ui'],
     'fb_pipeline.persistence.l4_sqlite_store': ['get_db_connection', 'get_comment_db_connection', 'should_fetch', 'should_fetch_comments'],

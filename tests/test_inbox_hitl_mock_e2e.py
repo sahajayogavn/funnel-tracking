@@ -11,7 +11,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from tools.l5_inbox_mas_runner import process_single_thread
+from tools.l5_inbox_mas_thread import process_single_thread
 from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
 
 # In memory DB fixture
@@ -32,7 +32,7 @@ def mock_db(monkeypatch, tmp_path):
 
 @pytest.fixture
 def mock_tools(monkeypatch):
-    monkeypatch.setattr("tools.l5_inbox_mas_runner.run_adk_pipeline", lambda *args, **kwargs: {
+    monkeypatch.setattr("tools.l5_inbox_mas_thread.run_adk_pipeline", lambda *args, **kwargs: {
         "classification": "question", "reply_text": "Mocked reply"
     })
     monkeypatch.setattr("adk_agents.tools.seeker_tools.lookup_seeker", lambda *args, **kwargs: {"id": "s1", "name": "Test User"})

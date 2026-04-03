@@ -98,6 +98,16 @@ class TestInboxContracts(unittest.TestCase):
                 self.mouse = _Mouse()
                 self.goto_calls = []
                 self.wait_for_timeout_calls = []
+                self.evaluate_calls = []
+                self.url = "https://business.facebook.com/latest/inbox/all?asset_id=1548373332058326"
+
+            def evaluate(self, script, *args, **kwargs):
+                self.evaluate_calls.append(script)
+                if "config.threadSelector" in script: return {"count": 2, "loadingCount": 0, "globalLoadingCount": 0, "hasContainer": True, "fingerprint": "fp-eval"}
+                if "sidebarIdentityKey" in script: return True
+                if "querySelectorAll('.x14vqqas" in script or "results.push({htmlStr" in script: return [{"text": "Hello", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"}]
+                if "document.title" in script or "querySelectorAll('.xzsf02u" in script: return []
+                return "test"
 
             def goto(self, url, wait_until=None, timeout=None):
                 self.goto_calls.append((url, wait_until, timeout))
@@ -122,18 +132,23 @@ class TestInboxContracts(unittest.TestCase):
         def _record_fetch(page_id, total_threads, new_messages, conn):
             record_fetch_calls.append((page_id, total_threads, new_messages))
 
-        with patch("fb_pipeline.browser.l3_inbox._wait_for_inbox_shell", return_value=""), \
-             patch("fb_pipeline.browser.l3_inbox._wait_for_initial_threads", return_value={
+        with patch("fb_pipeline.browser.l3_inbox.wait_for_inbox_shell", return_value=""), \
+             patch("fb_pipeline.browser.l3_inbox.wait_for_initial_threads", return_value={
                  "count": 2, "elapsed_ms": 1500, "fingerprint": "fp-0",
              }), \
-             patch("fb_pipeline.browser.l3_inbox._sidebar_loading_snapshot", return_value={
+             patch("fb_pipeline.browser.l3_inbox.sidebar_loading_snapshot", return_value={
                  "count": 2,
                  "loadingCount": 0,
                  "globalLoadingCount": 0,
                  "hasContainer": True,
                  "fingerprint": "fp-1",
              }), \
-             patch("fb_pipeline.browser.l3_inbox._extract_visible_threads", return_value=[]):
+             patch("fb_pipeline.browser.l3_inbox.extract_visible_threads", side_effect=[
+                 [{"name": "test"}], # for first_glance_threads
+                 [{"name": "test"}], # first round
+                 []                  # second round (to break)
+             ]), \
+             patch("fb_pipeline.browser.l3_inbox.validate_quick_fetch_cache", return_value=False):
             stats = scrape_inbox(
                 page=page,
                 page_id="1548373332058326",
@@ -142,16 +157,15 @@ class TestInboxContracts(unittest.TestCase):
                 conn=self.conn,
                 logger=logger,
                 record_fetch=_record_fetch,
-                extract_ad_id_labels=lambda _page: [],
+                extract_ad_id_labels_arg=lambda _page: [],
                 extract_user_info=extract_user_info,
                 detect_city=detect_city,
             )
 
-        # Initial scroll uses mouse.wheel(0, 600) at sidebar position (200, 400)
-        self.assertEqual(page.mouse.wheels, [(0, 600)])
+        # The script utilizes mouse move and scrollIntoView
         self.assertIn((200, 400), page.mouse.moves)
-        self.assertEqual(record_fetch_calls, [("1548373332058326", 0, 0)])
-        self.assertIn(("info", "Round 1: no thread cards visible."), logger.messages)
+        self.assertTrue(any("scrollIntoView" in script for script in page.evaluate_calls))
+        self.assertEqual(record_fetch_calls, [("1548373332058326", 1, 1)])
 
     # Gate 2: code:test-validation-001:l3-to-l1
     def test_enrich_thread_record_builds_mas_payload(self):
@@ -242,6 +256,7 @@ class TestInboxContracts(unittest.TestCase):
             build_thread_record("page1", {"name": "User A", "text": "User A\nPreview"}),
             [
                 {"sender": "Customer", "text": "Xin chào", "timestamp": "Today"},
+                {"sender": "Page", "text": "Địa chỉ: 40 Vương Thừa Vũ", "timestamp": "Today"},
                 {"sender": "Page", "text": "Lớp tiếp theo vào Chủ Nhật", "timestamp": "Tomorrow"},
             ],
             extract_user_info,

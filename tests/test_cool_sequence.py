@@ -10,7 +10,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 class TestCoolSequence:
     def test_get_next_cool_step_advances_until_exhausted(self):
-        from tools.l5_scheduler import _get_next_cool_step
+        from tools.l5_scheduler_core import _get_next_cool_step
 
         assert _get_next_cool_step({"cool_step": 0}) == 1
         assert _get_next_cool_step({"cool_step": 1}) == 2
@@ -18,14 +18,14 @@ class TestCoolSequence:
         assert _get_next_cool_step({"cool_step": 3}) is None
 
     def test_cool_sequence_templates_match_strategy_playbook(self):
-        from tools.l5_scheduler import COOL_SEQUENCE_TEMPLATES
+        from tools.l5_scheduler_core import COOL_SEQUENCE_TEMPLATES
 
         assert "lâu rồi" in COOL_SEQUENCE_TEMPLATES[1].lower()
         assert "5 phút" in COOL_SEQUENCE_TEMPLATES[2].lower()
         assert "{city}" in COOL_SEQUENCE_TEMPLATES[3]
 
     def test_evaluate_proactive_eligibility_blocks_dormant_warmup(self, monkeypatch):
-        import tools.l5_scheduler as sched
+        import tools.l5_scheduler_core as sched
 
         monkeypatch.setattr(sched, "_load_user_state", lambda thread_id: {
             "thread_id": thread_id,
@@ -44,10 +44,14 @@ class TestCoolSequence:
         assert payload["temperature"] == "dormant"
 
     def test_run_warmup_cycle_blocks_step_two_before_three_day_gap(self, monkeypatch):
-        import tools.l5_scheduler as sched
+        import tools.l5_scheduler_core as sched_core
+        import tools.l5_scheduler_routes as sched_routes
+        import tools.l5_scheduler_adk as sched_adk
 
         decisions = []
         updates = []
+
+        monkeypatch.setattr("tools.l5_fetch_fb_messages.fetch_messages", lambda *a, **k: {"success": True})
 
         monkeypatch.setattr(
             "adk_agents.tools.l5_warmup_tools.find_dormant_seekers",
@@ -69,20 +73,20 @@ class TestCoolSequence:
         monkeypatch.setattr("adk_agents.tools.l5_warmup_tools.select_warmup_strategy", lambda *a, **k: None)
         monkeypatch.setattr("adk_agents.tools.l5_warmup_tools.log_warmup_campaign", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not log campaign")))
         monkeypatch.setattr("tools.l5_inbox_mas_runner.load_knowledge_context", lambda: "KB")
-        monkeypatch.setattr(sched, "_load_user_state", lambda thread_id: {
+        monkeypatch.setattr("tools.l5_scheduler_routes._load_user_state", lambda thread_id: {
             "thread_id": thread_id,
             "cool_step": 1,
             "last_warmup_at": (datetime.now() - timedelta(days=2)).isoformat(),
             "city": "Hà Nội",
         })
-        monkeypatch.setattr(sched, "_evaluate_proactive_eligibility", lambda *a, **k: (True, "eligible", {
+        monkeypatch.setattr("tools.l5_scheduler_routes._evaluate_proactive_eligibility", lambda *a, **k: (True, "eligible", {
             "thread_id": "thread-1",
             "temperature": "cool",
             "lead_stage": "Seeker",
             "last_interaction": (datetime.now() - timedelta(days=8)).isoformat(),
         }))
-        monkeypatch.setattr(sched, "run_adk_warmup_composer", lambda *a, **k: "")
-        monkeypatch.setattr(sched, "_update_user_decision_state", lambda *a, **k: updates.append((a, k)))
+        monkeypatch.setattr("tools.l5_scheduler_routes.run_adk_warmup_composer", lambda *a, **k: "")
+        monkeypatch.setattr("tools.l5_scheduler_routes._update_user_decision_state", lambda *a, **k: updates.append((a, k)))
         monkeypatch.setattr(
             "fb_pipeline.persistence.l4_sqlite_store.log_mas_decision",
             lambda page_id, route, subject_type, subject_id, decision, reason, dry_run=True, payload=None: decisions.append({
@@ -95,7 +99,7 @@ class TestCoolSequence:
             }),
         )
 
-        result = sched.run_warmup_cycle("page-1", dry_run=True, max_seekers=1)
+        result = sched_routes.run_warmup_cycle("page-1", dry_run=True, max_seekers=1)
 
         assert result["status"] == "complete"
         assert result["processed"] == 0
@@ -106,10 +110,14 @@ class TestCoolSequence:
         assert updates == []
 
     def test_run_warmup_cycle_exhausts_after_step_three(self, monkeypatch):
-        import tools.l5_scheduler as sched
+        import tools.l5_scheduler_core as sched_core
+        import tools.l5_scheduler_routes as sched_routes
+        import tools.l5_scheduler_adk as sched_adk
 
         decisions = []
         updates = []
+
+        monkeypatch.setattr("tools.l5_fetch_fb_messages.fetch_messages", lambda *a, **k: {"success": True})
 
         monkeypatch.setattr(
             "adk_agents.tools.l5_warmup_tools.find_dormant_seekers",
@@ -131,20 +139,20 @@ class TestCoolSequence:
         monkeypatch.setattr("adk_agents.tools.l5_warmup_tools.select_warmup_strategy", lambda *a, **k: None)
         monkeypatch.setattr("adk_agents.tools.l5_warmup_tools.log_warmup_campaign", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not log campaign")))
         monkeypatch.setattr("tools.l5_inbox_mas_runner.load_knowledge_context", lambda: "KB")
-        monkeypatch.setattr(sched, "_load_user_state", lambda thread_id: {
+        monkeypatch.setattr("tools.l5_scheduler_routes._load_user_state", lambda thread_id: {
             "thread_id": thread_id,
             "cool_step": 3,
             "last_warmup_at": (datetime.now() - timedelta(days=9)).isoformat(),
             "city": "Đà Nẵng",
         })
-        monkeypatch.setattr(sched, "_evaluate_proactive_eligibility", lambda *a, **k: (True, "eligible", {
+        monkeypatch.setattr("tools.l5_scheduler_routes._evaluate_proactive_eligibility", lambda *a, **k: (True, "eligible", {
             "thread_id": "thread-9",
             "temperature": "cool",
             "lead_stage": "Seeker",
             "last_interaction": (datetime.now() - timedelta(days=20)).isoformat(),
         }))
-        monkeypatch.setattr(sched, "run_adk_warmup_composer", lambda *a, **k: "")
-        monkeypatch.setattr(sched, "_update_user_decision_state", lambda *a, **k: updates.append((a, k)))
+        monkeypatch.setattr("tools.l5_scheduler_routes.run_adk_warmup_composer", lambda *a, **k: "")
+        monkeypatch.setattr("tools.l5_scheduler_routes._update_user_decision_state", lambda *a, **k: updates.append((a, k)))
         monkeypatch.setattr(
             "fb_pipeline.persistence.l4_sqlite_store.log_mas_decision",
             lambda page_id, route, subject_type, subject_id, decision, reason, dry_run=True, payload=None: decisions.append({
@@ -154,7 +162,7 @@ class TestCoolSequence:
             }),
         )
 
-        result = sched.run_warmup_cycle("page-1", dry_run=True, max_seekers=1)
+        result = sched_routes.run_warmup_cycle("page-1", dry_run=True, max_seekers=1)
 
         assert result["processed"] == 0
         assert result["skipped"] == 1

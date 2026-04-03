@@ -38,7 +38,7 @@ DB_PATH = os.path.join(PROJECT_ROOT, "memory", "agent_memory", "frankensqlite.db
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 PAGE_ID = "1548373332058326"
-HUNG_BUI_FB_ID = "100001005716854"
+HUNG_BUI_FB_ID = "f9b35a5530b3a8f2"
 HUNG_BUI_THREAD_ID = f"{PAGE_ID}_{HUNG_BUI_FB_ID}"
 
 SKIP_NO_DB = pytest.mark.skipif(

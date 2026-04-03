@@ -66,7 +66,7 @@ class TestAdkWiring:
         with patch("google.adk.sessions.InMemorySessionService", return_value=session_service), \
              patch("google.adk.runners.Runner", side_effect=runner_factory), \
              patch("google.genai.types", DummyTypes), \
-             patch.object(runner_mod, "load_knowledge_context", return_value="KB BODY"):
+             patch("tools.l5_inbox_mas_pipeline.load_knowledge_context", return_value="KB BODY"):
             result = runner_mod.run_adk_pipeline(
                 thread_messages=[
                     {"sender": "Customer", "content": "Xin chào"},
@@ -84,7 +84,7 @@ class TestAdkWiring:
         assert result["knowledge_context"] == "KB BODY"
 
     def test_route_agents_are_wired_into_scheduler_calls(self, monkeypatch):
-        import tools.l5_scheduler as sched
+        import tools.l5_scheduler_adk as sched
 
         captured = []
 

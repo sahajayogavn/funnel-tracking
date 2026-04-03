@@ -151,8 +151,8 @@ class TestFetchMessagesHeadless(unittest.TestCase):
 
         if js_messages is None:
             js_messages = [
-                {"sender": "Customer", "text": "Lớp học có mất phí không?", "timestamp": "Sat 7:19 PM"},
-                {"sender": "Page", "text": "Dạ hoàn toàn miễn phí ạ", "timestamp": "Sat 7:19 PM"},
+                {"sender": "Customer", "text": "Lớp học có mất phí không?", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Sat 7:19 PM"},
+                {"sender": "Page", "text": "Dạ hoàn toàn miễn phí ạ", "htmlStr": "<div>...</div>", "bg": "rgb(0, 132, 255)", "timestamp": "Sat 7:19 PM"},
             ]
 
         mock_thread_data = [{
@@ -246,8 +246,8 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         """Test the monotonic sequence deduplication suffix-matching algorithm."""
         self._patch_sqlite()
         messages_run_1 = [
-            {"sender": "Customer", "text": "Hello", "timestamp": "1:00 PM"},
-            {"sender": "Page", "text": "Hi", "timestamp": "1:01 PM"},
+            {"sender": "Customer", "text": "Hello", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "1:00 PM"},
+            {"sender": "Page", "text": "Hi", "htmlStr": "<div>...</div>", "bg": "rgb(0, 132, 255)", "timestamp": "1:01 PM"},
         ]
         self._setup_mock_playwright(mock_sync_playwright, mock_exists, js_messages=messages_run_1)
         result1 = fetch_messages("123", "test_cred", force_refresh=True)
@@ -257,9 +257,9 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         # Simulating run 2 where an extra message is loaded from the top (user scrolled higher in DOM?) 
         # Actually our algorithm suffix matches so let's simulate a NEW message arriving at the bottom!
         messages_run_2 = [
-            {"sender": "Customer", "text": "Hello", "timestamp": "1:00 PM"},
-            {"sender": "Page", "text": "Hi", "timestamp": "1:01 PM"},
-            {"sender": "Customer", "text": "Pushed a new message", "timestamp": "1:05 PM"},
+            {"sender": "Customer", "text": "Hello", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "1:00 PM"},
+            {"sender": "Page", "text": "Hi", "htmlStr": "<div>...</div>", "bg": "rgb(0, 132, 255)", "timestamp": "1:01 PM"},
+            {"sender": "Customer", "text": "Pushed a new message", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "1:05 PM"},
         ]
         self._setup_mock_playwright(mock_sync_playwright, mock_exists, thread_text="Test User\nPushed a new message", js_messages=messages_run_2)
         result2 = fetch_messages("123", "test_cred", force_refresh=True)
@@ -284,7 +284,7 @@ class TestFetchMessagesHeadless(unittest.TestCase):
     def test_headless_with_ad_context(self, mock_sync_playwright, mock_exists):
         self._patch_sqlite()
         ad_text = "Thiền miễn phí tại Hà Nội"
-        messages = [{"sender": "Customer", "text": "0912345678", "timestamp": "Sat 7:19 PM"}]
+        messages = [{"sender": "Customer", "text": "0912345678", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Sat 7:19 PM"}]
         _, _, _ = self._setup_mock_playwright(mock_sync_playwright, mock_exists, js_messages=messages, ad_context=ad_text)
         result = fetch_messages("123", "test_cred", force_refresh=True)
         self.assertTrue(result["success"])
@@ -297,8 +297,10 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         _, mock_page, call_count = self._setup_mock_playwright(mock_sync_playwright, mock_exists)
         result = fetch_messages("123", "test_cred", force_refresh=True)
         self.assertTrue(result["success"])
-        sidebar_wheels = [call for call in mock_page.mouse.wheel.call_args_list if call.args == (0, 600)]
-        self.assertGreaterEqual(len(sidebar_wheels), 1)
+        sidebar_moves = [call for call in mock_page.mouse.move.call_args_list if call.args == (200, 400)]
+        self.assertGreaterEqual(len(sidebar_moves), 1)
+        evaluate_calls = [call.args[0] for call in mock_page.evaluate.call_args_list if call.args and isinstance(call.args[0], str)]
+        self.assertTrue(any("scrollIntoView" in script for script in evaluate_calls))
         self.assertGreaterEqual(call_count["sidebar_snapshot"], 2)
         wait_calls = [call.args[0] for call in mock_page.wait_for_timeout.call_args_list if call.args]
         self.assertIn(1000, wait_calls)
