@@ -175,43 +175,43 @@ class TestSetupSchedule:
 
 class TestReactionHeuristic:
     def test_grateful_message_returns_love(self):
-        from tools.l5_scheduler import _select_reaction_heuristic
+        from tools.l5_scheduler_routes import _select_reaction_heuristic
         result = _select_reaction_heuristic({"content": "Cảm ơn bạn rất nhiều!"})
         assert result == "love"
 
     def test_sad_message_returns_care(self):
-        from tools.l5_scheduler import _select_reaction_heuristic
+        from tools.l5_scheduler_routes import _select_reaction_heuristic
         result = _select_reaction_heuristic({"content": "Tôi rất buồn"})
         assert result == "care"
 
     def test_neutral_message_returns_like(self):
-        from tools.l5_scheduler import _select_reaction_heuristic
+        from tools.l5_scheduler_routes import _select_reaction_heuristic
         result = _select_reaction_heuristic({"content": "Xin chào"})
         assert result == "like"
 
     def test_empty_content_returns_like(self):
-        from tools.l5_scheduler import _select_reaction_heuristic
+        from tools.l5_scheduler_routes import _select_reaction_heuristic
         result = _select_reaction_heuristic({"content": None})
         assert result == "like"
 
 
 class TestDecisionCore:
     def test_compute_temperature_respects_manual_unsubscribed_state(self):
-        from tools.l5_scheduler import _compute_temperature
+        from tools.l5_scheduler_core import _compute_temperature
         assert _compute_temperature("Seeker", "2026-03-01T00:00:00", "unsubscribed") == "unsubscribed"
 
     def test_compute_temperature_for_recent_registered_thread(self):
-        from tools.l5_scheduler import _compute_temperature
+        from tools.l5_scheduler_core import _compute_temperature
         recent = datetime.now().isoformat()
         assert _compute_temperature("Seeker_Public_Program", recent, None) == "hot"
 
     def test_compute_temperature_for_old_seeker_thread(self):
-        from tools.l5_scheduler import _compute_temperature
+        from tools.l5_scheduler_core import _compute_temperature
         old = "2026-01-01T00:00:00"
         assert _compute_temperature("Seeker", old, None) == "cold"
 
     def test_evaluate_proactive_eligibility_blocks_pending_reply(self, monkeypatch):
-        import tools.l5_scheduler as sched
+        import tools.l5_scheduler_core as sched
         monkeypatch.setattr(sched, "_load_user_state", lambda thread_id: {
             "thread_id": thread_id,
             "lead_stage": "Seeker",
@@ -228,7 +228,7 @@ class TestDecisionCore:
         assert payload["thread_id"] == "thread_1"
 
     def test_evaluate_proactive_eligibility_blocks_dormant_quarterly_limit(self, monkeypatch):
-        import tools.l5_scheduler as sched
+        import tools.l5_scheduler_core as sched
         monkeypatch.setattr(sched, "_load_user_state", lambda thread_id: {
             "thread_id": thread_id,
             "lead_stage": "Seeker",
@@ -246,7 +246,7 @@ class TestDecisionCore:
 
 class TestRouteCommentUsers:
     def test_load_user_state_reads_comment_users(self, monkeypatch, scheduler_seeded_db):
-        import tools.l5_scheduler as sched
+        import tools.l5_scheduler_core as sched
         get_conn, get_comment_conn = scheduler_seeded_db
 
         monkeypatch.setattr(
@@ -266,7 +266,7 @@ class TestRouteCommentUsers:
         assert state["cool_step"] == 1
 
     def test_update_user_decision_state_updates_comment_users(self, monkeypatch, scheduler_seeded_db):
-        import tools.l5_scheduler as sched
+        import tools.l5_scheduler_core as sched
         get_conn, get_comment_conn = scheduler_seeded_db
 
         monkeypatch.setattr(

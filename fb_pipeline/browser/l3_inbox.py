@@ -59,7 +59,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
     logger.info("Waiting for initial threads to appear...")
     initial_snapshot = wait_for_initial_threads(page, logger, timeout_ms=30000)
 
-    if not force_refresh:
+    if not force_refresh and allow_early_exit:
         first_glance_threads = extract_visible_threads(page)
         is_cache_hit = validate_quick_fetch_cache(first_glance_threads, conn, logger, page_id)
         if is_cache_hit:
@@ -71,7 +71,6 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 "method": "dynamic_cache_hit"
             }
 
-    initial_sidebar = scroll_sidebar_and_wait(page, logger, scroll_round=0, timeout_ms=60000)
     logger.info(f"Starting sidebar scroll-and-process within {time_range}...")
 
     range_map = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "180d": 180, "365d": 365}
@@ -90,12 +89,13 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
     last_new_round = 0
     thread_counter = 0
     consecutive_clean_threads = 0
+    consecutive_old_threads = 0
     stats = {
         "new_threads": 0, "new_messages": 0, "skipped_threads": 0, "threads_seen": 0,
         "threads_processed": 0, "threads_skipped_duplicate": 0, "threads_skipped_cutoff": 0,
         "threads_skipped_click_verify": 0,
-        "sidebar_scrolls": 1 if initial_sidebar.get("count", 0) >= 0 else 0,
-        "sidebar_wait_ms": initial_sidebar.get("elapsed_ms", 0),
+        "sidebar_scrolls": 0,
+        "sidebar_wait_ms": initial_snapshot.get("elapsed_ms", 0),
     }
 
     while scroll_round < 50 and not reached_date_limit:
@@ -128,9 +128,14 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 continue
 
             if is_thread_older_than_range(parsed_time, max_days):
-                reached_date_limit = True
+                consecutive_old_threads += 1
                 stats["threads_skipped_cutoff"] += 1
-                break
+                if consecutive_old_threads >= 4:
+                    reached_date_limit = True
+                    break
+                continue
+            else:
+                consecutive_old_threads = 0
 
             processed_thread_keys.add(thread_key)
             new_in_round += 1

@@ -1,52 +1,282 @@
 {
-  "timestamp": "2026-04-01T17:39:07.117776",
+  "timestamp": "2026-04-03T07:31:52.999651",
   "page_id": "1548373332058326",
   "summary": {
-    "total": 8,
-    "passed": 8,
+    "total": 10,
+    "passed": 10,
     "failed": 0
   },
   "threads": [
     {
-      "thread_name": "Hung Bui",
-      "thread_id": "1548373332058326_f9b35a5530b3a8f2",
+      "thread_name": "Thị Thứ Nguyễn",
+      "thread_id": "1548373332058326_285c1bc5bb18563b",
       "dom_tool": {
-        "thread_name": "Hung Bui",
-        "message_count": 31,
+        "thread_name": "Thị Thứ Nguyễn",
+        "message_count": 39,
         "senders": {
-          "Customer": 31,
-          "Page": 0,
-          "Unknown": 0
+          "Customer": 20,
+          "Page": 18,
+          "Unknown": 1
         },
-        "phone": "01666667975",
-        "email": "duyhunghd6@gmail.com",
-        "city": "Hà Nội",
+        "phone": "0779026129",
+        "email": null,
+        "city": "Đà Nẵng",
         "sample_messages": [
-          "Thân gửi  page Sahaja Yoga Vietnam",
-          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
-          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
+          "Thị Thứ Nguyễn replied to an ad.",
+          "Chào Thị Thứ! Chúng tôi có thể giúp gì cho bạn?",
+          "Gọi ngay để được phục vụ nhanh hơn."
         ]
       },
       "llm_agent": {
-        "thread_name": "Hung Bui",
-        "message_count": 31,
+        "thread_name": "Thị Thứ Nguyễn",
+        "message_count": 39,
         "senders": {
-          "Customer": 31,
-          "Page": 0,
-          "Unknown": 0
+          "Customer": 20,
+          "Page": 18,
+          "Unknown": 1
         },
-        "phone": "01666667975",
-        "email": "duyhunghd6@gmail.com",
-        "city": "Hà Nội",
+        "phone": "0779026129",
+        "email": null,
+        "city": "Đà Nẵng",
         "sample_messages": [
-          "Thân gửi  page Sahaja Yoga Vietnam",
-          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
-          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
+          "Thị Thứ Nguyễn replied to an ad.",
+          "Chào Thị Thứ! Chúng tôi có thể giúp gì cho bạn?",
+          "Gọi ngay để được phục vụ nhanh hơn."
         ]
       },
       "comparison": {
         "thread_name": "PASSED",
-        "message_count": "PASSED (31 vs 31, diff=0)",
+        "message_count": "PASSED (39 vs 39, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Ngọc Loan",
+      "thread_id": "1548373332058326_41dd48ebf95fac4f",
+      "dom_tool": {
+        "thread_name": "Ngọc Loan",
+        "message_count": 35,
+        "senders": {
+          "Customer": 22,
+          "Page": 11,
+          "Unknown": 2
+        },
+        "phone": "0984534419",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Thời gian và địa điểm tổ chức lớp thiền định cụ thể là gì?",
+          "Lớp thiền miễn phí có giới hạn số lượng không?",
+          "Ngọc Loan replied to an ad."
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Ngọc Loan",
+        "message_count": 35,
+        "senders": {
+          "Customer": 22,
+          "Page": 11,
+          "Unknown": 2
+        },
+        "phone": "0984534419",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Thời gian và địa điểm tổ chức lớp thiền định cụ thể là gì?",
+          "Lớp thiền miễn phí có giới hạn số lượng không?",
+          "Ngọc Loan replied to an ad."
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (35 vs 35, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Tran Thi Hoai Thuong",
+      "thread_id": "1548373332058326_8857a64598ad9c76",
+      "dom_tool": {
+        "thread_name": "Tran Thi Hoai Thuong",
+        "message_count": 34,
+        "senders": {
+          "Customer": 12,
+          "Page": 21,
+          "Unknown": 1
+        },
+        "phone": "0935539464",
+        "email": "ni8745@gmail.com",
+        "city": "Đà Nẵng",
+        "sample_messages": [
+          "Quan tâm chương trình nhạc thiền cho trường học",
+          "Chương trình nhạc thiền có tốn phí không?",
+          "Tran Thi Hoai Thuong replied to an ad."
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Tran Thi Hoai Thuong",
+        "message_count": 34,
+        "senders": {
+          "Customer": 12,
+          "Page": 21,
+          "Unknown": 1
+        },
+        "phone": "0935539464",
+        "email": "ni8745@gmail.com",
+        "city": "Đà Nẵng",
+        "sample_messages": [
+          "Quan tâm chương trình nhạc thiền cho trường học",
+          "Chương trình nhạc thiền có tốn phí không?",
+          "Tran Thi Hoai Thuong replied to an ad."
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (34 vs 34, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Chim Cánh Cụt",
+      "thread_id": "1548373332058326_d60e24390e7fe8ac",
+      "dom_tool": {
+        "thread_name": "Chim Cánh Cụt",
+        "message_count": 34,
+        "senders": {
+          "Customer": 22,
+          "Page": 10,
+          "Unknown": 2
+        },
+        "phone": "0969677369",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
+          "Học phí",
+          "Khóa học thiền ở Hà Nội\n Thời gian: 20h-21h30, tối thứ 3 hàng tuần, bắt đầu từ 3"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Chim Cánh Cụt",
+        "message_count": 34,
+        "senders": {
+          "Customer": 22,
+          "Page": 10,
+          "Unknown": 2
+        },
+        "phone": "0969677369",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
+          "Học phí",
+          "Khóa học thiền ở Hà Nội\n Thời gian: 20h-21h30, tối thứ 3 hàng tuần, bắt đầu từ 3"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (34 vs 34, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Nguyet Tung",
+      "thread_id": "1548373332058326_e81b229129e91f04",
+      "dom_tool": {
+        "thread_name": "Nguyet Tung",
+        "message_count": 32,
+        "senders": {
+          "Customer": 20,
+          "Page": 12,
+          "Unknown": 0
+        },
+        "phone": "0915345272",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Có lớp nào cuoiis tuần ko a",
+          "Dạ có lớp cuối tuần đó ạ. Mình gửi thông tin về lớp thiền Sahaja Yoga 4 tuần ạ:\n",
+          "Mình ở tỉnh lẻ nên muốn hỏi lớp cuối tuần T7.Cn vsf online"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Nguyet Tung",
+        "message_count": 32,
+        "senders": {
+          "Customer": 20,
+          "Page": 12,
+          "Unknown": 0
+        },
+        "phone": "0915345272",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Có lớp nào cuoiis tuần ko a",
+          "Dạ có lớp cuối tuần đó ạ. Mình gửi thông tin về lớp thiền Sahaja Yoga 4 tuần ạ:\n",
+          "Mình ở tỉnh lẻ nên muốn hỏi lớp cuối tuần T7.Cn vsf online"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (32 vs 32, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Quân Bùi",
+      "thread_id": "1548373332058326_680d78e9df8b22f6",
+      "dom_tool": {
+        "thread_name": "Quân Bùi",
+        "message_count": 30,
+        "senders": {
+          "Customer": 16,
+          "Page": 14,
+          "Unknown": 0
+        },
+        "phone": "0905630281",
+        "email": null,
+        "city": "TP. Hồ Chí Minh",
+        "sample_messages": [
+          "em chào page ạ",
+          "em được cô Khê giới thiệu chương trình CN tuần này ạ",
+          "cho em hỏi là bên mình còn bao nhiêu slot tham gia ạ"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Quân Bùi",
+        "message_count": 30,
+        "senders": {
+          "Customer": 16,
+          "Page": 14,
+          "Unknown": 0
+        },
+        "phone": "0905630281",
+        "email": null,
+        "city": "TP. Hồ Chí Minh",
+        "sample_messages": [
+          "em chào page ạ",
+          "em được cô Khê giới thiệu chương trình CN tuần này ạ",
+          "cho em hỏi là bên mình còn bao nhiêu slot tham gia ạ"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (30 vs 30, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"
@@ -60,8 +290,8 @@
         "thread_name": "Carolyn Nguyen",
         "message_count": 28,
         "senders": {
-          "Customer": 28,
-          "Page": 0,
+          "Customer": 12,
+          "Page": 16,
           "Unknown": 0
         },
         "phone": "0855074568",
@@ -77,8 +307,8 @@
         "thread_name": "Carolyn Nguyen",
         "message_count": 28,
         "senders": {
-          "Customer": 28,
-          "Page": 0,
+          "Customer": 12,
+          "Page": 16,
           "Unknown": 0
         },
         "phone": "0855074568",
@@ -100,137 +330,45 @@
       "overall": "PASSED"
     },
     {
-      "thread_name": "Anh Tran Viet",
-      "thread_id": "1548373332058326_13730ac0046d8fd8",
+      "thread_name": "Thanh Trà",
+      "thread_id": "1548373332058326_a8919b8f5a3e76d3",
       "dom_tool": {
-        "thread_name": "Anh Tran Viet",
-        "message_count": 13,
+        "thread_name": "Thanh Trà",
+        "message_count": 25,
         "senders": {
-          "Customer": 13,
-          "Page": 0,
-          "Unknown": 0
-        },
-        "phone": "0916468999",
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "--- [AD SOURCE]: Mar 12, 2026, 11:12 AM\nLàm thế nào để đăng ký học?\nLớp học có m",
-          "Lớp học có mất phí không?",
-          "Bạn vui lòng gửi tên và số điện thoại để đăng ký nhé."
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Anh Tran Viet",
-        "message_count": 13,
-        "senders": {
-          "Customer": 13,
-          "Page": 0,
-          "Unknown": 0
-        },
-        "phone": "0916468999",
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "--- [AD SOURCE]: Mar 12, 2026, 11:12 AM\nLàm thế nào để đăng ký học?\nLớp học có m",
-          "Lớp học có mất phí không?",
-          "Bạn vui lòng gửi tên và số điện thoại để đăng ký nhé."
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (13 vs 13, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Le Kim Chi",
-      "thread_id": "1548373332058326_8685e7ec7d0b6a99",
-      "dom_tool": {
-        "thread_name": "Le Kim Chi",
-        "message_count": 11,
-        "senders": {
-          "Customer": 0,
-          "Page": 8,
-          "Unknown": 3
-        },
-        "phone": null,
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
-          "Chào Le! Chúng tôi có thể giúp gì cho bạn?",
-          "Làm thế nào để đăng ký học?"
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Le Kim Chi",
-        "message_count": 11,
-        "senders": {
-          "Customer": 0,
-          "Page": 8,
-          "Unknown": 3
-        },
-        "phone": null,
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
-          "Chào Le! Chúng tôi có thể giúp gì cho bạn?",
-          "Làm thế nào để đăng ký học?"
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (11 vs 11, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Do Thanh Tam",
-      "thread_id": "1548373332058326_dec2d0e1d96900f9",
-      "dom_tool": {
-        "thread_name": "Do Thanh Tam",
-        "message_count": 7,
-        "senders": {
-          "Customer": 5,
-          "Page": 1,
+          "Customer": 9,
+          "Page": 15,
           "Unknown": 1
         },
-        "phone": "0814478038",
+        "phone": "0393084936",
         "email": null,
-        "city": "Hà Nội",
+        "city": "Đà Nẵng",
         "sample_messages": [
-          "--- [AD SOURCE]: Mon 2:44 AM\nDo Thanh Tam đã trả lời về một bài viết. Xem bài vi",
-          "Do Thanh Tam đã trả lời về một bài viết. Xem bài viết",
-          "Có ai chat được bây giờ không?"
+          "--- [AD SOURCE]: Mar 4, 2026, 6:53 PM\nThanh Trà replied to an ad.\nChào Thanh! Ch",
+          "Chào Thanh! Chúng tôi có thể giúp gì cho bạn?",
+          "Chương trình có mất phí không?"
         ]
       },
       "llm_agent": {
-        "thread_name": "Do Thanh Tam",
-        "message_count": 7,
+        "thread_name": "Thanh Trà",
+        "message_count": 25,
         "senders": {
-          "Customer": 5,
-          "Page": 1,
+          "Customer": 9,
+          "Page": 15,
           "Unknown": 1
         },
-        "phone": "0814478038",
+        "phone": "0393084936",
         "email": null,
-        "city": "Hà Nội",
+        "city": "Đà Nẵng",
         "sample_messages": [
-          "--- [AD SOURCE]: Mon 2:44 AM\nDo Thanh Tam đã trả lời về một bài viết. Xem bài vi",
-          "Do Thanh Tam đã trả lời về một bài viết. Xem bài viết",
-          "Có ai chat được bây giờ không?"
+          "--- [AD SOURCE]: Mar 4, 2026, 6:53 PM\nThanh Trà replied to an ad.\nChào Thanh! Ch",
+          "Chào Thanh! Chúng tôi có thể giúp gì cho bạn?",
+          "Chương trình có mất phí không?"
         ]
       },
       "comparison": {
         "thread_name": "PASSED",
-        "message_count": "PASSED (7 vs 7, diff=0)",
+        "message_count": "PASSED (25 vs 25, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"
@@ -238,45 +376,45 @@
       "overall": "PASSED"
     },
     {
-      "thread_name": "Võ Thanh Hương",
-      "thread_id": "1548373332058326_010b40b170b5fbce",
+      "thread_name": "Thanh Trà",
+      "thread_id": "1548373332058326_cc5467f186f85c39",
       "dom_tool": {
-        "thread_name": "Võ Thanh Hương",
-        "message_count": 6,
+        "thread_name": "Thanh Trà",
+        "message_count": 25,
         "senders": {
-          "Customer": 0,
-          "Page": 4,
-          "Unknown": 2
+          "Customer": 9,
+          "Page": 15,
+          "Unknown": 1
         },
-        "phone": null,
+        "phone": "0393084936",
         "email": null,
-        "city": "Hà Nội",
+        "city": "Đà Nẵng",
         "sample_messages": [
-          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
-          "Chào Hương! Chúng tôi có thể giúp gì cho bạn?",
-          "cho mình  xin đăng ký ạ."
+          "--- [AD SOURCE]: Mar 4, 2026, 6:53 PM\nChương trình có mất phí không?\nHoàn toàn m",
+          "Chào Thanh! Chúng tôi có thể giúp gì cho bạn?",
+          "Chương trình có mất phí không?"
         ]
       },
       "llm_agent": {
-        "thread_name": "Võ Thanh Hương",
-        "message_count": 6,
+        "thread_name": "Thanh Trà",
+        "message_count": 25,
         "senders": {
-          "Customer": 0,
-          "Page": 4,
-          "Unknown": 2
+          "Customer": 9,
+          "Page": 15,
+          "Unknown": 1
         },
-        "phone": null,
+        "phone": "0393084936",
         "email": null,
-        "city": "Hà Nội",
+        "city": "Đà Nẵng",
         "sample_messages": [
-          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
-          "Chào Hương! Chúng tôi có thể giúp gì cho bạn?",
-          "cho mình  xin đăng ký ạ."
+          "--- [AD SOURCE]: Mar 4, 2026, 6:53 PM\nChương trình có mất phí không?\nHoàn toàn m",
+          "Chào Thanh! Chúng tôi có thể giúp gì cho bạn?",
+          "Chương trình có mất phí không?"
         ]
       },
       "comparison": {
         "thread_name": "PASSED",
-        "message_count": "PASSED (6 vs 6, diff=0)",
+        "message_count": "PASSED (25 vs 25, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"
@@ -284,91 +422,45 @@
       "overall": "PASSED"
     },
     {
-      "thread_name": "Trọng Đạt",
-      "thread_id": "1548373332058326_72858ce7e9c0d57b",
+      "thread_name": "Hung Bui",
+      "thread_id": "1548373332058326_f9b35a5530b3a8f2",
       "dom_tool": {
-        "thread_name": "Trọng Đạt",
-        "message_count": 6,
+        "thread_name": "Hung Bui",
+        "message_count": 25,
         "senders": {
-          "Customer": 6,
-          "Page": 0,
+          "Customer": 13,
+          "Page": 12,
           "Unknown": 0
         },
-        "phone": null,
-        "email": null,
+        "phone": "01666667975",
+        "email": "duyhunghd6@gmail.com",
         "city": "Hà Nội",
         "sample_messages": [
-          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
-          "Trọng Đạt replied to an ad.",
-          "Chào Đạt! Chúng tôi có thể giúp gì cho bạn?"
+          "Thân gửi  page Sahaja Yoga Vietnam",
+          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
+          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
         ]
       },
       "llm_agent": {
-        "thread_name": "Trọng Đạt",
-        "message_count": 6,
+        "thread_name": "Hung Bui",
+        "message_count": 25,
         "senders": {
-          "Customer": 6,
-          "Page": 0,
+          "Customer": 13,
+          "Page": 12,
           "Unknown": 0
         },
-        "phone": null,
-        "email": null,
+        "phone": "01666667975",
+        "email": "duyhunghd6@gmail.com",
         "city": "Hà Nội",
         "sample_messages": [
-          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
-          "Trọng Đạt replied to an ad.",
-          "Chào Đạt! Chúng tôi có thể giúp gì cho bạn?"
+          "Thân gửi  page Sahaja Yoga Vietnam",
+          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
+          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
         ]
       },
       "comparison": {
         "thread_name": "PASSED",
-        "message_count": "PASSED (6 vs 6, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Hà Thanh",
-      "thread_id": "1548373332058326_f3fb11ca39523c05",
-      "dom_tool": {
-        "thread_name": "Hà Thanh",
-        "message_count": 4,
-        "senders": {
-          "Customer": 0,
-          "Page": 1,
-          "Unknown": 3
-        },
-        "phone": null,
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
-          "Chào Hà! Chúng tôi có thể giúp gì cho bạn?",
-          "Học phí"
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Hà Thanh",
-        "message_count": 4,
-        "senders": {
-          "Customer": 0,
-          "Page": 1,
-          "Unknown": 3
-        },
-        "phone": null,
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "--- [AD SOURCE]: This chat contains a reply to your ad.\n[Hà Nội] Mỗi tối thứ 3, ",
-          "Chào Hà! Chúng tôi có thể giúp gì cho bạn?",
-          "Học phí"
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (4 vs 4, diff=0)",
+        "message_count": "PASSED (25 vs 25, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"

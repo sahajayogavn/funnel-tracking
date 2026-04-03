@@ -292,10 +292,23 @@ def extract_thread_messages(page) -> list[dict]:
 
     final_messages = []
     for raw in raw_messages:
+        text = (raw.get("text") or "").strip()
+        if not text:
+            continue
+            
+        low_text = text.lower()
+        # Filter out Facebook system boundary messages that lack proper bubble styling
+        if "assigned this conversation" in low_text or "đã giao cuộc trò chuyện" in low_text or "đã chỉ định cuộc trò chuyện" in low_text:
+            continue
+        if "resolved this conversation" in low_text or "đã giải quyết cuộc trò chuyện" in low_text:
+            continue
+        if "you can now call each other" in low_text or "giờ đây, các bạn có thể gọi" in low_text:
+            continue
+            
         sender = detect_sender(raw["htmlStr"], raw["bg"])
         final_messages.append({
             "sender": sender,
-            "text": raw["text"],
+            "text": text,
             "timestamp": raw["timestamp"]
         })
 

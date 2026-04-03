@@ -155,7 +155,7 @@ export function SeekerDetailView({ detail }: Props) {
             {messages.map((msg, i) => {
               // Skip ad source messages in the bubble view
               if (msg.content?.includes('[AD SOURCE]')) return null;
-              const isPage = msg.sender === 'Page';
+              const isPage = msg.sender === 'Page' || msg.sender === 'Auto_Page';
 
               // ── Date separator logic ──
               // Parse date from messageTimestamp (formats: "Feb 27, 2026, 6:53 PM", "3/29/25, 9:50 PM", "Jan 22, 2026, 11:36 AM")
@@ -229,7 +229,7 @@ export function SeekerDetailView({ detail }: Props) {
                       border: isPage ? 'none' : '1px solid rgba(255, 255, 255, 0.08)',
                     }}>
                       <div style={{ fontSize: '10px', fontWeight: 700, color: isPage ? '#818cf8' : '#f59e0b', marginBottom: '4px' }}>
-                        {isPage ? 'Page' : seeker.name}
+                        {msg.sender === 'Auto_Page' ? '@Auto_Page' : (isPage ? 'Page' : seeker.name)}
                       </div>
                       <div style={{ fontSize: '13px', color: 'var(--text-primary)', lineHeight: 1.5, wordBreak: 'break-word' }}>
                         {msg.content || '(empty)'}

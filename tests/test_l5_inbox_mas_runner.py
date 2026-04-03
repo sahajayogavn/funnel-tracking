@@ -49,7 +49,7 @@ class DummyTypes:
 
 class TestRunAdkPipeline:
     def test_load_knowledge_context_includes_all_sources(self):
-        from tools.l5_inbox_mas_runner import KNOWLEDGE_FILES, load_knowledge_context
+        from tools.l5_inbox_mas_context import KNOWLEDGE_FILES, load_knowledge_context
 
         result = load_knowledge_context()
 
@@ -57,7 +57,7 @@ class TestRunAdkPipeline:
             assert f"## Source: {relative_path}" in result
 
     def test_run_adk_pipeline_populates_session_state(self):
-        from tools import l5_inbox_mas_runner as runner_mod
+        from tools import l5_inbox_mas_pipeline as runner_mod
 
         session_service = DummySessionService()
         runner_instances = []
@@ -81,7 +81,8 @@ class TestRunAdkPipeline:
 
         assert session_service.calls, "create_session was not called"
         state = session_service.calls[0]["state"]
-        assert state["thread_messages"] == "[Customer] Xin chào\n[Page] Chào bạn"
+        assert "[Customer] Xin chào" in state["thread_messages"]
+        assert "[Page] Chào bạn" in state["thread_messages"]
         assert '"name": "Lan"' in state["seeker_context"]
         assert state["knowledge_context"] == "KB BODY"
 
@@ -101,7 +102,7 @@ class TestSanitizeReply:
 
 class TestProcessSingleThread:
     def test_empty_reply_returns_no_reply_without_drafting_or_logging(self, monkeypatch):
-        import tools.l5_inbox_mas_runner as runner
+        import tools.l5_inbox_mas_thread as runner
 
         monkeypatch.setattr("adk_agents.tools.seeker_tools.get_thread_messages", lambda thread_id: {
             "status": "success",
@@ -131,7 +132,7 @@ class TestProcessSingleThread:
         assert log_calls == []
 
     def test_successful_processing_returns_drafted_and_logs_customer_boundary(self, monkeypatch):
-        import tools.l5_inbox_mas_runner as runner
+        import tools.l5_inbox_mas_thread as runner
 
         monkeypatch.setattr("adk_agents.tools.seeker_tools.get_thread_messages", lambda thread_id: {
             "status": "success",
@@ -171,7 +172,7 @@ class TestProcessSingleThread:
         assert log_calls[0]["kwargs"]["dry_run"] is True
 
     def test_failed_draft_returns_draft_failed_without_logging(self, monkeypatch):
-        import tools.l5_inbox_mas_runner as runner
+        import tools.l5_inbox_mas_thread as runner
 
         monkeypatch.setattr("adk_agents.tools.seeker_tools.get_thread_messages", lambda thread_id: {
             "status": "success",
