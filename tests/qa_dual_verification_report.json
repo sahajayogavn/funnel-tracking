@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-04-03T07:31:52.999651",
+  "timestamp": "2026-04-03T19:47:39.274173",
   "page_id": "1548373332058326",
   "summary": {
     "total": 10,
@@ -12,9 +12,9 @@
       "thread_id": "1548373332058326_285c1bc5bb18563b",
       "dom_tool": {
         "thread_name": "Thị Thứ Nguyễn",
-        "message_count": 39,
+        "message_count": 38,
         "senders": {
-          "Customer": 20,
+          "Customer": 19,
           "Page": 18,
           "Unknown": 1
         },
@@ -29,9 +29,9 @@
       },
       "llm_agent": {
         "thread_name": "Thị Thứ Nguyễn",
-        "message_count": 39,
+        "message_count": 38,
         "senders": {
-          "Customer": 20,
+          "Customer": 19,
           "Page": 18,
           "Unknown": 1
         },
@@ -46,7 +46,7 @@
       },
       "comparison": {
         "thread_name": "PASSED",
-        "message_count": "PASSED (39 vs 39, diff=0)",
+        "message_count": "PASSED (38 vs 38, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"
@@ -58,9 +58,9 @@
       "thread_id": "1548373332058326_41dd48ebf95fac4f",
       "dom_tool": {
         "thread_name": "Ngọc Loan",
-        "message_count": 35,
+        "message_count": 34,
         "senders": {
-          "Customer": 22,
+          "Customer": 21,
           "Page": 11,
           "Unknown": 2
         },
@@ -75,9 +75,9 @@
       },
       "llm_agent": {
         "thread_name": "Ngọc Loan",
-        "message_count": 35,
+        "message_count": 34,
         "senders": {
-          "Customer": 22,
+          "Customer": 21,
           "Page": 11,
           "Unknown": 2
         },
@@ -92,7 +92,7 @@
       },
       "comparison": {
         "thread_name": "PASSED",
-        "message_count": "PASSED (35 vs 35, diff=0)",
+        "message_count": "PASSED (34 vs 34, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"
@@ -104,9 +104,9 @@
       "thread_id": "1548373332058326_8857a64598ad9c76",
       "dom_tool": {
         "thread_name": "Tran Thi Hoai Thuong",
-        "message_count": 34,
+        "message_count": 33,
         "senders": {
-          "Customer": 12,
+          "Customer": 11,
           "Page": 21,
           "Unknown": 1
         },
@@ -121,9 +121,9 @@
       },
       "llm_agent": {
         "thread_name": "Tran Thi Hoai Thuong",
-        "message_count": 34,
+        "message_count": 33,
         "senders": {
-          "Customer": 12,
+          "Customer": 11,
           "Page": 21,
           "Unknown": 1
         },
@@ -138,7 +138,7 @@
       },
       "comparison": {
         "thread_name": "PASSED",
-        "message_count": "PASSED (34 vs 34, diff=0)",
+        "message_count": "PASSED (33 vs 33, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"
@@ -150,9 +150,9 @@
       "thread_id": "1548373332058326_d60e24390e7fe8ac",
       "dom_tool": {
         "thread_name": "Chim Cánh Cụt",
-        "message_count": 34,
+        "message_count": 33,
         "senders": {
-          "Customer": 22,
+          "Customer": 21,
           "Page": 10,
           "Unknown": 2
         },
@@ -167,9 +167,9 @@
       },
       "llm_agent": {
         "thread_name": "Chim Cánh Cụt",
-        "message_count": 34,
+        "message_count": 33,
         "senders": {
-          "Customer": 22,
+          "Customer": 21,
           "Page": 10,
           "Unknown": 2
         },
@@ -184,7 +184,7 @@
       },
       "comparison": {
         "thread_name": "PASSED",
-        "message_count": "PASSED (34 vs 34, diff=0)",
+        "message_count": "PASSED (33 vs 33, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"
@@ -196,9 +196,9 @@
       "thread_id": "1548373332058326_e81b229129e91f04",
       "dom_tool": {
         "thread_name": "Nguyet Tung",
-        "message_count": 32,
+        "message_count": 31,
         "senders": {
-          "Customer": 20,
+          "Customer": 19,
           "Page": 12,
           "Unknown": 0
         },
@@ -213,9 +213,9 @@
       },
       "llm_agent": {
         "thread_name": "Nguyet Tung",
-        "message_count": 32,
+        "message_count": 31,
         "senders": {
-          "Customer": 20,
+          "Customer": 19,
           "Page": 12,
           "Unknown": 0
         },
@@ -230,7 +230,7 @@
       },
       "comparison": {
         "thread_name": "PASSED",
-        "message_count": "PASSED (32 vs 32, diff=0)",
+        "message_count": "PASSED (31 vs 31, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"
@@ -330,86 +330,40 @@
       "overall": "PASSED"
     },
     {
-      "thread_name": "Thanh Trà",
-      "thread_id": "1548373332058326_a8919b8f5a3e76d3",
+      "thread_name": "Khanh Van Quach",
+      "thread_id": "1548373332058326_a2fa3d79ff5c1feb",
       "dom_tool": {
-        "thread_name": "Thanh Trà",
+        "thread_name": "Khanh Van Quach",
         "message_count": 25,
         "senders": {
-          "Customer": 9,
-          "Page": 15,
+          "Customer": 12,
+          "Page": 12,
           "Unknown": 1
         },
-        "phone": "0393084936",
-        "email": null,
-        "city": "Đà Nẵng",
+        "phone": "0902151340",
+        "email": "qkvan@daihocthudo.edu.vn",
+        "city": "Hà Nội",
         "sample_messages": [
-          "--- [AD SOURCE]: Mar 4, 2026, 6:53 PM\nThanh Trà replied to an ad.\nChào Thanh! Ch",
-          "Chào Thanh! Chúng tôi có thể giúp gì cho bạn?",
-          "Chương trình có mất phí không?"
+          "Bắt đầu",
+          "Chào Khanh Van , cảm ơn bạn đã liên hệ nhé. Bọn mình sẽ cố gắng trả lời sớm nhất",
+          "Cho biết Thông tin thời gian để đăng kí nha"
         ]
       },
       "llm_agent": {
-        "thread_name": "Thanh Trà",
+        "thread_name": "Khanh Van Quach",
         "message_count": 25,
         "senders": {
-          "Customer": 9,
-          "Page": 15,
+          "Customer": 12,
+          "Page": 12,
           "Unknown": 1
         },
-        "phone": "0393084936",
-        "email": null,
-        "city": "Đà Nẵng",
+        "phone": "0902151340",
+        "email": "qkvan@daihocthudo.edu.vn",
+        "city": "Hà Nội",
         "sample_messages": [
-          "--- [AD SOURCE]: Mar 4, 2026, 6:53 PM\nThanh Trà replied to an ad.\nChào Thanh! Ch",
-          "Chào Thanh! Chúng tôi có thể giúp gì cho bạn?",
-          "Chương trình có mất phí không?"
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (25 vs 25, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Thanh Trà",
-      "thread_id": "1548373332058326_cc5467f186f85c39",
-      "dom_tool": {
-        "thread_name": "Thanh Trà",
-        "message_count": 25,
-        "senders": {
-          "Customer": 9,
-          "Page": 15,
-          "Unknown": 1
-        },
-        "phone": "0393084936",
-        "email": null,
-        "city": "Đà Nẵng",
-        "sample_messages": [
-          "--- [AD SOURCE]: Mar 4, 2026, 6:53 PM\nChương trình có mất phí không?\nHoàn toàn m",
-          "Chào Thanh! Chúng tôi có thể giúp gì cho bạn?",
-          "Chương trình có mất phí không?"
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Thanh Trà",
-        "message_count": 25,
-        "senders": {
-          "Customer": 9,
-          "Page": 15,
-          "Unknown": 1
-        },
-        "phone": "0393084936",
-        "email": null,
-        "city": "Đà Nẵng",
-        "sample_messages": [
-          "--- [AD SOURCE]: Mar 4, 2026, 6:53 PM\nChương trình có mất phí không?\nHoàn toàn m",
-          "Chào Thanh! Chúng tôi có thể giúp gì cho bạn?",
-          "Chương trình có mất phí không?"
+          "Bắt đầu",
+          "Chào Khanh Van , cảm ơn bạn đã liên hệ nhé. Bọn mình sẽ cố gắng trả lời sớm nhất",
+          "Cho biết Thông tin thời gian để đăng kí nha"
         ]
       },
       "comparison": {
@@ -461,6 +415,52 @@
       "comparison": {
         "thread_name": "PASSED",
         "message_count": "PASSED (25 vs 25, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Nguyen Cuong",
+      "thread_id": "1548373332058326_33f9ad06d109f883",
+      "dom_tool": {
+        "thread_name": "Nguyen Cuong",
+        "message_count": 24,
+        "senders": {
+          "Customer": 11,
+          "Page": 11,
+          "Unknown": 2
+        },
+        "phone": "0982264711",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Nguyen Cuong replied to an ad.",
+          "Chào Nguyen! \nHiện tại Sahaja Yoga đang có khóa học Thiền online qua zoom. Bạn c",
+          "Thông tin khóa học"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Nguyen Cuong",
+        "message_count": 24,
+        "senders": {
+          "Customer": 11,
+          "Page": 11,
+          "Unknown": 2
+        },
+        "phone": "0982264711",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Nguyen Cuong replied to an ad.",
+          "Chào Nguyen! \nHiện tại Sahaja Yoga đang có khóa học Thiền online qua zoom. Bạn c",
+          "Thông tin khóa học"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (24 vs 24, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"
