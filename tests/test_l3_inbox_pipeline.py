@@ -12,16 +12,16 @@ from fb_pipeline.inbox.l3_pipeline import build_thread_record, enrich_thread_rec
 from fb_pipeline.persistence.l4_sqlite_store import setup_database
 from fb_pipeline.browser.inbox.thread_detail_parser import extract_thread_messages
 
-
 class TestThreadDetailParser(unittest.TestCase):
-    def test_extract_thread_messages_ignores_system_buttons(self):
+    def test_extract_thread_messages_ignores_system_buttons_with_zws(self):
         class _Page:
             def evaluate(self, script, *args, **kwargs):
                 return [
                     {"text": "Hello", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
-                    {"text": "Close", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
-                    {"text": "Đóng", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
-                    {"text": "learn more", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
+                    {"text": "Close\u200b", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
+                    {"text": "\u200bĐóng\u200b", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
+                    {"text": "Previous\n[Quoted Reply/Link]: Close\n[Quoted Reply/Link]: Next", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
+                    {"text": "Improve AI response", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
                     {"text": "Real message", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
                 ]
         page = _Page()

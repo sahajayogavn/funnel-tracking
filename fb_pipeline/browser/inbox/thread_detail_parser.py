@@ -242,33 +242,47 @@ def extract_thread_messages(page) -> list[dict]:
                 if (isNested) continue;
                 processedBubbles.add(el);
 
-                let outerWrapper = el.parentElement || el;
-                let rowParent = el.closest ? el.closest('div[role="row"]') : null;
-                let htmlContainer = rowParent || (outerWrapper.parentElement ? outerWrapper.parentElement : outerWrapper);
+                let htmlContainer = el.closest ? (el.closest('.x1y1aw1k') || el.parentElement.parentElement || el) : el;
                 let htmlStr = htmlContainer.outerHTML.substring(0, 800);
                 
                 // --- SENDER DETECTION FIX (Apr 2026) ---
-                // Problem: Facebook frequently rotates its DOM structure, background colors, and themes for the Inbox.
-                // Previously, we relied on verifying if the backgroundColor was "gray" vs "blue" to distinguish Customer vs Page.
-                // However, modern FB gradients use 'background-image' with 'transparent' backgroundColor,
-                // causing the parser to incorrectly classify Page messages as Customer messages.
-                // Solution: Instead of colors, we rely on the flexbox layout mechanism. In Facebook Business Suite,
-                // messages sent by the Page are ALWAYS anchored to the right side of the container. We detect this by traversing
-                // up to 4 parent elements to check for 'flex-end' or 'row-reverse' alignment, which natively handles layout direction.
-                // Facebook applies "linear-gradient" via backgroundImage to Page messages
-                // while Customer messages only use flat "backgroundColor".
-                // Since everything is left-aligned in Business Suite UI, 
-                // tracking the image gradient provides a flawless structural marker.
+                // Problem: Facebook rotates its DOM structure, which broke background detection and container boundary resolution.
+                // When `role="row"` enveloped the whole chat, all messages shared `htmlStr` and sender detection failed.
+                // Solution: Find the explicit colored bubble by checking children, mitigating the empty background bleed.
+                let bgNode = el;
+                let bg = 'rgba(0, 0, 0, 0)';
+                let bgImg = 'none';
                 
-                let targetNode = el.querySelector('div[dir="auto"]') || el.querySelector('.x1y1aw1k') || el;
-                let bgNode = targetNode;
-                let bg = window.getComputedStyle(bgNode).backgroundColor;
-                let bgImg = window.getComputedStyle(bgNode).backgroundImage;
-                while ((bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') && (bgImg === 'none' || !bgImg) && bgNode && bgNode !== document.body) {
-                    bgNode = bgNode.parentElement;
+                let children = el.querySelectorAll('*');
+                for (let child of children) {
+                    let childBg = window.getComputedStyle(child).backgroundColor;
+                    let childBgImg = window.getComputedStyle(child).backgroundImage;
+                    if ((childBg && childBg !== 'rgba(0, 0, 0, 0)' && childBg !== 'transparent') || 
+                        (childBgImg && childBgImg !== 'none')) {
+                        bgNode = child;
+                        bg = childBg;
+                        bgImg = childBgImg;
+                        break;
+                    }
+                }
+                
+                // Upward fallback if transparent
+                if (bg === 'rgba(0, 0, 0, 0)' && bgImg === 'none') {
+                    let tempNode = el.querySelector('div[dir="auto"]') || el.querySelector('.x1y1aw1k') || el;
+                    bgNode = tempNode;
                     bg = window.getComputedStyle(bgNode).backgroundColor;
                     bgImg = window.getComputedStyle(bgNode).backgroundImage;
+                    let maxDepth = 6;
+                    let depth = 0;
+                    while ((bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') && (bgImg === 'none' || !bgImg) && bgNode && bgNode !== document.body && depth < maxDepth) {
+                        bgNode = bgNode.parentElement;
+                        if (!bgNode) break;
+                        bg = window.getComputedStyle(bgNode).backgroundColor;
+                        bgImg = window.getComputedStyle(bgNode).backgroundImage;
+                        depth++;
+                    }
                 }
+
                 if (bgImg && bgImg !== 'none') {
                     htmlStr += " HAS_BG_IMAGE_INDICATOR_XX";
                 }
@@ -313,7 +327,7 @@ def extract_thread_messages(page) -> list[dict]:
 
     final_messages = []
     for raw in raw_messages:
-        text = (raw.get("text") or "").strip()
+        text = (raw.get("text") or "").replace('\u200b', '').strip()
         if not text:
             continue
             
@@ -329,8 +343,11 @@ def extract_thread_messages(page) -> list[dict]:
             continue
         if low_text.strip() == "learn more" or low_text.strip() == "tìm hiểu thêm": # Frequently embedded ad CTA button text
             continue
-        if low_text.strip() == "close" or low_text.strip() == "đóng": # System/UI buttons
+        if low_text.strip() in ("close", "đóng", "previous", "next", "trước", "tiếp", "improve ai response"): # System/UI buttons
             continue
+        if "previous\n[quoted reply/link]: close\n[quoted reply/link]: next" in low_text:
+            continue
+
         sender = detect_sender(raw["htmlStr"], raw["bg"])
         print(f"DEBUG_COLOR_VAL text='{low_text[:20]}' bg='{raw['bg']}' sender='{sender}'", flush=True)
         final_messages.append({
