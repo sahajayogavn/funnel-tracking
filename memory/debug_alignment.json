@@ -1,0 +1,352 @@
+[
+  {
+    "text": "Chào bạn",
+    "parents": [
+      {
+        "tag": "DIV",
+        "className": "x1y1aw1k xwib8y2 xf7dkkf xv54qhq",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 xdt5ytf x1iyjqo2 x1n2onr6",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x2atdfe xb57i2i x1q594ok x5lxg6s x78zum5 xdt5ytf x1n2onr6 x1ja2u2z xw2csxc x1odjw0f xh8yej3 x5yr21d",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 x2lwn1j xeuugli x1iyjqo2 xs83m0k xh8yej3",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      }
+    ],
+    "ariaRow": null
+  },
+  {
+    "text": "Chào bạn",
+    "parents": [
+      {
+        "tag": "DIV",
+        "className": "x1y1aw1k xwib8y2 xf7dkkf xv54qhq",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 xdt5ytf x1iyjqo2 x1n2onr6",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x2atdfe xb57i2i x1q594ok x5lxg6s x78zum5 xdt5ytf x1n2onr6 x1ja2u2z xw2csxc x1odjw0f xh8yej3 x5yr21d",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 x2lwn1j xeuugli x1iyjqo2 xs83m0k xh8yej3",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      }
+    ],
+    "ariaRow": null
+  },
+  {
+    "text": "Làm sao để đăng ký thiền",
+    "parents": [
+      {
+        "tag": "DIV",
+        "className": "x1y1aw1k xwib8y2 xf7dkkf xv54qhq",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 xdt5ytf x1iyjqo2 x1n2onr6",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x2atdfe xb57i2i x1q594ok x5lxg6s x78zum5 xdt5ytf x1n2onr6 x1ja2u2z xw2csxc x1odjw0f xh8yej3 x5yr21d",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 x2lwn1j xeuugli x1iyjqo2 xs83m0k xh8yej3",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      }
+    ],
+    "ariaRow": null
+  },
+  {
+    "text": "Chào bạn, hãy giúp tôi",
+    "parents": [
+      {
+        "tag": "DIV",
+        "className": "x1y1aw1k xwib8y2 xf7dkkf xv54qhq",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 xdt5ytf x1iyjqo2 x1n2onr6",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x2atdfe xb57i2i x1q594ok x5lxg6s x78zum5 xdt5ytf x1n2onr6 x1ja2u2z xw2csxc x1odjw0f xh8yej3 x5yr21d",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 x2lwn1j xeuugli x1iyjqo2 xs83m0k xh8yej3",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      }
+    ],
+    "ariaRow": null
+  },
+  {
+    "text": "Dạ anh ở tp nào a",
+    "parents": [
+      {
+        "tag": "DIV",
+        "className": "x1y1aw1k xwib8y2 xf7dkkf xv54qhq",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 xdt5ytf x1iyjqo2 x1n2onr6",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x2atdfe xb57i2i x1q594ok x5lxg6s x78zum5 xdt5ytf x1n2onr6 x1ja2u2z xw2csxc x1odjw0f xh8yej3 x5yr21d",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 x2lwn1j xeuugli x1iyjqo2 xs83m0k xh8yej3",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      }
+    ],
+    "ariaRow": null
+  },
+  {
+    "text": "Tôi ở Nghệ An\nhãy cho AI trả l",
+    "parents": [
+      {
+        "tag": "DIV",
+        "className": "x1y1aw1k xwib8y2 xf7dkkf xv54qhq",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 xdt5ytf x1iyjqo2 x1n2onr6",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x2atdfe xb57i2i x1q594ok x5lxg6s x78zum5 xdt5ytf x1n2onr6 x1ja2u2z xw2csxc x1odjw0f xh8yej3 x5yr21d",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 x2lwn1j xeuugli x1iyjqo2 xs83m0k xh8yej3",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      }
+    ],
+    "ariaRow": null
+  },
+  {
+    "text": "Sent by Hung Bui",
+    "parents": [
+      {
+        "tag": "DIV",
+        "className": "x1y1aw1k xwib8y2 xf7dkkf xv54qhq",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 xdt5ytf x1iyjqo2 x1n2onr6",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x2atdfe xb57i2i x1q594ok x5lxg6s x78zum5 xdt5ytf x1n2onr6 x1ja2u2z xw2csxc x1odjw0f xh8yej3 x5yr21d",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "column",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      },
+      {
+        "tag": "DIV",
+        "className": "x78zum5 x2lwn1j xeuugli x1iyjqo2 xs83m0k xh8yej3",
+        "justify": "normal",
+        "alignSelf": "auto",
+        "flexDir": "row",
+        "alignItems": "normal",
+        "margin": "0px",
+        "marginLeft": "0px",
+        "marginRight": "0px"
+      }
+    ],
+    "ariaRow": null
+  }
+]

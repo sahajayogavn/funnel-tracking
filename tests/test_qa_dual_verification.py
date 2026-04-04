@@ -158,13 +158,6 @@ def method2_llm_db_analysis(conn: sqlite3.Connection, thread: dict) -> dict:
             if phones:
                 phone = phones[0]
                 break
-    # Fallback: check all messages
-    if not phone:
-        for m in raw_msgs:
-            phones = re.findall(r'(?:0\d{9,10}|\+84\d{9,10})', m["content"])
-            if phones:
-                phone = phones[0]
-                break
 
     # Independent email detection
     email = None

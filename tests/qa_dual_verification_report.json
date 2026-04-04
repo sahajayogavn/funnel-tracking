@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-04-03T19:47:39.274173",
+  "timestamp": "2026-04-04T22:07:35.720248",
   "page_id": "1548373332058326",
   "summary": {
     "total": 10,
@@ -7,6 +7,190 @@
     "failed": 0
   },
   "threads": [
+    {
+      "thread_name": "Blink Min",
+      "thread_id": "1548373332058326_45b0f8ad283763f4",
+      "dom_tool": {
+        "thread_name": "Blink Min",
+        "message_count": 188,
+        "senders": {
+          "Customer": 129,
+          "Page": 59,
+          "Unknown": 0
+        },
+        "phone": "0814478038",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Chào bạn, ngoài việc giúp giảm stress và cải thiện giấc ngủ, thiền Sahaja Yoga c",
+          "Tự nhận thức là như thế nào ạ",
+          "Câu hỏi của bạn rất hay, mình sẽ chuyển cho một anh/chị có kinh nghiệm trong CLB"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Blink Min",
+        "message_count": 188,
+        "senders": {
+          "Customer": 129,
+          "Page": 59,
+          "Unknown": 0
+        },
+        "phone": "0814478038",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Chào bạn, ngoài việc giúp giảm stress và cải thiện giấc ngủ, thiền Sahaja Yoga c",
+          "Tự nhận thức là như thế nào ạ",
+          "Câu hỏi của bạn rất hay, mình sẽ chuyển cho một anh/chị có kinh nghiệm trong CLB"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (188 vs 188, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Carolyn Nguyen",
+      "thread_id": "1548373332058326_94707a030ca99282",
+      "dom_tool": {
+        "thread_name": "Carolyn Nguyen",
+        "message_count": 56,
+        "senders": {
+          "Customer": 12,
+          "Page": 44,
+          "Unknown": 0
+        },
+        "phone": "0855074568",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "em muốn tham khảo lớp thiền ạ",
+          "bạn ở đâu nhỉ ?",
+          "E ở Hà Nội ạ"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Carolyn Nguyen",
+        "message_count": 56,
+        "senders": {
+          "Customer": 12,
+          "Page": 44,
+          "Unknown": 0
+        },
+        "phone": "0855074568",
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "em muốn tham khảo lớp thiền ạ",
+          "bạn ở đâu nhỉ ?",
+          "E ở Hà Nội ạ"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (56 vs 56, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "PureEye Art",
+      "thread_id": "1548373332058326_ba82b550f0969c4a",
+      "dom_tool": {
+        "thread_name": "PureEye Art",
+        "message_count": 51,
+        "senders": {
+          "Customer": 24,
+          "Page": 27,
+          "Unknown": 0
+        },
+        "phone": null,
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Mời bạn ghé lớp vào sáng Chủ nhật hàng tuần nhé",
+          "Dạ sao lớp miễn phí thế",
+          "Chào bạn, câu hỏi của bạn rất hay ạ. ❤️ Sahaja Yoga Việt Nam hoạt động hoàn toàn"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "PureEye Art",
+        "message_count": 51,
+        "senders": {
+          "Customer": 24,
+          "Page": 27,
+          "Unknown": 0
+        },
+        "phone": null,
+        "email": null,
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Mời bạn ghé lớp vào sáng Chủ nhật hàng tuần nhé",
+          "Dạ sao lớp miễn phí thế",
+          "Chào bạn, câu hỏi của bạn rất hay ạ. ❤️ Sahaja Yoga Việt Nam hoạt động hoàn toàn"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (51 vs 51, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Hung Bui",
+      "thread_id": "1548373332058326_f9b35a5530b3a8f2",
+      "dom_tool": {
+        "thread_name": "Hung Bui",
+        "message_count": 50,
+        "senders": {
+          "Customer": 13,
+          "Page": 37,
+          "Unknown": 0
+        },
+        "phone": "01666667975",
+        "email": "duyhunghd6@gmail.com",
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Thân gửi  page Sahaja Yoga Vietnam",
+          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
+          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Hung Bui",
+        "message_count": 50,
+        "senders": {
+          "Customer": 13,
+          "Page": 37,
+          "Unknown": 0
+        },
+        "phone": "01666667975",
+        "email": "duyhunghd6@gmail.com",
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Thân gửi  page Sahaja Yoga Vietnam",
+          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
+          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (50 vs 50, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
     {
       "thread_name": "Thị Thứ Nguyễn",
       "thread_id": "1548373332058326_285c1bc5bb18563b",
@@ -42,6 +226,52 @@
           "Thị Thứ Nguyễn replied to an ad.",
           "Chào Thị Thứ! Chúng tôi có thể giúp gì cho bạn?",
           "Gọi ngay để được phục vụ nhanh hơn."
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (38 vs 38, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Đặng Văn Nam",
+      "thread_id": "1548373332058326_bbc721f17f76e41a",
+      "dom_tool": {
+        "thread_name": "Đặng Văn Nam",
+        "message_count": 38,
+        "senders": {
+          "Customer": 21,
+          "Page": 17,
+          "Unknown": 0
+        },
+        "phone": null,
+        "email": null,
+        "city": "Nghệ An",
+        "sample_messages": [
+          "Chào bạn",
+          "Chào bạn",
+          "Làm sao để đăng ký thiền"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Đặng Văn Nam",
+        "message_count": 38,
+        "senders": {
+          "Customer": 21,
+          "Page": 17,
+          "Unknown": 0
+        },
+        "phone": null,
+        "email": null,
+        "city": "Nghệ An",
+        "sample_messages": [
+          "Chào bạn",
+          "Chào bạn",
+          "Làm sao để đăng ký thiền"
         ]
       },
       "comparison": {
@@ -231,236 +461,6 @@
       "comparison": {
         "thread_name": "PASSED",
         "message_count": "PASSED (31 vs 31, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Quân Bùi",
-      "thread_id": "1548373332058326_680d78e9df8b22f6",
-      "dom_tool": {
-        "thread_name": "Quân Bùi",
-        "message_count": 30,
-        "senders": {
-          "Customer": 16,
-          "Page": 14,
-          "Unknown": 0
-        },
-        "phone": "0905630281",
-        "email": null,
-        "city": "TP. Hồ Chí Minh",
-        "sample_messages": [
-          "em chào page ạ",
-          "em được cô Khê giới thiệu chương trình CN tuần này ạ",
-          "cho em hỏi là bên mình còn bao nhiêu slot tham gia ạ"
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Quân Bùi",
-        "message_count": 30,
-        "senders": {
-          "Customer": 16,
-          "Page": 14,
-          "Unknown": 0
-        },
-        "phone": "0905630281",
-        "email": null,
-        "city": "TP. Hồ Chí Minh",
-        "sample_messages": [
-          "em chào page ạ",
-          "em được cô Khê giới thiệu chương trình CN tuần này ạ",
-          "cho em hỏi là bên mình còn bao nhiêu slot tham gia ạ"
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (30 vs 30, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Carolyn Nguyen",
-      "thread_id": "1548373332058326_94707a030ca99282",
-      "dom_tool": {
-        "thread_name": "Carolyn Nguyen",
-        "message_count": 28,
-        "senders": {
-          "Customer": 12,
-          "Page": 16,
-          "Unknown": 0
-        },
-        "phone": "0855074568",
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "em muốn tham khảo lớp thiền ạ",
-          "bạn ở đâu nhỉ ?",
-          "E ở Hà Nội ạ"
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Carolyn Nguyen",
-        "message_count": 28,
-        "senders": {
-          "Customer": 12,
-          "Page": 16,
-          "Unknown": 0
-        },
-        "phone": "0855074568",
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "em muốn tham khảo lớp thiền ạ",
-          "bạn ở đâu nhỉ ?",
-          "E ở Hà Nội ạ"
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (28 vs 28, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Khanh Van Quach",
-      "thread_id": "1548373332058326_a2fa3d79ff5c1feb",
-      "dom_tool": {
-        "thread_name": "Khanh Van Quach",
-        "message_count": 25,
-        "senders": {
-          "Customer": 12,
-          "Page": 12,
-          "Unknown": 1
-        },
-        "phone": "0902151340",
-        "email": "qkvan@daihocthudo.edu.vn",
-        "city": "Hà Nội",
-        "sample_messages": [
-          "Bắt đầu",
-          "Chào Khanh Van , cảm ơn bạn đã liên hệ nhé. Bọn mình sẽ cố gắng trả lời sớm nhất",
-          "Cho biết Thông tin thời gian để đăng kí nha"
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Khanh Van Quach",
-        "message_count": 25,
-        "senders": {
-          "Customer": 12,
-          "Page": 12,
-          "Unknown": 1
-        },
-        "phone": "0902151340",
-        "email": "qkvan@daihocthudo.edu.vn",
-        "city": "Hà Nội",
-        "sample_messages": [
-          "Bắt đầu",
-          "Chào Khanh Van , cảm ơn bạn đã liên hệ nhé. Bọn mình sẽ cố gắng trả lời sớm nhất",
-          "Cho biết Thông tin thời gian để đăng kí nha"
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (25 vs 25, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Hung Bui",
-      "thread_id": "1548373332058326_f9b35a5530b3a8f2",
-      "dom_tool": {
-        "thread_name": "Hung Bui",
-        "message_count": 25,
-        "senders": {
-          "Customer": 13,
-          "Page": 12,
-          "Unknown": 0
-        },
-        "phone": "01666667975",
-        "email": "duyhunghd6@gmail.com",
-        "city": "Hà Nội",
-        "sample_messages": [
-          "Thân gửi  page Sahaja Yoga Vietnam",
-          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
-          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Hung Bui",
-        "message_count": 25,
-        "senders": {
-          "Customer": 13,
-          "Page": 12,
-          "Unknown": 0
-        },
-        "phone": "01666667975",
-        "email": "duyhunghd6@gmail.com",
-        "city": "Hà Nội",
-        "sample_messages": [
-          "Thân gửi  page Sahaja Yoga Vietnam",
-          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
-          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (25 vs 25, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Nguyen Cuong",
-      "thread_id": "1548373332058326_33f9ad06d109f883",
-      "dom_tool": {
-        "thread_name": "Nguyen Cuong",
-        "message_count": 24,
-        "senders": {
-          "Customer": 11,
-          "Page": 11,
-          "Unknown": 2
-        },
-        "phone": "0982264711",
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "Nguyen Cuong replied to an ad.",
-          "Chào Nguyen! \nHiện tại Sahaja Yoga đang có khóa học Thiền online qua zoom. Bạn c",
-          "Thông tin khóa học"
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Nguyen Cuong",
-        "message_count": 24,
-        "senders": {
-          "Customer": 11,
-          "Page": 11,
-          "Unknown": 2
-        },
-        "phone": "0982264711",
-        "email": null,
-        "city": "Hà Nội",
-        "sample_messages": [
-          "Nguyen Cuong replied to an ad.",
-          "Chào Nguyen! \nHiện tại Sahaja Yoga đang có khóa học Thiền online qua zoom. Bạn c",
-          "Thông tin khóa học"
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (24 vs 24, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"

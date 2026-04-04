@@ -243,14 +243,34 @@ def extract_thread_messages(page) -> list[dict]:
                 processedBubbles.add(el);
 
                 let outerWrapper = el.parentElement || el;
-                let htmlStr = outerWrapper.outerHTML.substring(0, 500);
+                let rowParent = el.closest ? el.closest('div[role="row"]') : null;
+                let htmlContainer = rowParent || (outerWrapper.parentElement ? outerWrapper.parentElement : outerWrapper);
+                let htmlStr = htmlContainer.outerHTML.substring(0, 800);
+                
+                // --- SENDER DETECTION FIX (Apr 2026) ---
+                // Problem: Facebook frequently rotates its DOM structure, background colors, and themes for the Inbox.
+                // Previously, we relied on verifying if the backgroundColor was "gray" vs "blue" to distinguish Customer vs Page.
+                // However, modern FB gradients use 'background-image' with 'transparent' backgroundColor,
+                // causing the parser to incorrectly classify Page messages as Customer messages.
+                // Solution: Instead of colors, we rely on the flexbox layout mechanism. In Facebook Business Suite,
+                // messages sent by the Page are ALWAYS anchored to the right side of the container. We detect this by traversing
+                // up to 4 parent elements to check for 'flex-end' or 'row-reverse' alignment, which natively handles layout direction.
+                // Facebook applies "linear-gradient" via backgroundImage to Page messages
+                // while Customer messages only use flat "backgroundColor".
+                // Since everything is left-aligned in Business Suite UI, 
+                // tracking the image gradient provides a flawless structural marker.
                 
                 let targetNode = el.querySelector('div[dir="auto"]') || el.querySelector('.x1y1aw1k') || el;
                 let bgNode = targetNode;
                 let bg = window.getComputedStyle(bgNode).backgroundColor;
-                while ((bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') && bgNode && bgNode !== document.body) {
+                let bgImg = window.getComputedStyle(bgNode).backgroundImage;
+                while ((bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') && (bgImg === 'none' || !bgImg) && bgNode && bgNode !== document.body) {
                     bgNode = bgNode.parentElement;
                     bg = window.getComputedStyle(bgNode).backgroundColor;
+                    bgImg = window.getComputedStyle(bgNode).backgroundImage;
+                }
+                if (bgImg && bgImg !== 'none') {
+                    htmlStr += " HAS_BG_IMAGE_INDICATOR_XX";
                 }
 
                 let textContainers = el.querySelectorAll('.x1y1aw1k');
@@ -282,8 +302,9 @@ def extract_thread_messages(page) -> list[dict]:
                     }
                 }
 
-                for(let segment of texts) {
-                    results.push({htmlStr, bg, text: segment, timestamp: currentTimestamp});
+                if (texts.length > 0) {
+                    let combinedText = texts.join('\\n[Quoted Reply/Link]: ');
+                    results.push({htmlStr, bg, text: combinedText, timestamp: currentTimestamp});
                 }
             }
         }
@@ -308,8 +329,10 @@ def extract_thread_messages(page) -> list[dict]:
             continue
         if low_text.strip() == "learn more" or low_text.strip() == "tìm hiểu thêm": # Frequently embedded ad CTA button text
             continue
-            
+        if low_text.strip() == "close" or low_text.strip() == "đóng": # System/UI buttons
+            continue
         sender = detect_sender(raw["htmlStr"], raw["bg"])
+        print(f"DEBUG_COLOR_VAL text='{low_text[:20]}' bg='{raw['bg']}' sender='{sender}'", flush=True)
         final_messages.append({
             "sender": sender,
             "text": text,

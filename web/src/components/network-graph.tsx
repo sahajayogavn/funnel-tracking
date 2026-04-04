@@ -39,6 +39,7 @@ interface HoveredNodeDetails {
   post?: { post_name: string; post_url: string; created_at: string; last_synced_time: string; is_orphan?: boolean };
   stats?: { total: number; unique_users: number };
   comments?: { commenter_name: string; comment_text: string; comment_timestamp: string; is_reply: number }[];
+  error?: string;
 }
 
 export function NetworkGraph() {
@@ -69,11 +70,16 @@ export function NetworkGraph() {
       if (node.type === 'city' || node.type === 'page') return;
 
       const res = await fetch(`/api/graph/details?id=${encodeURIComponent(idParam)}&type=${typeParam}`);
-      if (!res.ok) throw new Error('Failed to fetch details');
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => null);
+        setHoveredNodeDetails({ error: errorData?.error || 'Details not found' });
+        return;
+      }
       const data = await res.json();
       setHoveredNodeDetails(data);
     } catch (err) {
-      console.error(err);
+      console.error('Failed to fetch node details:', err);
+      setHoveredNodeDetails({ error: 'Failed to connect to server' });
     }
   }, []);
 
@@ -269,6 +275,13 @@ export function NetworkGraph() {
           {!hoveredNodeDetails && (hoveredNode.type === 'user' || hoveredNode.type === 'ad' || hoveredNode.type === 'post') && (
             <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontStyle: 'italic', marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '12px' }}>
               Hover to load history...
+            </div>
+          )}
+
+          {/* ERROR STATE */}
+          {hoveredNodeDetails?.error && (
+            <div style={{ fontSize: '11px', color: '#ef4444', fontStyle: 'italic', marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '12px' }}>
+              ⚠️ {hoveredNodeDetails.error}
             </div>
           )}
 

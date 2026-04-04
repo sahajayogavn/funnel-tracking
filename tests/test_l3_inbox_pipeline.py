@@ -10,7 +10,25 @@ from fb_pipeline.contracts.l1_inbox import detect_city, extract_user_info
 from fb_pipeline.browser.l3_inbox import _parse_sidebar_time_token, _sidebar_loading_count, scrape_inbox
 from fb_pipeline.inbox.l3_pipeline import build_thread_record, enrich_thread_record, persist_thread_record
 from fb_pipeline.persistence.l4_sqlite_store import setup_database
+from fb_pipeline.browser.inbox.thread_detail_parser import extract_thread_messages
 
+
+class TestThreadDetailParser(unittest.TestCase):
+    def test_extract_thread_messages_ignores_system_buttons(self):
+        class _Page:
+            def evaluate(self, script, *args, **kwargs):
+                return [
+                    {"text": "Hello", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
+                    {"text": "Close", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
+                    {"text": "Đóng", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
+                    {"text": "learn more", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
+                    {"text": "Real message", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
+                ]
+        page = _Page()
+        messages = extract_thread_messages(page)
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0]["text"], "Hello")
+        self.assertEqual(messages[1]["text"], "Real message")
 
 class TestInboxContracts(unittest.TestCase):
     def setUp(self):

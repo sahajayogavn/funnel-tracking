@@ -128,6 +128,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 continue
 
             if is_thread_older_than_range(parsed_time, max_days):
+                logger.info(f"Thread '{name}' is older than cutoff ({max_days} days). Parsed time: {parsed_time}")
                 consecutive_old_threads += 1
                 stats["threads_skipped_cutoff"] += 1
                 if consecutive_old_threads >= 4:
@@ -313,6 +314,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
         if thread_counter >= max_threads:
             break
 
+        logger.info(f"Completed processing {thread_counter} threads before sidebar scroll round {scroll_round}.")
         scroll_result = scroll_sidebar_and_wait(page, logger, scroll_round=scroll_round, timeout_ms=60000)
         stats["sidebar_scrolls"] += 1
         stats["sidebar_wait_ms"] += scroll_result.get("elapsed_ms", 0)
