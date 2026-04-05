@@ -315,7 +315,9 @@ L2 CDP9222 / browser handle
 
 1. Operator runs a stable command such as `tools/fetch_fb_messages.py` or the canonical wrapper `tools/l5_fetch_fb_messages.py`
 2. Wrapper parses input and opens an authorized browser via `fb_pipeline.session.l2_bootstrap.attach_to_authorized_session(...)`
-3. `fb_pipeline.browser.l3_inbox.scrape_inbox_ui(...)` scrolls the inbox and captures visible thread/message payloads
+3. `fb_pipeline.browser.l3_inbox.scrape_inbox_ui(...)` executes a resilient Two-Stage Fetching Strategy:
+   - **Stage 1 (Discovery)**: Temporarily disables message extraction to iteratively scroll the inbox sidebar backward in time, accumulating a list of target threads strictly bounded by `timerange` and `maxThreads`.
+   - **Stage 2 (Extraction)**: Resets the viewport to the top and sequentially navigates through *only* the discovered thread list from Stage 1 to safely extract deep message payloads without breaking DOM virtualization.
 4. `fb_pipeline.inbox.l3_pipeline.build_thread_record(...)` normalizes thread metadata
 5. `fb_pipeline.inbox.l3_pipeline.enrich_thread_record(...)` derives contact info, city, ad IDs, and builds a `MasHandoff`
 6. `fb_pipeline.inbox.l3_pipeline.persist_thread_record(...)` writes `threads`, `messages`, `users`, `user_ad_ids`, and `ad_posts`

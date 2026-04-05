@@ -153,3 +153,9 @@ This workflow provides step-by-step instructions for writing Python scripts for 
      - Did we skip a thread? (Compare `len(parsed_threads)` vs `expected_count`).
      - Are any messages completely empty? 
      - If the integrity check fails, throw an explicit `DOMStructureChangedError`, dump the HTML, and halt.
+
+   - **Step 6: Two-Stage Fetching Protocol**
+     Never attempt to scrape complex, deeply virtualized Facebook lists (like the Inbox or Comments) in a single pass. A single pass where you hover, scroll, open a thread, extract, and close it will immediately corrupt Facebook's memory-managed DOM structure.
+     Always implement an explicit 2-Stage Strategy:
+     - **Stage 1 (Discovery)**: Iteratively scroll to the bottom of the container to accumulate the Target Entity Metadata (e.g., Thread Names). Stop strictly based on `time_range` or `max_limit_quota`. Do NOT open or navigate any items.
+     - **Stage 2 (Extraction)**: Reset the viewport. Loop sequentially through the immutable list of discovered items from Stage 1, using stable visual identifiers (like `sidebarIdentityKey`) to dynamically re-locate, select, and safely extract the deep payloads.

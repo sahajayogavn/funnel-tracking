@@ -98,10 +98,12 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
         "sidebar_wait_ms": initial_snapshot.get("elapsed_ms", 0),
     }
 
-    while scroll_round < 50 and not reached_date_limit:
+    collected_threads = []
+
+    while not reached_date_limit:
         scroll_round += 1
         if thread_counter >= max_threads:
-            logger.info(f"Reached max threads ({max_threads}). Stopping.")
+            logger.info(f"Reached max threads ({max_threads}). Stopping Stage 1.")
             break
 
         visible_threads = extract_visible_threads(page)
@@ -146,19 +148,20 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             cursor.execute("SELECT last_synced_time FROM threads WHERE id = ?", (thread_record.thread_id,))
             row = cursor.fetchone()
 
+            is_match = False
+            force_resync = False
+
             if row:
                 db_norm = ''.join(c.lower() for c in (row[0] or "") if c.isalnum())
                 ui_norm = ''.join(c.lower() for c in (thread_record.preview_text or "") if c.isalnum())
                 min_len = min(len(db_norm), len(ui_norm))
                 
-                is_match = False
                 if min_len > 0:
                     is_match = db_norm[:min_len] == ui_norm[:min_len]
                 else:
                     is_match = db_norm == ui_norm
 
                 if is_match:
-                    force_resync = False
                     preview_lower = (thread_record.preview_text or "").strip().lower()
                     if preview_lower.startswith("you:") or preview_lower.startswith("bạn:"):
                         last_msg_row = cursor.execute(
@@ -171,6 +174,13 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                     if not force_resync:
                         stats["skipped_threads"] += 1
                         if not force_refresh:
+                            collected_threads.append({
+                                "record": thread_record,
+                                "is_new": False,
+                                "skip_process": True,
+                                "vt": vt,
+                                "name": name
+                            })
                             if allow_early_exit:
                                 consecutive_clean_threads += 1
                                 if consecutive_clean_threads >= 2:
@@ -180,9 +190,65 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 else:
                     consecutive_clean_threads = 0
 
-            logger.info(f"Syncing thread '{name}' (#{thread_counter})...")
+            collected_threads.append({
+                "record": thread_record,
+                "is_new": (row is None),
+                "skip_process": False,
+                "vt": vt,
+                "name": name
+            })
+
+            if row is None:
+                stats["new_threads"] += 1
+
+        if reached_date_limit:
+            break
+        if new_in_round == 0:
+            if scroll_round - last_new_round >= 7:
+                break
+        else:
+            last_new_round = scroll_round
+
+        if thread_counter >= max_threads:
+            break
+
+        logger.info(f"Completed processing {thread_counter} threads before sidebar scroll round {scroll_round}.")
+        scroll_result = scroll_sidebar_and_wait(page, logger, scroll_round=scroll_round, timeout_ms=60000)
+        stats["sidebar_scrolls"] += 1
+        stats["sidebar_wait_ms"] += scroll_result.get("elapsed_ms", 0)
+
+    # END STAGE 1
+    logger.info(f"Stage 1 Complete. Listed {len(collected_threads)} threads in range:")
+    for ct in collected_threads:
+        time_text = ct.get('vt', {}).get('sidebarTimeText', '')
+        if time_text:
+            logger.info(f"  - {ct.get('name', 'Unknown')} [{time_text}]")
+        else:
+            logger.info(f"  - {ct.get('name', 'Unknown')}")
+    threads_to_process = [c for c in collected_threads if not c["skip_process"]]
+    logger.info(f"Stage 2 will extract details for {len(threads_to_process)} threads.")
+
+    # STAGE 2
+    if len(threads_to_process) > 0:
+        logger.info("Resetting sidebar scroll to top for Stage 2...")
+        try:
+            page.evaluate('''() => {
+                let container = document.querySelector('div[aria-label*="Danh sách tin nhắn"]') || 
+                                document.querySelector('div[role="region"][aria-label*="message"]');
+                if(container) container.scrollTop = 0;
+            }''')
+            page.wait_for_timeout(1500)
+        except Exception as e:
+            logger.warning(f"Failed to reset sidebar scroll: {e}")
+
+        for i, c in enumerate(threads_to_process):
+            thread_record = c["record"]
+            name = c["name"]
+            logger.info(f"Syncing thread '{name}' (#{i+1}/{len(threads_to_process)})...")
+            
             prev_fb_url = ""
             try:
+                from urllib.parse import parse_qs, urlparse
                 prev_fb_url = parse_qs(urlparse(page.url).query).get('selected_item_id', [''])[0]
             except Exception:
                 pass
@@ -195,67 +261,80 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 return (!r) ? "" : (r.innerText || "").substring(0, 200);
             }''')
 
-            try:
-                clicked = page.evaluate('''({sidebarIdentityKey, domIndex, threadSelector}) => {
-                    let candidates = Array.from(document.querySelectorAll(threadSelector));
-                    function pickTimeToken(lines) {
-                        for (let i = lines.length - 1; i >= 1; i--) {
-                            const token = (lines[i] || '').trim();
-                            if (!token) continue;
-                            if (/^\\d+[smhdw]$/i.test(token)) return token;
-                            if (/^(today|yesterday|hôm nay|hôm qua)$/i.test(token)) return token;
-                            if (/^(mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(token)) return token;
-                            if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\\s+\\d{1,2}$/i.test(token)) return token;
-                        }
-                        return '';
-                    }
-                    function getIdentity(el) {
-                        const text = (el.innerText || '').trim();
-                        const lines = text.split('\\n').map(l => l.trim()).filter(Boolean);
-                        const name = lines[0] || '';
-                        const sidebarTimeText = pickTimeToken(lines);
-                        const previewLines = lines.slice(1).filter(line => line !== sidebarTimeText);
-                        const hrefEl = el.closest('a[href]') || el.querySelector('a[href]');
-                        const href = hrefEl ? (hrefEl.getAttribute('href') || '') : '';
-                        let selectedItemId = '';
-                        try {
-                            if (href) {
-                                const absolute = new URL(href, window.location.origin);
-                                selectedItemId = absolute.searchParams.get('selected_item_id') || '';
+            # Use thread_card_selector imported at the top of the file
+            clicked = False
+            click_attempts = 0
+            while not clicked and click_attempts < 15:
+                click_attempts += 1
+                try:
+                    clicked = page.evaluate(r'''({sidebarIdentityKey, domIndex, threadSelector}) => {
+                        let candidates = Array.from(document.querySelectorAll(threadSelector));
+                        function pickTimeToken(lines) {
+                            for (let i = lines.length - 1; i >= 1; i--) {
+                                const token = (lines[i] || '').trim();
+                                if (!token) continue;
+                                if (/^\d+[smhdw]$/i.test(token)) return token;
+                                if (/^(today|yesterday|hôm nay|hôm qua)$/i.test(token)) return token;
+                                if (/^(mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(token)) return token;
+                                if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}$/i.test(token)) return token;
                             }
-                        } catch (_) {}
-                        const attrs = [];
-                        for (const attr of Array.from(el.attributes || [])) {
-                            if (!attr || !attr.name) continue;
-                            if (attr.name.startsWith('data-') || attr.name.startsWith('aria-') || attr.name === 'href') {
-                                attrs.push(`${attr.name}=${attr.value || ''}`);
+                            return '';
+                        }
+                        function getIdentity(el) {
+                            const text = (el.innerText || '').trim();
+                            const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+                            const name = lines[0] || '';
+                            const sidebarTimeText = pickTimeToken(lines);
+                            const previewLines = lines.slice(1).filter(line => line !== sidebarTimeText);
+                            const hrefEl = el.closest('a[href]') || el.querySelector('a[href]');
+                            const href = hrefEl ? (hrefEl.getAttribute('href') || '') : '';
+                            let selectedItemId = '';
+                            try {
+                                if (href) {
+                                    const absolute = new URL(href, window.location.origin);
+                                    selectedItemId = absolute.searchParams.get('selected_item_id') || '';
+                                }
+                            } catch (_) {}
+                            const attrs = [];
+                            for (const attr of Array.from(el.attributes || [])) {
+                                if (!attr || !attr.name) continue;
+                                if (attr.name.startsWith('data-') || attr.name.startsWith('aria-') || attr.name === 'href') {
+                                    attrs.push(`${attr.name}=${attr.value || ''}`);
+                                }
+                            }
+                            const identityParts = [name, previewLines.join(' | '), sidebarTimeText, selectedItemId, href, attrs.join('|')].filter(Boolean);
+                            return identityParts.join(' || ');
+                        }
+                        for (let c of candidates) {
+                            if (getIdentity(c) === sidebarIdentityKey) {
+                                c.scrollIntoView({block: "center"});
+                                c.click();
+                                return true;
                             }
                         }
-                        const identityParts = [name, previewLines.join(' | '), sidebarTimeText, selectedItemId, href, attrs.join('|')].filter(Boolean);
-                        return identityParts.join(' || ');
-                    }
-                    for (let c of candidates) {
-                        if (getIdentity(c) === sidebarIdentityKey) {
-                            c.scrollIntoView({block: "center"});
-                            c.click();
+                        if (candidates[domIndex]) {
+                            candidates[domIndex].scrollIntoView({block: "center"});
+                            candidates[domIndex].click();
                             return true;
                         }
-                    }
-                    if (candidates[domIndex]) {
-                        candidates[domIndex].scrollIntoView({block: "center"});
-                        candidates[domIndex].click();
-                        return true;
-                    }
-                    return false;
-                }''', {
-                    "sidebarIdentityKey": thread_record.sidebar_identity_key, 
-                    "domIndex": thread_record.dom_index,
-                    "threadSelector": thread_card_selector()
-                })
+                        return false;
+                    }''', {
+                        "sidebarIdentityKey": thread_record.sidebar_identity_key, 
+                        "domIndex": thread_record.dom_index,
+                        "threadSelector": thread_card_selector()
+                    })
+                except Exception:
+                    pass
+                    
                 if not clicked:
-                    stats["threads_skipped_click_verify"] += 1
-                    continue
-            except Exception as e:
+                    try:
+                        page.mouse.wheel(0, 300)
+                        page.wait_for_timeout(500)
+                    except Exception:
+                        pass
+
+            if not clicked:
+                logger.warning(f"Failed to verify click for thread '{name}' in Stage 2 after {click_attempts} scroll attempts.")
                 stats["threads_skipped_click_verify"] += 1
                 continue
 
@@ -265,7 +344,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             except Exception:
                 page.wait_for_timeout(4000)
 
-            is_first_thread = (thread_counter == 1 and scroll_round == 1)
+            is_first_thread = (i == 0)
             fb_url, verified = verify_thread_switch(
                 page, logger, name, prev_fb_url, pre_click_fingerprint, is_first_thread, thread_record
             )
@@ -285,7 +364,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 logger.warning(f"No message bubbles found for thread '{name}'.")
                 continue
 
-            ad_ids = extract_ad_id_labels(page)
+            ad_ids = extract_ad_id_labels_arg(page) if callable(extract_ad_id_labels_arg) else extract_ad_id_labels(page)
 
             enriched_record = enrich_thread_record(
                 thread_record,
@@ -297,27 +376,8 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 ad_ids=ad_ids,
             )
             persist_result = persist_thread_record(conn, enriched_record, detect_city=detect_city)
-            stats["new_messages"] += persist_result["messages_added"]
+            stats["new_messages"] += persist_result.get("messages_added", 0) if isinstance(persist_result, dict) else 0
             stats["threads_processed"] += 1
-
-            if row is None:
-                stats["new_threads"] += 1
-
-        if reached_date_limit:
-            break
-        if new_in_round == 0:
-            if scroll_round - last_new_round >= 3:
-                break
-        else:
-            last_new_round = scroll_round
-
-        if thread_counter >= max_threads:
-            break
-
-        logger.info(f"Completed processing {thread_counter} threads before sidebar scroll round {scroll_round}.")
-        scroll_result = scroll_sidebar_and_wait(page, logger, scroll_round=scroll_round, timeout_ms=60000)
-        stats["sidebar_scrolls"] += 1
-        stats["sidebar_wait_ms"] += scroll_result.get("elapsed_ms", 0)
 
     record_fetch(page_id, stats["new_threads"] + stats["skipped_threads"], stats["new_messages"], conn)
     return stats

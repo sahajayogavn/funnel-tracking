@@ -402,7 +402,7 @@ def main():
                         help="Action to perform.")
     parser.add_argument("--refresh", action="store_true", help="Force a fresh fetch, bypassing 1-hour cache.")
     parser.add_argument("--userId", default=None, help="User ID (thread_id, phone, or email) for fetch_message_by_user.")
-    parser.add_argument("--maxThreads", type=int, default=200, help="Maximum number of threads to sync (default: 200).")
+    parser.add_argument("--maxThreads", type=int, default=1000, help="Maximum number of threads to sync (default: 1000).")
     parser.add_argument("--cdp", action="store_true", help="Scrape directly via CDP connection to Chrome on port 9222 (no cookie export/import).")
     parser.add_argument("--no-early-exit", action="store_true", help="Disable the targeted early-exit algorithm, allowing deep retroactive UI scrolls.")
     

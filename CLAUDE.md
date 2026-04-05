@@ -20,7 +20,7 @@ The repository is structured to support Agile XP methodologies for AI Agents, en
 - **`logs/`**: Directory for iteration handover reports and execution logs.
 - **`docs/`**: Architecture documentation and planning documents.
 - **`tests/`**: Directory for all unit and E2E test files. Agents MUST NOT write tests directly in the root project directory.
-- **`tmp/`**: Temporary directory for Agents to write scratchpad scripts, temporary code implementations, and ad-hoc task files.
+- **`tmp/`**: Temporary directory for Agents to write scratchpad scripts, temporary code implementations, and ad-hoc task files. **Agents MUST NOT write ANY temporary scripts (like tmp_rewrite.py) at the project root directory. ALL scratchpad scripts MUST go into the `tmp/` directory.**
 
 ## 2. Web Application (Next.js)
 

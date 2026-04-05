@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import re
 
 from .constants import (
     MONTH_DAY_RE,
@@ -22,7 +23,7 @@ def extract_visible_threads(page) -> list[dict]:
                     if (/^\d+[smhdw]$/i.test(token)) return token;
                     if (/^(today|yesterday|hôm nay|hôm qua)$/i.test(token)) return token;
                     if (/^(mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(token)) return token;
-                    if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}$/i.test(token)) return token;
+                    if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}(?:,\s*\d{4}|\s+\d{4})?$/i.test(token)) return token;
                 }
                 return '';
             }
@@ -82,11 +83,16 @@ def parse_sidebar_time_token(token: str, now: datetime | None = None) -> dict:
     if lower in DAY_NAMES:
         return {"kind": "weekday", "token": token, "days_ago": 6, "parsed_at": None}
     if MONTH_DAY_RE.match(token):
-        parsed = datetime.strptime(f"{token} {now.year}", "%b %d %Y")
-        days_ago = (now - parsed).days
-        if days_ago < 0:
-            parsed = datetime.strptime(f"{token} {now.year - 1}", "%b %d %Y")
+        if "," in token or bool(re.search(r'\d{4}', token)):
+            token_clean = token.replace(",", "")
+            parsed = datetime.strptime(token_clean, "%b %d %Y")
             days_ago = (now - parsed).days
+        else:
+            parsed = datetime.strptime(f"{token} {now.year}", "%b %d %Y")
+            days_ago = (now - parsed).days
+            if days_ago < 0:
+                parsed = datetime.strptime(f"{token} {now.year - 1}", "%b %d %Y")
+                days_ago = (now - parsed).days
         return {"kind": "month_day", "token": token, "days_ago": days_ago, "parsed_at": parsed.date().isoformat()}
     return {"kind": "unknown", "token": token, "days_ago": None, "parsed_at": None}
 
