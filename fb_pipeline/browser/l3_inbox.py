@@ -212,7 +212,9 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
         if thread_counter >= max_threads:
             break
 
-        logger.info(f"Completed processing {thread_counter} threads before sidebar scroll round {scroll_round}.")
+        last_vt = visible_threads[-1] if visible_threads else {}
+        current_date_reach = last_vt.get("sidebarTimeText", "Unknown")
+        logger.info(f"Completed processing {thread_counter} threads (reached [{current_date_reach}]) before sidebar scroll round {scroll_round}.")
         scroll_result = scroll_sidebar_and_wait(page, logger, scroll_round=scroll_round, timeout_ms=60000)
         stats["sidebar_scrolls"] += 1
         stats["sidebar_wait_ms"] += scroll_result.get("elapsed_ms", 0)
@@ -267,7 +269,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             while not clicked and click_attempts < 15:
                 click_attempts += 1
                 try:
-                    clicked = page.evaluate(r'''({sidebarIdentityKey, domIndex, threadSelector}) => {
+                    clicked = page.evaluate(r'''({sidebarIdentityKey, threadSelector, targetName, targetSelectedItemId, targetPreviewText}) => {
                         let candidates = Array.from(document.querySelectorAll(threadSelector));
                         function pickTimeToken(lines) {
                             for (let i = lines.length - 1; i >= 1; i--) {
@@ -306,22 +308,46 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                             return identityParts.join(' || ');
                         }
                         for (let c of candidates) {
-                            if (getIdentity(c) === sidebarIdentityKey) {
+                            if (sidebarIdentityKey && getIdentity(c) === sidebarIdentityKey) {
+                                c.scrollIntoView({block: "center"});
+                                c.click();
+                                return true;
+                            }
+                            
+                            // Relaxed Match
+                            const text = (c.innerText || '').trim();
+                            const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+                            const elName = lines[0] || '';
+                            
+                            const hrefEl = c.closest('a[href]') || c.querySelector('a[href]');
+                            let elSelectedItemId = '';
+                            if (hrefEl) {
+                                try {
+                                    const absolute = new URL(hrefEl.getAttribute('href'), window.location.origin);
+                                    elSelectedItemId = absolute.searchParams.get('selected_item_id') || '';
+                                } catch (_) {}
+                            }
+                            
+                            if (targetSelectedItemId && elSelectedItemId && targetSelectedItemId === elSelectedItemId) {
+                                c.scrollIntoView({block: "center"});
+                                c.click();
+                                return true;
+                            }
+                            
+                            let preLines = lines.slice(1).join(' ');
+                            if (elName && elName === targetName && targetPreviewText && preLines.includes(targetPreviewText)) {
                                 c.scrollIntoView({block: "center"});
                                 c.click();
                                 return true;
                             }
                         }
-                        if (candidates[domIndex]) {
-                            candidates[domIndex].scrollIntoView({block: "center"});
-                            candidates[domIndex].click();
-                            return true;
-                        }
                         return false;
                     }''', {
                         "sidebarIdentityKey": thread_record.sidebar_identity_key, 
-                        "domIndex": thread_record.dom_index,
-                        "threadSelector": thread_card_selector()
+                        "threadSelector": thread_card_selector(),
+                        "targetName": thread_record.thread_name,
+                        "targetSelectedItemId": thread_record.selected_item_id,
+                        "targetPreviewText": thread_record.preview_text
                     })
                 except Exception:
                     pass
