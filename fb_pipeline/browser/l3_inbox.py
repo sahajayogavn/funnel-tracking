@@ -266,7 +266,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             # Use thread_card_selector imported at the top of the file
             clicked = False
             click_attempts = 0
-            while not clicked and click_attempts < 15:
+            while not clicked and click_attempts < 150:
                 click_attempts += 1
                 try:
                     clicked = page.evaluate(r'''({sidebarIdentityKey, threadSelector, targetName, targetSelectedItemId, targetPreviewText}) => {
@@ -354,6 +354,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                     
                 if not clicked:
                     try:
+                        page.mouse.move(200, 400)
                         page.mouse.wheel(0, 300)
                         page.wait_for_timeout(500)
                     except Exception:
