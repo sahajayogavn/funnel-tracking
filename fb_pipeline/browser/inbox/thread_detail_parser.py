@@ -64,6 +64,10 @@ def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fi
         except Exception:
             fb_url = ""
 
+    # Fallback to fb_url extracted from the thread list's hovercard dynamically if URL lacks selected_item_id
+    if not fb_url and hasattr(thread_record, "fb_url"):
+        fb_url = getattr(thread_record, "fb_url", "")
+
     panel_refreshed = False
     
     def normalize_name(s):
