@@ -234,24 +234,25 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
     if len(threads_to_process) > 0:
         logger.info("Resetting sidebar scroll to top for Stage 2...")
         try:
-            scroll_reset_info = page.evaluate('''() => {
+            scroll_reset_info = page.evaluate(f'''() => {{
                 let initial = -1;
                 let final = -1;
-                let cards = Array.from(document.querySelectorAll('div[role="navigation"] div[role="gridcell"]'));
-                if (cards.length > 0) {
+                let cards = Array.from(document.querySelectorAll('{thread_card_selector()}'));
+                if (cards.length > 0) {{
                     let parent = cards[0].closest('div');
-                    while(parent && parent.tagName !== 'BODY') {
-                        if (parent.scrollHeight > parent.clientHeight) {
+                    while(parent && parent.tagName !== 'BODY') {{
+                        let style = window.getComputedStyle(parent);
+                        if (parent.scrollHeight > parent.clientHeight || ['auto', 'scroll'].includes(style.overflowY)) {{
                             initial = parent.scrollTop;
                             parent.scrollTop = 0;
                             final = parent.scrollTop;
-                            return {initial: initial, final: final};
-                        }
+                            return {{initial: initial, final: final}};
+                        }}
                         parent = parent.parentElement;
-                    }
-                }
-                return {initial: initial, final: final};
-            }''')
+                    }}
+                }}
+                return {{initial: initial, final: final}};
+            }}''')
             initial_st = scroll_reset_info.get("initial", -1)
             final_st = scroll_reset_info.get("final", -1)
             logger.info(f"Stage 2 scroll reset verify: scrollTop {initial_st} -> {final_st}")
@@ -262,12 +263,12 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             # browser twitch visually for seconds on end, driving complaints of "stupid scrolling".
             # We safely just ensure the first card is visible with zero delay using JS native methods.
             if final_st != 0:
-                page.evaluate('''() => {
-                    let cards = Array.from(document.querySelectorAll('div[role="navigation"] div[role="gridcell"]'));
-                    if (cards.length > 0) {
-                        cards[0].scrollIntoView({block: 'start', inline: 'nearest'});
-                    }
-                }''')
+                page.evaluate(f'''() => {{
+                    let cards = Array.from(document.querySelectorAll('{thread_card_selector()}'));
+                    if (cards.length > 0) {{
+                        cards[0].scrollIntoView({{block: 'start', inline: 'nearest'}});
+                    }}
+                }}''')
         except Exception as e:
             logger.warning(f"Failed to run Stage 2 scroll reset: {e}")
 
@@ -283,11 +284,12 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 jump_target = max(0, int(abs_top) - 150)
                 try:
                     page.evaluate(f'''(pos) => {{
-                        let cards = Array.from(document.querySelectorAll('div[role="navigation"] div[role="gridcell"]'));
+                        let cards = Array.from(document.querySelectorAll('{thread_card_selector()}'));
                         if (cards.length > 0) {{
                             let parent = cards[0].closest('div');
                             while(parent && parent.tagName !== 'BODY') {{
-                                if (parent.scrollHeight > parent.clientHeight) {{
+                                let style = window.getComputedStyle(parent);
+                                if (parent.scrollHeight > parent.clientHeight || ['auto', 'scroll'].includes(style.overflowY)) {{
                                     parent.scrollTop = pos;
                                     return;
                                 }}
@@ -320,7 +322,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             while not clicked and click_attempts < 150:
                 click_attempts += 1
                 try:
-                    clicked = page.evaluate(r'''({sidebarIdentityKey, threadSelector, targetName, targetSelectedItemId, targetPreviewText}) => {
+                    clicked = page.evaluate(r'''({sidebarIdentityKey, threadSelector, targetName, targetSelectedItemId, targetPreviewText, targetFbUrl}) => {
                         let candidates = Array.from(document.querySelectorAll(threadSelector));
                         function pickTimeToken(lines) {
                             for (let i = lines.length - 1; i >= 1; i--) {
@@ -341,6 +343,14 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                             const previewLines = lines.slice(1).filter(line => line !== sidebarTimeText);
                             const hrefEl = el.closest('a[href]') || el.querySelector('a[href]');
                             const href = hrefEl ? (hrefEl.getAttribute('href') || '') : '';
+                            
+                            let hovercard = el.getAttribute('data-hovercard') || '';
+                            if (!hovercard) {
+                                const hcEl = el.querySelector('[data-hovercard]');
+                                if (hcEl) hovercard = hcEl.getAttribute('data-hovercard') || '';
+                            }
+                            let fbUrl = hovercard ? hovercard.split('?')[0] : '';
+
                             let selectedItemId = '';
                             try {
                                 if (href) {
@@ -355,9 +365,10 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                                     attrs.push(`${attr.name}=${attr.value || ''}`);
                                 }
                             }
-                            const identityParts = [name, previewLines.join(' | '), sidebarTimeText, selectedItemId, href, attrs.join('|')].filter(Boolean);
+                            const identityParts = [name, previewLines.join(' | '), sidebarTimeText, selectedItemId, href, fbUrl, attrs.join('|')].filter(Boolean);
                             return identityParts.join(' || ');
                         }
+                        let matchCandidates = [];
                         for (let c of candidates) {
                             if (sidebarIdentityKey && getIdentity(c) === sidebarIdentityKey) {
                                 c.scrollIntoView({block: "center"});
@@ -365,11 +376,18 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                                 return true;
                             }
                             
-                            // Relaxed Match
+                            // Relaxed Match Prep
                             let norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
                             const text = (c.innerText || '').trim();
                             const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
                             const elName = lines[0] || '';
+                            
+                            let hovercard = c.getAttribute('data-hovercard') || '';
+                            if (!hovercard) {
+                                const hcEl = c.querySelector('[data-hovercard]');
+                                if (hcEl) hovercard = hcEl.getAttribute('data-hovercard') || '';
+                            }
+                            let elFbUrl = hovercard ? hovercard.split('?')[0] : '';
                             
                             const hrefEl = c.closest('a[href]') || c.querySelector('a[href]');
                             let elSelectedItemId = '';
@@ -386,22 +404,43 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                                 return true;
                             }
                             
-                            let preLines = lines.slice(1).join(' ');
+                            if (targetFbUrl && elFbUrl && targetFbUrl === elFbUrl) {
+                                c.scrollIntoView({block: "center"});
+                                c.click();
+                                return true;
+                            }
+                            
                             if (elName && norm(elName) === norm(targetName)) {
-                                if (!targetPreviewText || norm(preLines).includes(norm(targetPreviewText)) || norm(targetPreviewText).includes(norm(preLines))) {
-                                    c.scrollIntoView({block: "center"});
-                                    c.click();
-                                    return true;
-                                }
+                                matchCandidates.push({c, lines});
                             }
                         }
+                        
+                        // If we have exactly 1 name match, just click it.
+                        if (matchCandidates.length === 1) {
+                            matchCandidates[0].c.scrollIntoView({block: "center"});
+                            matchCandidates[0].c.click();
+                            return true;
+                        }
+                        
+                        // If multiple name matches, fallback to preview text resolving
+                        let norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                        for (let mc of matchCandidates) {
+                            let preLines = mc.lines.slice(1).join(' ');
+                            if (!targetPreviewText || norm(preLines).includes(norm(targetPreviewText)) || norm(targetPreviewText).includes(norm(preLines))) {
+                                mc.c.scrollIntoView({block: "center"});
+                                mc.c.click();
+                                return true;
+                            }
+                        }
+                        
                         return false;
                     }''', {
                         "sidebarIdentityKey": thread_record.sidebar_identity_key, 
                         "threadSelector": thread_card_selector(),
                         "targetName": thread_record.thread_name,
                         "targetSelectedItemId": thread_record.selected_item_id,
-                        "targetPreviewText": thread_record.preview_text
+                        "targetPreviewText": thread_record.preview_text,
+                        "targetFbUrl": thread_record.fb_url
                     })
                 except Exception:
                     pass
@@ -411,39 +450,49 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                         page.wait_for_timeout(500)
                     else:
                         try:
-                            # Verify and log scroll action as requested
-                            scroll_script = '''() => {
-                                let cards = Array.from(document.querySelectorAll('div[role="navigation"] div[role="gridcell"]'));
-                                if (cards.length > 0) {
+                            # Verify and log scroll action
+                            scroll_script = f'''() => {{
+                                // RETROSPECTIVE: doc:report-scrolling-fix-001
+                                // DO NOT rely solely on scrollHeight. Native implementations often bind 
+                                // scrollHeight = clientHeight and translate items inside. Always fallback to computedStyle!
+                                let cards = Array.from(document.querySelectorAll('{thread_card_selector()}'));
+                                let logs = [];
+                                if (cards.length > 0) {{
                                     let parent = cards[0].closest('div');
-                                    while(parent && parent.tagName !== 'BODY') {
-                                        if (parent.scrollHeight > parent.clientHeight) {
-                                            return parent.scrollTop;
-                                        }
+                                    while(parent && parent.tagName !== 'BODY') {{
+                                        let style = window.getComputedStyle(parent);
+                                        logs.push(`sH=${{parent.scrollHeight}} cH=${{parent.clientHeight}} sT=${{parent.scrollTop}} ovY=${{style.overflowY}}`);
+                                        if (parent.scrollHeight > parent.clientHeight || ['auto', 'scroll'].includes(style.overflowY)) {{
+                                            return {{scrollTop: parent.scrollTop, found: true, logs: logs}};
+                                        }}
                                         parent = parent.parentElement;
-                                    }
-                                }
-                                return -1;
-                            }'''
-                            prev_scroll = page.evaluate(scroll_script)
+                                    }}
+                                }}
+                                return {{scrollTop: -1, found: false, logs: logs}};
+                            }}'''
+                            prev_res = page.evaluate(scroll_script)
+                            prev_scroll = prev_res.get("scrollTop", -1)
                             
+                            # Fallback back to physical mouse.wheel for virtualization to trigger, but restrict magnitude
                             page.mouse.move(200, 400)
-                            page.mouse.wheel(0, 500)
+                            page.mouse.wheel(0, 300)
                             page.wait_for_timeout(500)
                             
-                            new_scroll = page.evaluate(scroll_script)
+                            new_res = page.evaluate(scroll_script)
+                            new_scroll = new_res.get("scrollTop", -1)
                             diff = (new_scroll - prev_scroll) if prev_scroll != -1 else 0
-                            logger.info(f"Stage 2 scroll for '{name}' (attempt {click_attempts}): scrollTop {prev_scroll} -> {new_scroll} (diff: {diff})")
                             
-                            if diff == 0 and prev_scroll != -1:
-                                # Fallback to JS scrolling if wheel fails to move
-                                logger.warning(f"Wheel scroll failed to move container for '{name}'. Using JS fallback.")
-                                page.evaluate('''() => {
-                                    let cards = Array.from(document.querySelectorAll('div[role="navigation"] div[role="gridcell"]'));
-                                    if (cards.length > 0) {
-                                        cards[cards.length - 1].scrollIntoView({block: 'center', inline: 'nearest'});
-                                    }
-                                }''')
+                            if click_attempts % 10 == 0:
+                                logger.info(f"Stage 2 scroll for '{name}' (attempt {click_attempts}): scrollTop {prev_scroll} -> {new_scroll} (diff: {diff}). Diags: {prev_res.get('logs', [])[:3]}")
+                                
+                            # If no container was found, or diff == 0, fallback to scrollIntoView explicitly
+                            if diff == 0 or prev_scroll == -1:
+                                page.evaluate(f'''() => {{
+                                    let cards = Array.from(document.querySelectorAll('{thread_card_selector()}'));
+                                    if (cards.length > 0) {{
+                                        cards[cards.length - 1].scrollIntoView({{block: 'center', inline: 'nearest'}});
+                                    }}
+                                }}''')
                                 page.wait_for_timeout(500)
                                 
                         except Exception as e:

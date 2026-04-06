@@ -63,6 +63,18 @@ def extract_visible_threads(page) -> list[dict]:
                 const previewLines = lines.slice(1).filter(line => line !== sidebarTimeText);
                 const hrefEl = el.closest('a[href]') || el.querySelector('a[href]');
                 const href = hrefEl ? (hrefEl.getAttribute('href') || '') : '';
+                
+                let hovercard = el.getAttribute('data-hovercard') || '';
+                if (!hovercard) {
+                    const hcEl = el.querySelector('[data-hovercard]');
+                    if (hcEl) hovercard = hcEl.getAttribute('data-hovercard') || '';
+                }
+                
+                let fbUrl = '';
+                if (hovercard) {
+                    fbUrl = hovercard.split('?')[0];
+                }
+
                 let selectedItemId = '';
                 try {
                     if (href) {
@@ -78,7 +90,7 @@ def extract_visible_threads(page) -> list[dict]:
                         attrs.push(`${attr.name}=${attr.value || ''}`);
                     }
                 }
-                const identityParts = [name, previewLines.join(' | '), sidebarTimeText, selectedItemId, href, attrs.join('|')].filter(Boolean);
+                const identityParts = [name, previewLines.join(' | '), sidebarTimeText, selectedItemId, href, fbUrl, attrs.join('|')].filter(Boolean);
                 const sidebarIdentityKey = identityParts.join(' || ');
                 return {
                     domIndex: idx,
@@ -90,6 +102,7 @@ def extract_visible_threads(page) -> list[dict]:
                     sidebarIdentityKey,
                     selectedItemId,
                     href,
+                    fbUrl,
                     absoluteTop,
                 };
             }).filter(item => item.name || item.text);

@@ -40,6 +40,7 @@ class ThreadRecord:
     sidebar_time_kind: str = ""
     sidebar_identity_key: str = ""
     selected_item_id: str = ""
+    fb_url: str = ""
 
 
 @dataclass
@@ -68,7 +69,6 @@ class MasHandoff:
 
 @dataclass
 class EnrichedThreadRecord(ThreadRecord):
-    fb_url: str = ""
     ad_context: str = ""
     ad_ids: list[str] = field(default_factory=list)
     user_info: dict[str, Any] = field(default_factory=dict)

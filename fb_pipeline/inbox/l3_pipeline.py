@@ -38,6 +38,7 @@ def build_thread_record(page_id: str, visible_thread: dict) -> ThreadRecord:
     sidebar_time_kind = (visible_thread.get("sidebarTimeKind") or "").strip()
     sidebar_identity_key = (visible_thread.get("sidebarIdentityKey") or "").strip()
     selected_item_id = (visible_thread.get("selectedItemId") or "").strip()
+    fb_url = (visible_thread.get("fbUrl") or "").strip()
 
     preview_lines = list(thread_lines[1:]) if len(thread_lines) > 1 else []
     if sidebar_time_text:
@@ -63,6 +64,7 @@ def build_thread_record(page_id: str, visible_thread: dict) -> ThreadRecord:
         sidebar_time_kind=sidebar_time_kind,
         sidebar_identity_key=sidebar_identity_key,
         selected_item_id=selected_item_id,
+        fb_url=fb_url,
     )
 
 
