@@ -685,8 +685,12 @@ Because Facebook's DOM is highly volatile, the scraping pipeline (`fb_pipeline/b
 4. **State Verification**: The pipeline proves physical DOM manipulation (like scrolling) by asserting actual `scrollTop` coordinate changes before and after the event, breaking free of infinite silent hangs.
 
 ### Retrospective Log
-- **[2026-04-06] Historical Sync Reversal & Chronological Parsing**: An architecture flaw in the Python scraping loop occurred because threads processed progressively down the native Facebook inbox list (older threads) received *newer* `datetime('now')` execution inserts during the loop. This mathematically inverted the chronological index. 
-  - **Fix**: The backend Python pipeline was migrated to dynamically stagger timestamp injection via `datetime('now', '-{dom_index} minutes')`. Concurrently, the Next.js frontend presentation reversed priority back to strict string extraction of Facebook's precise `lastMessageTimestampText` strings to guarantee the UI mirrors the physical inbox.
+- **[2026-04-06] Historical Sync Reversal, Parse Drift, & WAL Crashes**: 
+  1. **Floating Timeline**: Next.js evaluated relative scraped text (`5:34 PM`) dynamically against the live browser local time, pushing days-old messages artificially into the future.
+  2. **Sequential Time Injection**: The Python backend fell back to injecting `datetime('now')` due to poor regex handling of Vietnamese inputs. Because threads were processed sequentially from newest to oldest, the oldest threads received the absolutely highest (newest) loop execution time, mathematically reversing their SQL chronology.
+  3. **Exact Regex Fix**: The Python DOM pipeline (`thread_list_parser.py`) was fully rebuilt to accurately compute strict, invariant database timestamps natively using exact Regex representations matching Next.js.
+  4. **Frontend Sort Override**: The frontend was returned to unconditionally trusting the mathematically pure `lastMessageTimestampText` instead of the volatile DB `last_interaction`. 
+  5. **Ghost File WAL Connector**: Developers wiping `frankensqlite.db` deleted the base file but left the `.db-wal` running. This corrupted Next.js's background server connection, causing a `no such table` crash. The connector in `db.ts` was engineered to automatically detect and aggressively shut down invalid handles and recreate the schema connection dynamically.
 
 ## Validation Gates
 

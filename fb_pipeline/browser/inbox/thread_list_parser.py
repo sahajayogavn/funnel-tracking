@@ -111,23 +111,73 @@ def extract_visible_threads(page) -> list[dict]:
     )
 
 def parse_sidebar_time_token(token: str, now: datetime | None = None) -> dict:
+    # Retrospective [2026-04-06]: Exact Time Regex Calculation
+    # Fix: Ported robust JS datetime evaluation regexes (`4:50 PM`, `Sun 10:12 PM`) directly into the Python scraping pipeline.
+    # Root Cause: Previously, standard English/Slash regexes routinely failed against Vietnamese relative strings, causing the parser to return 'unknown'. This forced `l3_pipeline.py` to unilaterally execute `datetime('now')`. Since the scraper processed the oldest threads at the bottom of the DOM last, the oldest threads were assigned the absolutely newest `datetime('now')` execution timestamps, physically inverting the SQL chronological order relative to Facebook.
     token = (token or "").strip()
     if not token:
         return {"kind": "unknown", "token": "", "days_ago": None, "parsed_at": None}
 
     now = now or datetime.now()
     lower = token.lower()
+    
+    # 10 mins, 2 hrs, etc (Facebook relative)
+    import re
+    rel_match = re.match(r'^(\d+)\s*(m|h|d|w)(?:ins?)?(?:rs?)?(?:s)?(?: ago)?$', lower)
+    if not rel_match:
+        rel_match = re.match(r'^(\d+)\s*(phút|giờ|ngày|tuần).*$', lower)
+    if rel_match:
+        val = int(rel_match.group(1))
+        unit = rel_match.group(2)
+        delta = timedelta()
+        if unit.startswith('m') or unit == 'phút': delta = timedelta(minutes=val)
+        elif unit.startswith('h') or unit == 'giờ': delta = timedelta(hours=val)
+        elif unit.startswith('d') or unit == 'ngày': delta = timedelta(days=val)
+        elif unit.startswith('w') or unit == 'tuần': delta = timedelta(weeks=val)
+        parsed = now - delta
+        return {"kind": "relative", "token": token, "days_ago": parsed.days, "parsed_at": parsed.isoformat(sep=" ", timespec="seconds")}
+
+    # Time only: "4:32 pm" (Today)
+    time_match = re.match(r'^(\d{1,2}):(\d{2})\s*([ap]m)$', lower)
+    if time_match:
+        hr = int(time_match.group(1))
+        mn = int(time_match.group(2))
+        ampm = time_match.group(3)
+        if ampm == 'pm' and hr < 12: hr += 12
+        if ampm == 'am' and hr == 12: hr = 0
+        parsed = now.replace(hour=hr, minute=mn, second=0, microsecond=0)
+        if parsed > now + timedelta(minutes=5): parsed -= timedelta(days=1)
+        return {"kind": "time_today", "token": token, "days_ago": 0, "parsed_at": parsed.isoformat(sep=" ", timespec="seconds")}
+
+    # Day + Time: "sun 10:12 pm" (Within last 7 days)
+    day_time_match = re.match(r'^(mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+(\d{1,2}):(\d{2})\s*([ap]m)$', lower)
+    if day_time_match:
+        day_str = day_time_match.group(1)
+        hr = int(day_time_match.group(2))
+        mn = int(day_time_match.group(3))
+        ampm = day_time_match.group(4)
+        if ampm == 'pm' and hr < 12: hr += 12
+        if ampm == 'am' and hr == 12: hr = 0
+        days_map = {'mon': 0, 'tue': 1, 'wed': 2, 'thu': 3, 'fri': 4, 'sat': 5, 'sun': 6}
+        target_weekday = days_map[day_str]
+        current_weekday = now.weekday()
+        days_diff = current_weekday - target_weekday
+        if days_diff <= 0: days_diff += 7
+        parsed = now.replace(hour=hr, minute=mn, second=0, microsecond=0) - timedelta(days=days_diff)
+        return {"kind": "day_time", "token": token, "days_ago": days_diff, "parsed_at": parsed.isoformat(sep=" ", timespec="seconds")}
+
+    # Existing fallbacks
+    from fb_pipeline.browser.inbox.constants import DAY_NAMES
     if lower in TIME_TODAY:
         return {"kind": "today", "token": token, "days_ago": 0, "parsed_at": now.date().isoformat()}
     if lower in TIME_YESTERDAY:
         return {"kind": "yesterday", "token": token, "days_ago": 1, "parsed_at": (now.date() - timedelta(days=1)).isoformat()}
     if lower in DAY_NAMES:
         return {"kind": "weekday", "token": token, "days_ago": 6, "parsed_at": None}
-    import re
     from fb_pipeline.browser.inbox.constants import SLASH_DATE_RE, MONTH_DAY_RE, MONTH_DAY_REV_RE
     
-    if SLASH_DATE_RE.match(token):
-        m = SLASH_DATE_RE.match(token)
+    if SLASH_DATE_RE.match(lower):
+        m = SLASH_DATE_RE.match(lower)
         d, mo_num, y = m.groups()
         y = y if y else str(now.year)
         if len(y) == 2: y = "20" + y
@@ -135,40 +185,29 @@ def parse_sidebar_time_token(token: str, now: datetime | None = None) -> dict:
             parsed = datetime(int(y), int(mo_num), int(d))
             days_ago = (now - parsed).days
             return {"kind": "slash_day", "token": token, "days_ago": days_ago, "parsed_at": parsed.date().isoformat()}
-        except Exception:
-            pass
+        except Exception: pass
 
-    # Normalize Vietnamese months to English so English strptime can digest it natively
-    token_clean = token.replace(",", "")
+    token_clean = lower.replace(",", "")
     def viet_month_repl(m):
-        mo_dict = {'1':'Jan', '2':'Feb', '3':'Mar', '4':'Apr', '5':'May', '6':'Jun', 
-                   '7':'Jul', '8':'Aug', '9':'Sep', '10':'Oct', '11':'Nov', '12':'Dec'}
-        return mo_dict.get(m.group(1), 'Jan')
+        mo_dict = {'1':'jan', '2':'feb', '3':'mar', '4':'apr', '5':'may', '6':'jun', '7':'jul', '8':'aug', '9':'sep', '10':'oct', '11':'nov', '12':'dec'}
+        return mo_dict.get(m.group(1), 'jan')
     token_clean = re.sub(r'th(?:g|áng)?\s*(\d{1,2})', viet_month_repl, token_clean, flags=re.I)
 
-    # Now attempt standard English parse
     if MONTH_DAY_RE.match(token_clean) or MONTH_DAY_REV_RE.match(token_clean):
         has_year = bool(re.search(r'\d{4}', token_clean))
         parts = token_clean.split()
-        
-        # If it matches DD MMM, flip it to MMM DD
-        if parts[0].isdigit():
-            if len(parts) >= 2:
-                parts[0], parts[1] = parts[1], parts[0]
+        if parts[0].isdigit() and len(parts) >= 2:
+            parts[0], parts[1] = parts[1], parts[0]
             token_clean = " ".join(parts)
-            
         try:
-            if has_year:
-                parsed = datetime.strptime(token_clean, "%b %d %Y")
-            else:
-                parsed = datetime.strptime(f"{token_clean} {now.year}", "%b %d %Y")
-                if (now - parsed).days < 0:
-                    parsed = datetime.strptime(f"{token_clean} {now.year - 1}", "%b %d %Y")
+            parsed = datetime.strptime(token_clean if has_year else f"{token_clean} {now.year}", "%b %d %Y")
+            if not has_year and (now - parsed).days < 0:
+                parsed = datetime.strptime(f"{token_clean} {now.year - 1}", "%b %d %Y")
             days_ago = (now - parsed).days
         except Exception as e:
             return {"kind": "unknown", "token": token, "days_ago": None, "parsed_at": None, "error": str(e)}
-            
         return {"kind": "month_day", "token": token, "days_ago": days_ago, "parsed_at": parsed.date().isoformat()}
+        
     return {"kind": "unknown", "token": token, "days_ago": None, "parsed_at": None}
 
 def is_thread_older_than_range(parsed_time: dict, max_days: int) -> bool:

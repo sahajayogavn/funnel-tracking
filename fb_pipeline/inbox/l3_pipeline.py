@@ -273,25 +273,20 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     
     # Chronological Sorting Integrity Logic (Rule 11)
     # Never use datetime('now') blindly for historical scraping, it breaks UI order.
-    # Use the explicitly parsed relative time to synthesize the absolute anchor.
+    # We now strictly trust the mathematically evaluated exact timestamp derived from Facebook relative strings.
     interaction_time_sql = "datetime('now')"
     if thread_record.sidebar_time_text:
         time_data = parse_sidebar_time_token(thread_record.sidebar_time_text)
         if time_data and time_data.get("parsed_at"):
-            # Retrospective [2026-04-06]: Historical Sync Reversal
-            # Fix: Replaced hardcoded `datetime('now')` with a dynamically staggered timestamp via `datetime('now', '-{dom_index} minutes')`.
-            # Root Cause: The scraper sequentially extracts UI threads from newest (top) to oldest (bottom). 
-            # Previously, all threads evaluated as 'today' were blindly given the exact execution time.
-            # This mathematically assigned the oldest threads the *most recent* datetime value, permanently reversing their UI order. 
-            if time_data.get("days_ago", -1) == 0:
-                interaction_time_sql = f"datetime('now', '-{thread_record.dom_index} minutes')"
-            else:
-                parsed_dt = time_data["parsed_at"]
-                if "T" in parsed_dt:
-                    parsed_dt = parsed_dt.replace("T", " ")
-                elif len(parsed_dt) == 10: # YYYY-MM-DD
-                    parsed_dt = f"{parsed_dt} 23:59:59"
-                interaction_time_sql = f"'{parsed_dt}'"
+            parsed_dt = time_data["parsed_at"]
+            if "T" in parsed_dt:
+                parsed_dt = parsed_dt.replace("T", " ")
+            elif len(parsed_dt) == 10: # YYYY-MM-DD
+                # If we only got a raw Date string without time, fallback to end-of-day tied with a dom_index stagger to completely prevent reverse chronologies
+                import datetime as dt_mod
+                staggered = dt_mod.datetime.now().replace(hour=23, minute=59, second=59) - dt_mod.timedelta(minutes=thread_record.dom_index)
+                parsed_dt = f"{parsed_dt} {staggered.strftime('%H:%M:%S')}"
+            interaction_time_sql = f"'{parsed_dt}'"
 
     if new_customer_message_added:
         cursor.execute(f'''

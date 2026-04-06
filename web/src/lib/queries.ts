@@ -236,7 +236,7 @@ export function getAllSeekers(): Seeker[] {
     }
   }
 
-  // Parse dates and sort chronologically, with FB native string as absolute priority
+  // Parse dates and sort chronologically, prioritizing the exact text of the last message bubble over DB interaction generic timestamps
   result.sort((a, b) => {
     const timeA = parseRealDate(a.lastMessageTimestampText) || parseRealDate(a.lastInteraction) || 0;
     const timeB = parseRealDate(b.lastMessageTimestampText) || parseRealDate(b.lastInteraction) || 0;
