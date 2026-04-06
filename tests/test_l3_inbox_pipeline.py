@@ -10,7 +10,7 @@ from fb_pipeline.contracts.l1_inbox import detect_city, extract_user_info
 from fb_pipeline.browser.l3_inbox import _parse_sidebar_time_token, _sidebar_loading_count, scrape_inbox
 from fb_pipeline.inbox.l3_pipeline import build_thread_record, enrich_thread_record, persist_thread_record
 from fb_pipeline.persistence.l4_sqlite_store import setup_database
-from fb_pipeline.browser.inbox.thread_detail_parser import extract_thread_messages
+from fb_pipeline.browser.inbox.thread_detail_parser import extract_thread_messages, verify_thread_switch
 
 class TestThreadDetailParser(unittest.TestCase):
     def test_extract_thread_messages_ignores_system_buttons_with_zws(self):
@@ -29,6 +29,38 @@ class TestThreadDetailParser(unittest.TestCase):
         self.assertEqual(len(messages), 2)
         self.assertEqual(messages[0]["text"], "Hello")
         self.assertEqual(messages[1]["text"], "Real message")
+
+    def test_verify_thread_switch_fallback_fb_url_when_missing_selected_item_id(self):
+        class _Page:
+            url = "https://business.facebook.com/latest/inbox/all?asset_id=123"
+            def evaluate(self, script, *args, **kwargs):
+                return "User A" # Returns header_text ensuring name matched
+            def wait_for_timeout(self, ms):
+                pass
+
+        class _Logger:
+            def info(self, msg): pass
+            def error(self, msg): pass
+            def warning(self, msg): pass
+
+        class _ThreadRecord:
+            selected_item_id = ""
+            fb_url = "original_hovercard_fb_url"
+            
+        page = _Page()
+        logger = _Logger()
+        thread_record = _ThreadRecord()
+        
+        # Act
+        # Facebook returns a URL without selected_item_id.
+        fb_url, verified_status = verify_thread_switch(
+            page, logger, name="User A", prev_fb_url="old", 
+            pre_click_fingerprint="old_fp", is_first_thread=False, thread_record=thread_record
+        )
+        
+        # Assert
+        self.assertTrue(verified_status)
+        self.assertEqual(fb_url, "original_hovercard_fb_url")
 
 class TestInboxContracts(unittest.TestCase):
     def setUp(self):
