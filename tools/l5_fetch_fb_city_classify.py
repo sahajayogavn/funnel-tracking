@@ -2,7 +2,7 @@ import logging
 import os
 import time
 
-from fb_pipeline.contracts.l1_city_llm import list, detect_city_llm, detect_city_batch_llm, gather_signals_for_user
+from fb_pipeline.contracts.l1_city_llm import detect_city_llm, detect_city_batch_llm, gather_signals_for_user
 
 logger = logging.getLogger("fetch_fb_city_classify")
 
