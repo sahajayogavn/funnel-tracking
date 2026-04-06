@@ -40,6 +40,15 @@ def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fi
                 fb_url = candidate
                 url_changed = True
 
+            if is_first_thread:
+                # Retrospective [Apr 2026]: Fix for 21s Silent Hang - "Stupid Scrolling"
+                # Facebook UI anomaly: For the very first thread, FB often forcibly renders 'Inbox' as the h1/header text
+                # instead of the user's name. This caused `name_matched` to fail, driving verify_thread_switch into a 
+                # blind 20-sec polling loop waiting for the name to appear. 
+                # Fix: Since the first thread is natively pre-selected on load, we bypass the string match loop entirely.
+                logger.info(f"thread_switch_verified method=is_first_thread thread='{name}'")
+                return fb_url, True
+
             if url_changed and name_matched:
                 logger.info(f"thread_switch_verified method=selected_item_id_and_name_match thread='{name}'")
                 return fb_url, True
@@ -170,10 +179,19 @@ def scroll_up_message_panel(page, logger, name: str) -> int:
         current_count = scroll_info.get("count", 0) if isinstance(scroll_info, dict) else 0
         current_sh = scroll_info.get("scrollHeight", 0) if isinstance(scroll_info, dict) else 0
         current_st = scroll_info.get("scrollTop", 0) if isinstance(scroll_info, dict) else 0
+        
+        is_already_at_top = (current_st <= 0)
+        
+        # Retrospective [Apr 2026]: Optimization for short threads
+        # Previously, reaching the top (or short threads with no scrollbar) would stall here for 3 full cycles
+        # (1500ms * 3 = 4.5s) waiting to confirm stability. By explicitly detecting `current_st <= 0`,
+        # we can safely reduce the confirmation overhead to just 1 cycle, killing the "3 scrolls for nothing" behavior.
         if current_count == prev_msg_count and current_sh == prev_scroll_height:
             stable_rounds += 1
-            if stable_rounds >= 3:
-                logger.info(f"Message count stable at {current_count} (scrollHeight={current_sh}) after {scroll_up_round} scroll rounds. All messages loaded.")
+            # If we are already at the physical top (0) and it's stable once, we're done. 
+            # No need to arbitrarily wait 3 full cycles for no reason.
+            if stable_rounds >= (1 if is_already_at_top else 3):
+                logger.info(f"Message count stable at {current_count} (scrollHeight={current_sh}, top={is_already_at_top}) after {scroll_up_round} scroll rounds. All messages loaded.")
                 break
         else:
             if current_count != prev_msg_count or current_sh != prev_scroll_height:

@@ -673,6 +673,17 @@ If the LLM is unavailable, it falls back to a legacy keyword-based scanner. The 
 - Nghệ An
 - Hải Phòng
 - Online
+
+## Anti-Fragile Scraper & Retrospectives
+
+**Universal ID**: `doc:architecture-scraper-resilience-001`
+
+Because Facebook's DOM is highly volatile, the scraping pipeline (`fb_pipeline/browser/`) is strictly governed by an **Anti-Fragile** development methodology:
+1. **No Blind Iterations**: DOM parsing failures must be debugged offline against saved HTML snapshots or verified incrementally.
+2. **Heuristics Over CSS**: Extractors rely on structural context (ARIA roles, background colors, rendering coordinates) instead of obfuscated CSS class names.
+3. **Mandatory Retrospectives**: Any bug fix or structural change to the scraper must include an inline `# Retrospective [Date]` comment documenting the exact Facebook UI anomaly that required the change (e.g., bypassing physical mouse wheels when scroll containers disappear, or handling 'Inbox' header overrides). These retrospectives guarantee that future iterations do not blindly wipe out defensive logic.
+4. **State Verification**: The pipeline proves physical DOM manipulation (like scrolling) by asserting actual `scrollTop` coordinate changes before and after the event, breaking free of infinite silent hangs.
+
 ## Validation Gates
 
 **Universal ID**: `doc:architecture-validation-001`

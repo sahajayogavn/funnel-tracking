@@ -146,7 +146,7 @@ def wait_for_sidebar_threads(page, logger, timeout_ms: int = 60000, poll_ms: int
         page.wait_for_timeout(poll_ms)
 
 def scroll_sidebar_and_wait(page, logger, scroll_round: int,
-                              timeout_ms: int = 60000, poll_ms: int = 1000) -> dict:
+                              timeout_ms: int = 60000, poll_ms: int = 250) -> dict:
     """Move mouse to left sidebar, scroll once, wait for loading indicators,
     then wait up to timeout_ms for new threads to appear and stabilize.
 
@@ -162,19 +162,39 @@ def scroll_sidebar_and_wait(page, logger, scroll_round: int,
         pass
 
     try:
-        page.evaluate(r'''(config) => {
+        scroll_info = page.evaluate(r'''(config) => {
+            let before = -1;
+            let after = -1;
             const cards = Array.from(document.querySelectorAll(config.threadSelector));
             if (cards.length > 0) {
+                let parent = cards[0].closest('div');
+                while(parent && parent.tagName !== 'BODY') {
+                    if (parent.scrollHeight > parent.clientHeight) {
+                        before = parent.scrollTop;
+                        cards[cards.length - 1].scrollIntoView({block: 'center', inline: 'nearest'});
+                        after = parent.scrollTop;
+                        return {before: before, after: after};
+                    }
+                    parent = parent.parentElement;
+                }
+                // Fallback to strict scrollIntoView without finding parent
                 cards[cards.length - 1].scrollIntoView({block: 'center', inline: 'nearest'});
             }
+            return {before: before, after: after};
         }''', {"threadSelector": thread_card_selector()})
-        logger.info(f"sidebar_scroll_performed round={scroll_round} pre_count={pre_count}")
+        
+        # Verify scroll action and log
+        before_scroll = scroll_info.get("before", -1)
+        after_scroll = scroll_info.get("after", -1)
+        diff = (after_scroll - before_scroll) if before_scroll != -1 else 0
+        logger.info(f"sidebar_scroll_performed round={scroll_round} pre_count={pre_count} "
+                    f"scrollTop={before_scroll}->{after_scroll} (diff: {diff})")
     except Exception as e:
         logger.warning(f"sidebar_scroll_failed round={scroll_round}: {e}")
         pre_snapshot["elapsed_ms"] = 0
         return pre_snapshot
 
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(50)
 
     start = time.time()
     stable_polls = 0
@@ -204,7 +224,7 @@ def scroll_sidebar_and_wait(page, logger, scroll_round: int,
             else:
                 stable_polls += 1
 
-            if stable_polls >= 2:
+            if stable_polls >= 3:
                 reason = "stable_after_loading" if saw_loading else "no_change"
                 logger.info(
                     f"sidebar_scroll_complete round={scroll_round} "

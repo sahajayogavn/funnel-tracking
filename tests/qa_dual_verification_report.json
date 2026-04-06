@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-04-05T07:55:04.667230",
+  "timestamp": "2026-04-06T11:34:09.203785",
   "page_id": "1548373332058326",
   "summary": {
     "total": 10,
@@ -284,6 +284,52 @@
       "overall": "PASSED"
     },
     {
+      "thread_name": "Van Huynh",
+      "thread_id": "1548373332058326_1c5657d7dec7f615",
+      "dom_tool": {
+        "thread_name": "Van Huynh",
+        "message_count": 40,
+        "senders": {
+          "Customer": 20,
+          "Page": 12,
+          "Unknown": 8
+        },
+        "phone": null,
+        "email": null,
+        "city": "Đà Nẵng",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n🧘 THIỀN VÀ ÂM NHẠC — MIỄ",
+          "Chào Huynh! Chúng tôi có thể giúp gì cho bạn?",
+          "Cho mình 2 vé"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Van Huynh",
+        "message_count": 40,
+        "senders": {
+          "Customer": 20,
+          "Page": 12,
+          "Unknown": 8
+        },
+        "phone": null,
+        "email": null,
+        "city": "Đà Nẵng",
+        "sample_messages": [
+          "--- [AD SOURCE]: This chat contains a reply to your ad.\n🧘 THIỀN VÀ ÂM NHẠC — MIỄ",
+          "Chào Huynh! Chúng tôi có thể giúp gì cho bạn?",
+          "Cho mình 2 vé"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (40 vs 40, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
       "thread_name": "Chim Cánh Cụt",
       "thread_id": "1548373332058326_d60e24390e7fe8ac",
       "dom_tool": {
@@ -376,91 +422,45 @@
       "overall": "PASSED"
     },
     {
-      "thread_name": "Ngọc Loan",
-      "thread_id": "1548373332058326_41dd48ebf95fac4f",
+      "thread_name": "Blink Min",
+      "thread_id": "1548373332058326_4efecfb5736964b7",
       "dom_tool": {
-        "thread_name": "Ngọc Loan",
-        "message_count": 33,
+        "thread_name": "Blink Min",
+        "message_count": 35,
         "senders": {
-          "Customer": 20,
-          "Page": 11,
-          "Unknown": 2
+          "Customer": 14,
+          "Page": 21,
+          "Unknown": 0
         },
-        "phone": "0984534419",
+        "phone": null,
         "email": null,
         "city": "Hà Nội",
         "sample_messages": [
-          "Thời gian và địa điểm tổ chức lớp thiền định cụ thể là gì?",
-          "Lớp thiền miễn phí có giới hạn số lượng không?",
-          "Ngọc Loan replied to an ad."
+          "Chào bạn, ngoài việc giúp giảm stress và cải thiện giấc ngủ, thiền Sahaja Yoga c",
+          "Tự nhận thức là như thế nào ạ",
+          "Câu hỏi của bạn rất hay, mình sẽ chuyển cho một anh/chị có kinh nghiệm trong CLB"
         ]
       },
       "llm_agent": {
-        "thread_name": "Ngọc Loan",
-        "message_count": 33,
+        "thread_name": "Blink Min",
+        "message_count": 35,
         "senders": {
-          "Customer": 20,
-          "Page": 11,
-          "Unknown": 2
+          "Customer": 14,
+          "Page": 21,
+          "Unknown": 0
         },
-        "phone": "0984534419",
+        "phone": null,
         "email": null,
         "city": "Hà Nội",
         "sample_messages": [
-          "Thời gian và địa điểm tổ chức lớp thiền định cụ thể là gì?",
-          "Lớp thiền miễn phí có giới hạn số lượng không?",
-          "Ngọc Loan replied to an ad."
+          "Chào bạn, ngoài việc giúp giảm stress và cải thiện giấc ngủ, thiền Sahaja Yoga c",
+          "Tự nhận thức là như thế nào ạ",
+          "Câu hỏi của bạn rất hay, mình sẽ chuyển cho một anh/chị có kinh nghiệm trong CLB"
         ]
       },
       "comparison": {
         "thread_name": "PASSED",
-        "message_count": "PASSED (33 vs 33, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Tran Thi Hoai Thuong",
-      "thread_id": "1548373332058326_8857a64598ad9c76",
-      "dom_tool": {
-        "thread_name": "Tran Thi Hoai Thuong",
-        "message_count": 33,
-        "senders": {
-          "Customer": 11,
-          "Page": 21,
-          "Unknown": 1
-        },
-        "phone": "0935539464",
-        "email": "ni8745@gmail.com",
-        "city": "Đà Nẵng",
-        "sample_messages": [
-          "Quan tâm chương trình nhạc thiền cho trường học",
-          "Chương trình nhạc thiền có tốn phí không?",
-          "Tran Thi Hoai Thuong replied to an ad."
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Tran Thi Hoai Thuong",
-        "message_count": 33,
-        "senders": {
-          "Customer": 11,
-          "Page": 21,
-          "Unknown": 1
-        },
-        "phone": "0935539464",
-        "email": "ni8745@gmail.com",
-        "city": "Đà Nẵng",
-        "sample_messages": [
-          "Quan tâm chương trình nhạc thiền cho trường học",
-          "Chương trình nhạc thiền có tốn phí không?",
-          "Tran Thi Hoai Thuong replied to an ad."
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (33 vs 33, diff=0)",
+        "message_count": "PASSED (35 vs 35, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"

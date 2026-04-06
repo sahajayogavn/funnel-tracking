@@ -234,29 +234,42 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
     if len(threads_to_process) > 0:
         logger.info("Resetting sidebar scroll to top for Stage 2...")
         try:
-            page.evaluate('''() => {
+            scroll_reset_info = page.evaluate('''() => {
+                let initial = -1;
+                let final = -1;
                 let cards = Array.from(document.querySelectorAll('div[role="navigation"] div[role="gridcell"]'));
                 if (cards.length > 0) {
                     let parent = cards[0].closest('div');
                     while(parent && parent.tagName !== 'BODY') {
                         if (parent.scrollHeight > parent.clientHeight) {
+                            initial = parent.scrollTop;
                             parent.scrollTop = 0;
+                            final = parent.scrollTop;
+                            return {initial: initial, final: final};
                         }
                         parent = parent.parentElement;
                     }
                 }
+                return {initial: initial, final: final};
             }''')
-        except Exception as e:
-            logger.warning(f"Failed to run JS scroll reset: {e}")
+            initial_st = scroll_reset_info.get("initial", -1)
+            final_st = scroll_reset_info.get("final", -1)
+            logger.info(f"Stage 2 scroll reset verify: scrollTop {initial_st} -> {final_st}")
             
-        # Guarantee we reach the top by physically wheeling up
-        try:
-            page.mouse.move(200, 400)
-            for _ in range(15):
-                page.mouse.wheel(0, -5000)
-                page.wait_for_timeout(100)
+            # Retrospective [Apr 2026]: Prevention of Phantom "Stupid Scrolling"
+            # Previously, if JS returned `-1` (meaning no scrollbar found or just a short list of cards),
+            # this script arbitrarily fired 15 physical `page.mouse.wheel` events. This forced the user to watch the 
+            # browser twitch visually for seconds on end, driving complaints of "stupid scrolling".
+            # We safely just ensure the first card is visible with zero delay using JS native methods.
+            if final_st != 0:
+                page.evaluate('''() => {
+                    let cards = Array.from(document.querySelectorAll('div[role="navigation"] div[role="gridcell"]'));
+                    if (cards.length > 0) {
+                        cards[0].scrollIntoView({block: 'start', inline: 'nearest'});
+                    }
+                }''')
         except Exception as e:
-            logger.warning(f"Failed to wheel up: {e}")
+            logger.warning(f"Failed to run Stage 2 scroll reset: {e}")
 
         page.wait_for_timeout(1500)
 
@@ -398,11 +411,43 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                         page.wait_for_timeout(500)
                     else:
                         try:
+                            # Verify and log scroll action as requested
+                            scroll_script = '''() => {
+                                let cards = Array.from(document.querySelectorAll('div[role="navigation"] div[role="gridcell"]'));
+                                if (cards.length > 0) {
+                                    let parent = cards[0].closest('div');
+                                    while(parent && parent.tagName !== 'BODY') {
+                                        if (parent.scrollHeight > parent.clientHeight) {
+                                            return parent.scrollTop;
+                                        }
+                                        parent = parent.parentElement;
+                                    }
+                                }
+                                return -1;
+                            }'''
+                            prev_scroll = page.evaluate(scroll_script)
+                            
                             page.mouse.move(200, 400)
-                            page.mouse.wheel(0, 300)
+                            page.mouse.wheel(0, 500)
                             page.wait_for_timeout(500)
-                        except Exception:
-                            pass
+                            
+                            new_scroll = page.evaluate(scroll_script)
+                            diff = (new_scroll - prev_scroll) if prev_scroll != -1 else 0
+                            logger.info(f"Stage 2 scroll for '{name}' (attempt {click_attempts}): scrollTop {prev_scroll} -> {new_scroll} (diff: {diff})")
+                            
+                            if diff == 0 and prev_scroll != -1:
+                                # Fallback to JS scrolling if wheel fails to move
+                                logger.warning(f"Wheel scroll failed to move container for '{name}'. Using JS fallback.")
+                                page.evaluate('''() => {
+                                    let cards = Array.from(document.querySelectorAll('div[role="navigation"] div[role="gridcell"]'));
+                                    if (cards.length > 0) {
+                                        cards[cards.length - 1].scrollIntoView({block: 'center', inline: 'nearest'});
+                                    }
+                                }''')
+                                page.wait_for_timeout(500)
+                                
+                        except Exception as e:
+                            logger.error(f"Error executing verified scroll: {e}")
 
             if not clicked:
                 logger.warning(f"Failed to verify click for thread '{name}' in Stage 2 after {click_attempts} scroll attempts.")

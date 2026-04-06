@@ -159,3 +159,8 @@ This workflow provides step-by-step instructions for writing Python scripts for 
      Always implement an explicit 2-Stage Strategy:
      - **Stage 1 (Discovery)**: Iteratively scroll to the bottom of the container to accumulate the Target Entity Metadata (e.g., Thread Names). Stop strictly based on `time_range` or `max_limit_quota`. Do NOT open or navigate any items.
      - **Stage 2 (Extraction)**: Reset the viewport. Loop sequentially through the immutable list of discovered items from Stage 1, using stable visual identifiers (like `sidebarIdentityKey`) to dynamically re-locate, select, and safely extract the deep payloads.
+
+10. **Mandatory Retrospectives and Anti-Regression Documentation**:
+   After resolving a bug or optimizing the pipeline, you must never leave "naked" fixes.
+   - **Retrospective Comments**: Above the modified code blocks, add explicit `# Retrospective [Date]` comments explaining *why* the code was structured this way. Detail the exact Facebook UI anomaly, the root cause of the previous failure (e.g., a silent hang, an obfuscated state), and the mechanics of the fix.
+   - **Continuous Evolution**: You must actively respect the retrospective. When touching existing code adorned with retrospective comments, do not obliterate the lessons learned. Instead, append new findings or adjust the strategy while maintaining the historical context.
