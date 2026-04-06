@@ -1,4 +1,5 @@
 import hashlib
+from urllib.parse import urlparse, parse_qs
 
 from fb_pipeline.contracts.l1_inbox import (
     EnrichedThreadRecord,
@@ -14,9 +15,28 @@ from fb_pipeline.contracts.l1_inbox import (
 
 
 def _compute_thread_id(page_id: str, visible_thread: dict, name: str, preview_text: str,
-                       sidebar_time_text: str, sidebar_identity_key: str, selected_item_id: str) -> str:
+                       sidebar_time_text: str, sidebar_identity_key: str, selected_item_id: str, fb_url: str = "") -> str:
+    fb_uid = ""
+    if fb_url:
+        try:
+            parsed = urlparse(fb_url)
+            opts = parse_qs(parsed.query)
+            if 'id' in opts:
+                fb_uid = opts['id'][0]
+            elif 'profile.php' not in fb_url:
+                path_parts = [p for p in parsed.path.strip('/').split('/') if p]
+                if path_parts:
+                    fb_uid = path_parts[0]
+                else:
+                    fb_uid = fb_url
+            else:
+                fb_uid = fb_url
+        except Exception:
+            fb_uid = fb_url
+
     stable_key = (
-        selected_item_id
+        fb_uid
+        or selected_item_id
         or sidebar_identity_key
         or "|".join([
             page_id,
@@ -55,6 +75,7 @@ def build_thread_record(page_id: str, visible_thread: dict) -> ThreadRecord:
             sidebar_time_text,
             sidebar_identity_key,
             selected_item_id,
+            fb_url,
         ),
         thread_name=name,
         preview_text=preview_text,
@@ -148,7 +169,8 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
         s = re.sub(r'^---\s*\[AD SOURCE\]:.*?---\s*', '', s, flags=re.DOTALL)
         return re.sub(r'\s+', '', str(s).lower())
 
-    existing_tuples = [(_normalize(row['sender']), _normalize(row['content'])) for row in existing_msgs]
+    existing_list = [(_normalize(row['sender']), _normalize(row['content'])) for row in existing_msgs]
+    existing_set = set(existing_list)
     
     new_tuples = []
     for msg in thread_record.messages:
@@ -162,15 +184,32 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
                 sender = "Auto_Page"
         new_tuples.append((_normalize(sender), _normalize(content)))
         
-    max_overlap = min(len(existing_tuples), len(new_tuples))
+    max_overlap = min(len(existing_list), len(new_tuples))
     best_overlap = 0
     # Try all possible overlap lengths. We want the LARGEST overlap.
     for i in range(1, max_overlap + 1):
-        if existing_tuples[-i:] == new_tuples[:i]:
+        if existing_list[-i:] == new_tuples[:i]:
             best_overlap = i
             
     next_seq = existing_msgs[-1]['seq'] + 1 if existing_msgs else 0
-    msgs_to_insert = thread_record.messages[best_overlap:]
+    candidate_msgs = thread_record.messages[best_overlap:]
+
+    msgs_to_insert = []
+    for msg in candidate_msgs:
+        content = msg.content
+        sender = msg.sender
+        if sender == "Page":
+            if ("Chúng tôi có thể" in content or 
+                "Họ tên và Số điện thoại" in content or
+                "Khóa học thiền ở Hà Nội" in content or
+                "Thời gian: 20h-21h30" in content):
+                sender = "Auto_Page"
+                
+        sig = (_normalize(sender), _normalize(content))
+        if sig not in existing_set:
+            msg.sender = sender
+            msgs_to_insert.append(msg)
+            existing_set.add(sig)
 
     for idx, msg in enumerate(msgs_to_insert):
         msg_content_to_save = msg.content
