@@ -35,7 +35,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from tools.env_manager import load_credentials
-from fb_pipeline.contracts.l1_city_llm import detect_city_llm, gather_signals_for_user
+from fb_pipeline.contracts.l1_city_llm import detect_city_llm, detect_city_batch_llm, gather_signals_for_user
 from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
 
 # code:tool-citydetect-001:logging
@@ -139,36 +139,108 @@ def classify_all(conn, llm_config: dict, dry_run: bool = True,
     cursor = conn.cursor()
 
     if force:
-        query = "SELECT thread_id FROM users ORDER BY last_interaction DESC"
+        query = "SELECT thread_id, city FROM users ORDER BY last_interaction DESC"
     else:
-        query = "SELECT thread_id FROM users WHERE city = 'Unknown' ORDER BY last_interaction DESC"
+        query = "SELECT thread_id, city FROM users WHERE city = 'Unknown' ORDER BY last_interaction DESC"
 
     if limit > 0:
         query += f" LIMIT {limit}"
 
     cursor.execute(query)
-    thread_ids = [r["thread_id"] for r in cursor.fetchall()]
+    user_rows = cursor.fetchall()
 
-    logger.info(f"classify_all: {len(thread_ids)} users to classify (force={force}, dry_run={dry_run})")
+    logger.info(f"classify_all: {len(user_rows)} users to classify (force={force}, dry_run={dry_run})")
 
     results = []
     updated_count = 0
     error_count = 0
-
-    for i, tid in enumerate(thread_ids):
-        logger.info(f"[{i+1}/{len(thread_ids)}] Classifying {tid}...")
+    
+    batches = []
+    current_batch = []
+    current_chars = 0
+    MAX_CHARS = 80000
+    
+    for row in user_rows:
+        tid = row["thread_id"]
+        old_city = row["city"]
         try:
-            result = classify_user(conn, tid, llm_config, dry_run=dry_run)
-            results.append(result)
-            if result.get("updated"):
-                updated_count += 1
-            # Rate limiting: small delay between API calls
-            if i < len(thread_ids) - 1:
+            signals = gather_signals_for_user(conn, tid)
+            user_prompt_chunk = f"## Seeker: {signals['thread_name']}\n"
+            user_prompt_chunk += f"Signal 1 (Customer messages): {' '.join(signals['customer_messages'])}\n"
+            user_prompt_chunk += f"Signal 2 (Page messages): {' '.join(signals['page_messages'])}\n"
+            user_prompt_chunk += f"Signal 3 (Ad content): {signals['ad_content']}\n\n"
+            
+            chunk_len = len(user_prompt_chunk)
+            if current_chars + chunk_len > MAX_CHARS and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_chars = 0
+                
+            current_batch.append({
+                "thread_id": tid,
+                "thread_name": signals["thread_name"],
+                "old_city": old_city,
+                "prompt_chunk": user_prompt_chunk
+            })
+            current_chars += chunk_len
+        except Exception as e:
+            logger.warning(f"Error gathering signals for {tid}: {e}")
+            error_count += 1
+            
+    if current_batch:
+        batches.append(current_batch)
+        
+    for b_idx, batch in enumerate(batches):
+        logger.info(f"Classifying batch {b_idx+1}/{len(batches)} ({len(batch)} users)...")
+        batch_payload = "\n".join([item["prompt_chunk"] for item in batch])
+        try:
+            batch_res = detect_city_batch_llm(
+                batch_payload=batch_payload,
+                api_base=llm_config["api_base"],
+                api_key=llm_config["api_key"],
+                model=llm_config["model"],
+            )
+            
+            name_to_res = {r.get("thread_name", ""): r for r in batch_res}
+            
+            for item in batch:
+                tid = item["thread_id"]
+                tname = item["thread_name"]
+                old_city = item["old_city"]
+                
+                res = name_to_res.get(tname)
+                if not res:
+                    logger.warning(f"LLM omitted {tname}")
+                    error_count += 1
+                    continue
+                    
+                new_city = res.get("city", "Unknown")
+                updated = False
+                if not dry_run and new_city != "Unknown" and new_city != old_city:
+                    cursor.execute(
+                        "UPDATE users SET city = ? WHERE thread_id = ?",
+                        (new_city, tid)
+                    )
+                    conn.commit()
+                    updated = True
+                    updated_count += 1
+                    logger.info(f"Updated {tname}: {old_city} → {new_city}")
+                    
+                results.append({
+                    "thread_id": tid,
+                    "thread_name": tname,
+                    "old_city": old_city,
+                    "new_city": new_city,
+                    "confidence": res.get("confidence", "low"),
+                    "reasoning": res.get("reasoning", ""),
+                    "updated": updated
+                })
+            
+            if b_idx < len(batches) - 1:
                 time.sleep(0.5)
         except Exception as e:
-            logger.error(f"Error classifying {tid}: {e}")
-            results.append({"thread_id": tid, "error": str(e)})
-            error_count += 1
+            logger.error(f"Error classifying batch {b_idx}: {e}")
+            error_count += len(batch)
 
     # Summary
     city_distribution = {}
@@ -180,7 +252,7 @@ def classify_all(conn, llm_config: dict, dry_run: bool = True,
 
     return {
         "action": "classify_all",
-        "total_users": len(thread_ids),
+        "total_users": len(user_rows),
         "updated": updated_count,
         "errors": error_count,
         "dry_run": dry_run,

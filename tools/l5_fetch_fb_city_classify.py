@@ -2,7 +2,7 @@ import logging
 import os
 import time
 
-from fb_pipeline.contracts.l1_city_llm import detect_city_llm, gather_signals_for_user
+from fb_pipeline.contracts.l1_city_llm import list, detect_city_llm, detect_city_batch_llm, gather_signals_for_user
 
 logger = logging.getLogger("fetch_fb_city_classify")
 
@@ -48,21 +48,65 @@ def _post_scrape_llm_city_classify(conn, page_id: str) -> dict:
     updated = 0
     errors = 0
 
+    batches = []
+    current_batch = []
+    current_chars = 0
+    MAX_CHARS = 80000
+
     for i, user_row in enumerate(users):
         thread_id = user_row["thread_id"]
         old_city = user_row["city"]
         try:
             signals = gather_signals_for_user(conn, thread_id)
-            result = detect_city_llm(
-                thread_name=signals["thread_name"],
-                customer_messages=signals["customer_messages"],
-                page_messages=signals["page_messages"],
-                ad_content=signals["ad_content"],
-                api_base=llm_config["api_base"],
-                api_key=llm_config["api_key"],
-                model=llm_config["model"],
-            )
-            new_city = result["city"]
+            user_prompt_chunk = f"## Seeker: {signals['thread_name']}\n"
+            user_prompt_chunk += f"Signal 1 (Customer messages): {' '.join(signals['customer_messages'])}\n"
+            user_prompt_chunk += f"Signal 2 (Page messages): {' '.join(signals['page_messages'])}\n"
+            user_prompt_chunk += f"Signal 3 (Ad content): {signals['ad_content']}\n\n"
+            
+            chunk_len = len(user_prompt_chunk)
+            if current_chars + chunk_len > MAX_CHARS and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_chars = 0
+                
+            current_batch.append({
+                "thread_id": thread_id,
+                "thread_name": signals["thread_name"],
+                "old_city": old_city,
+                "prompt_chunk": user_prompt_chunk
+            })
+            current_chars += chunk_len
+        except Exception as e:
+            logger.warning(f"Failed to gather signals for {thread_id}: {e}")
+            errors += 1
+
+    if current_batch:
+        batches.append(current_batch)
+
+    for b_idx, batch in enumerate(batches):
+        logger.info(f"LLM city classification: processing batch {b_idx+1}/{len(batches)} ({len(batch)} users)")
+        batch_payload = "\n".join([item["prompt_chunk"] for item in batch])
+        results = detect_city_batch_llm(
+            batch_payload=batch_payload,
+            api_base=llm_config["api_base"],
+            api_key=llm_config["api_key"],
+            model=llm_config["model"],
+        )
+        
+        name_to_res = {r.get("thread_name", ""): r for r in results}
+            
+        for item in batch:
+            thread_id = item["thread_id"]
+            thread_name = item["thread_name"]
+            old_city = item["old_city"]
+            
+            res = name_to_res.get(thread_name)
+            if not res:
+                logger.warning(f"LLM omitted result for {thread_name}")
+                errors += 1
+                continue
+                
+            new_city = res.get("city", "Unknown")
             if new_city != "Unknown" and new_city != old_city:
                 cursor.execute(
                     "UPDATE users SET city = ? WHERE thread_id = ?",
@@ -70,15 +114,12 @@ def _post_scrape_llm_city_classify(conn, page_id: str) -> dict:
                 )
                 updated += 1
                 logger.info(
-                    f"LLM city [{i+1}/{len(users)}] {user_row['thread_name']}: "
-                    f"{old_city} → {new_city} [{result['confidence']}] {result['reasoning']}"
+                    f"LLM city batch_updated [{b_idx+1}/{len(batches)}] {thread_name}: "
+                    f"{old_city} → {new_city} [{res.get('confidence', '')}] {res.get('reasoning', '')}"
                 )
-            # Rate limiting
-            if i < len(users) - 1:
-                time.sleep(0.3)
-        except Exception as e:
-            logger.warning(f"LLM city error for {thread_id}: {e}")
-            errors += 1
+        
+        if b_idx < len(batches) - 1:
+            time.sleep(0.5)
 
     conn.commit()
     logger.info(f"LLM city classification done: {updated} updated, {errors} errors out of {len(users)} users.")

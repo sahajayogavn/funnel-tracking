@@ -175,6 +175,103 @@ def detect_city_llm(thread_name: str, customer_messages: list[str],
         logger.error(f"Unexpected LLM response structure for {thread_name}: {e}")
         return {"city": "Unknown", "confidence": "low", "reasoning": f"Response parse error: {e}"}
 
+BATCH_SYSTEM_PROMPT = """You are a city classifier for a Vietnamese meditation center's CRM system.
+
+Your task: determine which city each seeker (potential student) should be assigned to based on their conversation signals.
+
+## Known cities
+{known_cities}
+
+If the city does not match any known city, return "Unknown".
+
+## Priority rules (MOST IMPORTANT → LEAST IMPORTANT)
+1. **Registration confirmation message**: If the user explicitly confirmed which city's class they want to attend (e.g. "Mình đăng ký lớp Đà Nẵng", or the page sent them an address in a specific city), that city wins. This is the STRONGEST signal.
+2. **City the user lives in**: If the user mentioned where they live (e.g. "Em ở HCM", "Mình ở gần Hội An"), use that.
+3. **Ad content**: The ad the user clicked on may mention a city. This is the WEAKEST signal because one ad serves multiple cities.
+
+## Important nuances
+- Street names can exist in multiple cities. "Xô Viết Nghệ Tĩnh" exists in BOTH HCM and Đà Nẵng.
+  Always look at the FULL address context, not just the street name.
+- "Online" / "Zoom" / "trực tuyến" = the "Online" city.
+- If signals conflict, always prefer the higher-priority signal.
+- If no signal is clear enough, return "Unknown".
+
+## Response format
+Reply with ONLY a JSON array containing one object for each seeker. Output MUST exactly match this format without markdown fences:
+[
+  {{"thread_name": "<exact name provided>", "city": "<city name>", "confidence": "high|medium|low", "reasoning": "<one-line explanation>"}}
+]
+"""
+
+# code:tool-citydetect-001:llm-batch-call
+def detect_city_batch_llm(batch_payload: str,
+                          api_base: str, api_key: str, model: str,
+                          timeout: int = 90) -> list[dict]:
+    """Detect city for multiple users in one request.
+
+    Args:
+        batch_payload: Formatted string containing multiple users' signals.
+        api_base: OpenAI-compatible API base URL.
+        api_key: API key.
+        model: Model name.
+        timeout: Request timeout.
+
+    Returns:
+        list of dicts with keys: thread_name, city, confidence, reasoning
+    """
+    system = BATCH_SYSTEM_PROMPT.format(known_cities=", ".join(KNOWN_CITIES))
+    url = f"{api_base.rstrip('/')}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": batch_payload},
+        ],
+        "temperature": 0.1,
+    }
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        raw_content = data["choices"][0]["message"]["content"]
+        
+        # Parse JSON array
+        text = raw_content.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+            
+        results = json.loads(text)
+        if not isinstance(results, list):
+            results = [results]
+            
+        # Normalize each city
+        for res in results:
+            city = res.get("city", "Unknown")
+            if city not in KNOWN_CITIES and city != "Unknown":
+                city_lower = city.lower()
+                for known in KNOWN_CITIES:
+                    if known.lower() in city_lower or city_lower in known.lower():
+                        city = known
+                        break
+                else:
+                    city = "Unknown"
+            res["city"] = city
+            
+        return results
+    except requests.exceptions.Timeout:
+        logger.error("LLM batch request timed out")
+        return []
+    except Exception as e:
+        logger.error(f"LLM batch request failed: {e}")
+        return []
+
 
 # code:tool-citydetect-001:db-gather
 def gather_signals_for_user(conn, thread_id: str) -> dict:
@@ -228,5 +325,6 @@ def gather_signals_for_user(conn, thread_id: str) -> dict:
 __all__ = [
     "KNOWN_CITIES",
     "detect_city_llm",
+    "detect_city_batch_llm",
     "gather_signals_for_user",
 ]
