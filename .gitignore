@@ -68,3 +68,7 @@ logs/
 .agents/memory/agent_memory/*.tmp
 memory/agent_memory/fb_credential_*.json
 memory/agent_memory/frankensqlite.db
+
+memory/agent_memory/frankensqlite.db-shm
+memory/agent_memory/frankensqlite.db-wal
+tmp/
