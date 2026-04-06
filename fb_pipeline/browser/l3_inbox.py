@@ -235,13 +235,30 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
         logger.info("Resetting sidebar scroll to top for Stage 2...")
         try:
             page.evaluate('''() => {
-                let container = document.querySelector('div[aria-label*="Danh sách tin nhắn"]') || 
-                                document.querySelector('div[role="region"][aria-label*="message"]');
-                if(container) container.scrollTop = 0;
+                let cards = Array.from(document.querySelectorAll('div[role="navigation"] div[role="gridcell"]'));
+                if (cards.length > 0) {
+                    let parent = cards[0].closest('div');
+                    while(parent && parent.tagName !== 'BODY') {
+                        if (parent.scrollHeight > parent.clientHeight) {
+                            parent.scrollTop = 0;
+                        }
+                        parent = parent.parentElement;
+                    }
+                }
             }''')
-            page.wait_for_timeout(1500)
         except Exception as e:
-            logger.warning(f"Failed to reset sidebar scroll: {e}")
+            logger.warning(f"Failed to run JS scroll reset: {e}")
+            
+        # Guarantee we reach the top by physically wheeling up
+        try:
+            page.mouse.move(200, 400)
+            for _ in range(15):
+                page.mouse.wheel(0, -5000)
+                page.wait_for_timeout(100)
+        except Exception as e:
+            logger.warning(f"Failed to wheel up: {e}")
+
+        page.wait_for_timeout(1500)
 
         for i, c in enumerate(threads_to_process):
             thread_record = c["record"]
@@ -315,6 +332,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                             }
                             
                             // Relaxed Match
+                            let norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
                             const text = (c.innerText || '').trim();
                             const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
                             const elName = lines[0] || '';
@@ -335,10 +353,12 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                             }
                             
                             let preLines = lines.slice(1).join(' ');
-                            if (elName && elName === targetName && targetPreviewText && preLines.includes(targetPreviewText)) {
-                                c.scrollIntoView({block: "center"});
-                                c.click();
-                                return true;
+                            if (elName && norm(elName) === norm(targetName)) {
+                                if (!targetPreviewText || norm(preLines).includes(norm(targetPreviewText)) || norm(targetPreviewText).includes(norm(preLines))) {
+                                    c.scrollIntoView({block: "center"});
+                                    c.click();
+                                    return true;
+                                }
                             }
                         }
                         return false;
@@ -353,12 +373,15 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                     pass
                     
                 if not clicked:
-                    try:
-                        page.mouse.move(200, 400)
-                        page.mouse.wheel(0, 300)
+                    if click_attempts <= 3:
                         page.wait_for_timeout(500)
-                    except Exception:
-                        pass
+                    else:
+                        try:
+                            page.mouse.move(200, 400)
+                            page.mouse.wheel(0, 300)
+                            page.wait_for_timeout(500)
+                        except Exception:
+                            pass
 
             if not clicked:
                 logger.warning(f"Failed to verify click for thread '{name}' in Stage 2 after {click_attempts} scroll attempts.")

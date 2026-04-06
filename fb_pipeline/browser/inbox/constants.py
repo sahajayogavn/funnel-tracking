@@ -27,7 +27,8 @@ DAY_NAMES = {
 
 TIME_TODAY = {"today", "hôm nay"}
 TIME_YESTERDAY = {"yesterday", "hôm qua"}
-MONTH_DAY_RE = re.compile(r'^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}(?:,\s*\d{4}|\s+\d{4})?$', re.I)
-
+MONTH_DAY_RE = re.compile(r'^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|th(?:g|áng)?)\s*\d{1,2}(?:(?:,\s*|\s+)\d{4})?$', re.I)
+MONTH_DAY_REV_RE = re.compile(r'^\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|th(?:g|áng)?)(?:(?:,\s*|\s+)\d{4})?$', re.I)
+SLASH_DATE_RE = re.compile(r'^(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?$', re.I)
 def thread_card_selector() -> str:
     return ", ".join(THREAD_CARD_SELECTORS)

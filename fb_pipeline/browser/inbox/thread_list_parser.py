@@ -23,7 +23,15 @@ def extract_visible_threads(page) -> list[dict]:
                     if (/^\d+[smhdw]$/i.test(token)) return token;
                     if (/^(today|yesterday|hôm nay|hôm qua)$/i.test(token)) return token;
                     if (/^(mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(token)) return token;
-                    if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}(?:,\s*\d{4}|\s+\d{4})?$/i.test(token)) return token;
+                    if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|th(?:g|áng)?)\s*\d{1,2}(?:(?:,\s*|\s+)\d{4})?$/i.test(token)) return token;
+                    if (/^\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|th(?:g|áng)?)(?:(?:,\s*|\s+)\d{4})?$/i.test(token)) return token;
+                    if (/^\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?$/.test(token)) return token;
+                }
+                
+                // Fallback: if no regex strictly matches but the last line is very short (like a date), pick it
+                if (lines.length > 1) {
+                    const lastToken = (lines[lines.length - 1] || '').trim();
+                    if (lastToken.length >= 3 && lastToken.length <= 15) return lastToken;
                 }
                 return '';
             }
@@ -82,17 +90,51 @@ def parse_sidebar_time_token(token: str, now: datetime | None = None) -> dict:
         return {"kind": "yesterday", "token": token, "days_ago": 1, "parsed_at": (now.date() - timedelta(days=1)).isoformat()}
     if lower in DAY_NAMES:
         return {"kind": "weekday", "token": token, "days_ago": 6, "parsed_at": None}
-    if MONTH_DAY_RE.match(token):
-        if "," in token or bool(re.search(r'\d{4}', token)):
-            token_clean = token.replace(",", "")
-            parsed = datetime.strptime(token_clean, "%b %d %Y")
+    import re
+    from fb_pipeline.browser.inbox.constants import SLASH_DATE_RE, MONTH_DAY_RE, MONTH_DAY_REV_RE
+    
+    if SLASH_DATE_RE.match(token):
+        m = SLASH_DATE_RE.match(token)
+        d, mo_num, y = m.groups()
+        y = y if y else str(now.year)
+        if len(y) == 2: y = "20" + y
+        try:
+            parsed = datetime(int(y), int(mo_num), int(d))
             days_ago = (now - parsed).days
-        else:
-            parsed = datetime.strptime(f"{token} {now.year}", "%b %d %Y")
+            return {"kind": "slash_day", "token": token, "days_ago": days_ago, "parsed_at": parsed.date().isoformat()}
+        except Exception:
+            pass
+
+    # Normalize Vietnamese months to English so English strptime can digest it natively
+    token_clean = token.replace(",", "")
+    def viet_month_repl(m):
+        mo_dict = {'1':'Jan', '2':'Feb', '3':'Mar', '4':'Apr', '5':'May', '6':'Jun', 
+                   '7':'Jul', '8':'Aug', '9':'Sep', '10':'Oct', '11':'Nov', '12':'Dec'}
+        return mo_dict.get(m.group(1), 'Jan')
+    token_clean = re.sub(r'th(?:g|áng)?\s*(\d{1,2})', viet_month_repl, token_clean, flags=re.I)
+
+    # Now attempt standard English parse
+    if MONTH_DAY_RE.match(token_clean) or MONTH_DAY_REV_RE.match(token_clean):
+        has_year = bool(re.search(r'\d{4}', token_clean))
+        parts = token_clean.split()
+        
+        # If it matches DD MMM, flip it to MMM DD
+        if parts[0].isdigit():
+            if len(parts) >= 2:
+                parts[0], parts[1] = parts[1], parts[0]
+            token_clean = " ".join(parts)
+            
+        try:
+            if has_year:
+                parsed = datetime.strptime(token_clean, "%b %d %Y")
+            else:
+                parsed = datetime.strptime(f"{token_clean} {now.year}", "%b %d %Y")
+                if (now - parsed).days < 0:
+                    parsed = datetime.strptime(f"{token_clean} {now.year - 1}", "%b %d %Y")
             days_ago = (now - parsed).days
-            if days_ago < 0:
-                parsed = datetime.strptime(f"{token} {now.year - 1}", "%b %d %Y")
-                days_ago = (now - parsed).days
+        except Exception as e:
+            return {"kind": "unknown", "token": token, "days_ago": None, "parsed_at": None, "error": str(e)}
+            
         return {"kind": "month_day", "token": token, "days_ago": days_ago, "parsed_at": parsed.date().isoformat()}
     return {"kind": "unknown", "token": token, "days_ago": None, "parsed_at": None}
 
