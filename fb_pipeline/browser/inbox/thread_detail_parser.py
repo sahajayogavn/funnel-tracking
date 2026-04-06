@@ -5,7 +5,8 @@ from .constants import MESSAGE_REGION_SELECTOR
 
 def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fingerprint: str,
                          is_first_thread: bool, thread_record) -> tuple[str, bool]:
-    fb_url = ""
+    # Initialize with hovercard fallback immediately so early returns don't lose it
+    fb_url = getattr(thread_record, "fb_url", "") if hasattr(thread_record, "fb_url") else ""
     url_changed = False
     name_matched = False
     target_item_id = getattr(thread_record, "selected_item_id", "")
@@ -41,13 +42,17 @@ def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fi
                 url_changed = True
 
             if is_first_thread:
-                # Retrospective [Apr 2026]: Fix for 21s Silent Hang - "Stupid Scrolling"
-                # Facebook UI anomaly: For the very first thread, FB often forcibly renders 'Inbox' as the h1/header text
-                # instead of the user's name. This caused `name_matched` to fail, driving verify_thread_switch into a 
-                # blind 20-sec polling loop waiting for the name to appear. 
-                # Fix: Since the first thread is natively pre-selected on load, we bypass the string match loop entirely.
-                logger.info(f"thread_switch_verified method=is_first_thread thread='{name}'")
-                return fb_url, True
+                # Retrospective [Apr 2026]: Fix for 21s Silent Hang & Missing Profile ID
+                # Facebook UI anomaly 1: First thread forces 'Inbox' as h1, breaking name_matched string match.
+                # Facebook UI anomaly 2: React Router delays appending `&selected_item_id` by 100-500ms after physical clicks.
+                # Fix: We bypass the `name_matched` loop to prevent 20-sec blind polling, but we wait up to 1.5 seconds (_poll >= 3) 
+                # so React Router can populate the ID. If candidate appears early, or 1.5s passes (for Guest users), we return safely.
+                if candidate:
+                    logger.info(f"thread_switch_verified method=is_first_thread_with_id thread='{name}'")
+                    return fb_url, True
+                elif _poll >= 3:
+                    logger.info(f"thread_switch_verified method=is_first_thread_no_id thread='{name}'")
+                    return fb_url, True
 
             if url_changed and name_matched:
                 logger.info(f"thread_switch_verified method=selected_item_id_and_name_match thread='{name}'")
@@ -60,13 +65,12 @@ def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fi
     if not url_changed:
         try:
             current_qs = parse_qs(urlparse(page.url).query)
-            fb_url = current_qs.get('selected_item_id', [''])[0]
+            # Only overwrite if Facebook gave us a valid selected_item_id
+            candidate = current_qs.get('selected_item_id', [''])[0]
+            if candidate:
+                fb_url = candidate
         except Exception:
-            fb_url = ""
-
-    # Fallback to fb_url extracted from the thread list's hovercard dynamically if URL lacks selected_item_id
-    if not fb_url and hasattr(thread_record, "fb_url"):
-        fb_url = getattr(thread_record, "fb_url", "")
+            pass
 
     panel_refreshed = False
     
@@ -334,6 +338,32 @@ def extract_thread_messages(page) -> list[dict]:
                         if (text && text.length > 2 && text.length < 2000 && !seenSegment.has(text)) {
                             texts.push(text);
                             seenSegment.add(text);
+                        }
+                    }
+                }
+
+                // --- REACTION EXTRACTION EXTENSION (Apr 2026) ---
+                // Retrospective [Apr 2026]: Extracting Reactions dynamically inside nested wrappers
+                // Facebook groups multiple messages together (and sometimes Zalo previews) inside `.x1y1aw1k`.
+                // However, the reaction container itself (e.g. span.x1f6kntn) is NOT inside the innermost text container `.x1y1aw1k`,
+                // but rests at the bottom of the `.x1fqp7bg` bubble cluster. 
+                // Using `.querySelectorAll(':scope .x1y1aw1k img')` ensures we strictly isolate nested text emojis.
+                // Any emoji `img` that is OUTSIDE the inner `.x1y1aw1k` bound is safely categorized as a reaction icon.
+                let allImgs = el.querySelectorAll('img');
+                let textImgs = Array.from(el.querySelectorAll(':scope .x1y1aw1k img'));
+                for (let img of allImgs) {
+                    if (!textImgs.includes(img)) {
+                        let alt = img.getAttribute('alt');
+                        if (alt && ['❤', '❤️', '👍', '😆', '😂', '😮', '😢', '😡', 'Like', 'Love', 'Haha', 'Wow', 'Sad', 'Angry'].includes(alt)) {
+                            let type = 'LIKE';
+                            if (['❤', '❤️', 'Love'].includes(alt)) type = 'LOVE';
+                            else if (['😆', '😂', 'Haha'].includes(alt)) type = 'HAHA';
+                            else if (['😮', 'Wow'].includes(alt)) type = 'WOW';
+                            else if (['😢', 'Sad'].includes(alt)) type = 'SAD';
+                            else if (['😡', 'Angry'].includes(alt)) type = 'ANGRY';
+                            let reactionTag = ':::REACTION_' + type + ':::';
+                            texts.push(reactionTag);
+                            seenSegment.add(reactionTag);
                         }
                     }
                 }

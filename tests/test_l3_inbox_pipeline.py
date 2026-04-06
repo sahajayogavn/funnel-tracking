@@ -13,6 +13,17 @@ from fb_pipeline.persistence.l4_sqlite_store import setup_database
 from fb_pipeline.browser.inbox.thread_detail_parser import extract_thread_messages, verify_thread_switch
 
 class TestThreadDetailParser(unittest.TestCase):
+    def test_extract_thread_messages_includes_reactions(self):
+        class _Page:
+            def evaluate(self, script, *args, **kwargs):
+                return [
+                    {"text": "Hello\\n[Quoted Reply/Link]: :::REACTION_LOVE:::", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"},
+                ]
+        page = _Page()
+        messages = extract_thread_messages(page)
+        self.assertEqual(len(messages), 1)
+        self.assertIn(":::REACTION_LOVE:::", messages[0]["text"])
+        
     def test_extract_thread_messages_ignores_system_buttons_with_zws(self):
         class _Page:
             def evaluate(self, script, *args, **kwargs):
@@ -61,6 +72,37 @@ class TestThreadDetailParser(unittest.TestCase):
         # Assert
         self.assertTrue(verified_status)
         self.assertEqual(fb_url, "original_hovercard_fb_url")
+
+    def test_verify_thread_switch_first_thread_fallback(self):
+        class _Page:
+            url = "https://business.facebook.com/latest/inbox/all?asset_id=123"
+            def evaluate(self, script, *args, **kwargs):
+                return "User A"
+            def wait_for_timeout(self, ms):
+                pass
+        
+        class _Logger:
+            def info(self, msg): pass
+            def error(self, msg): pass
+            def warning(self, msg): pass
+
+        class _ThreadRecord:
+            selected_item_id = ""
+            fb_url = "hovercard_first_thread"
+
+        page = _Page()
+        logger = _Logger()
+        thread_record = _ThreadRecord()
+
+        # Act with is_first_thread=True
+        fb_url, verified_status = verify_thread_switch(
+            page, logger, name="User A", prev_fb_url="old", 
+            pre_click_fingerprint="old_fp", is_first_thread=True, thread_record=thread_record
+        )
+
+        # Assert early return still sets fallback fb_url
+        self.assertTrue(verified_status)
+        self.assertEqual(fb_url, "hovercard_first_thread")
 
 class TestInboxContracts(unittest.TestCase):
     def setUp(self):

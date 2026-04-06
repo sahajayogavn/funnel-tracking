@@ -685,6 +685,17 @@ Because Facebook's DOM is highly volatile, the scraping pipeline (`fb_pipeline/b
 4. **State Verification**: The pipeline proves physical DOM manipulation (like scrolling) by asserting actual `scrollTop` coordinate changes before and after the event, breaking free of infinite silent hangs.
 
 ### Retrospective Log
+- **[2026-04-06] Profile ID Fallback Bypass**:
+  1. **Early Return Vulnerability**: The `is_first_thread` logic inside `verify_thread_switch` efficiently skipped the 20-second DOM string matching loop, but in doing so, blindly bypassed the `fb_url` hovercard fallback mechanism located *below* the loop.
+  2. **Initialization Safety**: The `fb_url` was strictly initialized to the hovercard fallback `thread_record.fb_url` at the very start of the function. This guarantees that all early `return` paths retain identity continuity without replying on post-loop trailing fallback logic.
+- **[2026-04-06] React Router First-Thread Delay**:
+  1. **Hovercard Deprecation**: Facebook removed the `data-hovercard` attribute, forcing the scraper to rely 100% on the URL parameter `&selected_item_id=XXX`.
+  2. **PushState Race Condition**: React Router takes ~100-500ms to append the ID to the URL after a thread is clicked. The `is_first_thread` optimization was exiting on `poll = 0`, reading the stale URL and returning an empty ID.
+  3. **Grace Period Fix**: Implemented a 3-loop (1.5s) polling grace period to permit the URL parameter to safely manifest, while maintaining safe fallbacks for truly Anonymous/Guest accounts who natively lack an ID.
+- **[2026-04-06] Facebook Reaction Text Emulation & Bubble Scope**:
+  1. **Invisible Extract Boundaries**: Facebook rendered reactions (`❤, 👍, etc.`) at the very bottom of grouped message clusters (`.x1fqp7bg`), overlapping text bounds.
+  2. **Query Selector Pollution**: The default `.querySelectorAll('.x1y1aw1k img')` grabbed emojis from BOTH standard text blobs AND reactions, falsely asserting reactions as normal text.
+  3. **Strict Selector Isolation**: The parser was upgraded to `.querySelectorAll(':scope .x1y1aw1k img')` to safely bypass polluted elements and cleanly map `<img alt="❤">` to `:::REACTION_LOVE:::`.
 - **[2026-04-06] Historical Sync Reversal, Parse Drift, & WAL Crashes**: 
   1. **Floating Timeline**: Next.js evaluated relative scraped text (`5:34 PM`) dynamically against the live browser local time, pushing days-old messages artificially into the future.
   2. **Sequential Time Injection**: The Python backend fell back to injecting `datetime('now')` due to poor regex handling of Vietnamese inputs. Because threads were processed sequentially from newest to oldest, the oldest threads received the absolutely highest (newest) loop execution time, mathematically reversing their SQL chronology.
