@@ -265,6 +265,27 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             name = c["name"]
             logger.info(f"Syncing thread '{name}' (#{i+1}/{len(threads_to_process)})...")
             
+            abs_top = c.get("vt", {}).get("absoluteTop", 0)
+            if abs_top > 0:
+                jump_target = max(0, int(abs_top) - 150)
+                try:
+                    page.evaluate(f'''(pos) => {{
+                        let cards = Array.from(document.querySelectorAll('div[role="navigation"] div[role="gridcell"]'));
+                        if (cards.length > 0) {{
+                            let parent = cards[0].closest('div');
+                            while(parent && parent.tagName !== 'BODY') {{
+                                if (parent.scrollHeight > parent.clientHeight) {{
+                                    parent.scrollTop = pos;
+                                    return;
+                                }}
+                                parent = parent.parentElement;
+                            }}
+                        }}
+                    }}''', jump_target)
+                    page.wait_for_timeout(1000)
+                except Exception as e:
+                    logger.warning(f"Failed to jump to absoluteTop {jump_target}: {e}")
+
             prev_fb_url = ""
             try:
                 from urllib.parse import parse_qs, urlparse

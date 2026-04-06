@@ -16,6 +16,18 @@ def extract_visible_threads(page) -> list[dict]:
             const threadSelector = config.threadSelector;
             const candidates = Array.from(document.querySelectorAll(threadSelector));
 
+            let scroller = null;
+            if (candidates.length > 0) {
+                let parent = candidates[0].closest('div');
+                while(parent && parent.tagName !== 'BODY') {
+                    if (parent.scrollHeight > parent.clientHeight) {
+                        scroller = parent;
+                        break;
+                    }
+                    parent = parent.parentElement;
+                }
+            }
+
             function pickTimeToken(lines) {
                 for (let i = lines.length - 1; i >= 1; i--) {
                     const token = (lines[i] || '').trim();
@@ -37,6 +49,13 @@ def extract_visible_threads(page) -> list[dict]:
             }
 
             return candidates.map((el, idx) => {
+                let absoluteTop = 0;
+                if (scroller) {
+                    const elRect = el.getBoundingClientRect();
+                    const scRect = scroller.getBoundingClientRect();
+                    absoluteTop = elRect.top - scRect.top + scroller.scrollTop;
+                }
+                
                 const text = (el.innerText || '').trim();
                 const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
                 const name = lines[0] || '';
@@ -71,6 +90,7 @@ def extract_visible_threads(page) -> list[dict]:
                     sidebarIdentityKey,
                     selectedItemId,
                     href,
+                    absoluteTop,
                 };
             }).filter(item => item.name || item.text);
         }''',
