@@ -164,3 +164,9 @@ This workflow provides step-by-step instructions for writing Python scripts for 
    After resolving a bug or optimizing the pipeline, you must never leave "naked" fixes.
    - **Retrospective Comments**: Above the modified code blocks, add explicit `# Retrospective [Date]` comments explaining *why* the code was structured this way. Detail the exact Facebook UI anomaly, the root cause of the previous failure (e.g., a silent hang, an obfuscated state), and the mechanics of the fix.
    - **Continuous Evolution**: You must actively respect the retrospective. When touching existing code adorned with retrospective comments, do not obliterate the lessons learned. Instead, append new findings or adjust the strategy while maintaining the historical context.
+
+11. **Chronological Data Integrity (Data Ordering)**:
+    The Web Dashboard's Seekers List MUST perfectly mirror the chronological order of the native Facebook Inbox UI. **Do NOT use `datetime('now')` for `last_interaction` blindly during historical scraping.**
+    - Because Facebook lazily loads historical threads natively sorted from newest to oldest, any script extracting historical data will process the newest threads first, and oldest threads last.
+    - If you insert them into FrankenSQLite using `CURRENT_TIMESTAMP` or `datetime('now')`, the oldest threads (processed last) will get the most recent `last_interaction` timestamp, causing them to shoot to the top of the Next.js UI, completely destroying sorting integrity!
+    - **Rule**: You must rely on the explicit chronological indicator provided by Facebook (such as parsing `sidebar_time_text` to absolute UTC time, or falling back to relative tracking) and ONLY update `last_interaction` conditionally if the thread has brand new active messages. Never let a deep historical sync pollute the interaction date footprint.

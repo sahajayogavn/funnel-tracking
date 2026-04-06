@@ -12,6 +12,8 @@ from fb_pipeline.contracts.l1_inbox import (
     extract_user_info,
     parse_ad_ids,
 )
+from fb_pipeline.browser.inbox.thread_list_parser import parse_sidebar_time_token
+
 
 
 def _compute_thread_id(page_id: str, visible_thread: dict, name: str, preview_text: str,
@@ -269,24 +271,45 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             ''', (aid, ad_context, ad_city))
 
     user_info = thread_record.user_info
+    
+    # Chronological Sorting Integrity Logic (Rule 11)
+    # Never use datetime('now') blindly for historical scraping, it breaks UI order.
+    # Use the explicitly parsed relative time to synthesize the absolute anchor.
+    interaction_time_sql = "datetime('now')"
+    if thread_record.sidebar_time_text:
+        time_data = parse_sidebar_time_token(thread_record.sidebar_time_text)
+        if time_data and time_data.get("parsed_at"):
+            # Set to 23:59:59 of that day to ensure it floats above older days
+            # If it's today, we can just use now
+            if time_data.get("days_ago", -1) == 0:
+                interaction_time_sql = "datetime('now')"
+            else:
+                parsed_dt = time_data["parsed_at"]
+                if "T" in parsed_dt:
+                    parsed_dt = parsed_dt.replace("T", " ")
+                elif len(parsed_dt) == 10: # YYYY-MM-DD
+                    parsed_dt = f"{parsed_dt} 23:59:59"
+                interaction_time_sql = f"'{parsed_dt}'"
+
     if new_customer_message_added:
-        cursor.execute('''
+        cursor.execute(f'''
             INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, last_interaction, last_synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            VALUES (?, ?, ?, ?, ?, ?, {{interaction_time}}, datetime('now'))
             ON CONFLICT(thread_id) DO UPDATE SET
                 phone = COALESCE(excluded.phone, users.phone),
                 email = COALESCE(excluded.email, users.email),
                 fb_url = COALESCE(excluded.fb_url, users.fb_url),
                 city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE users.city END,
-                last_interaction = datetime('now'),
+                last_interaction = {{interaction_time}},
                 last_synced_at = datetime('now')
-        ''', (
+        '''.replace('{interaction_time}', interaction_time_sql), (
             thread_record.thread_id,
             thread_record.thread_name,
             user_info.get("phone"),
             user_info.get("email"),
             thread_record.fb_url,
             thread_record.city,
+
         ))
     else:
         cursor.execute('''
