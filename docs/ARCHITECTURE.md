@@ -684,6 +684,10 @@ Because Facebook's DOM is highly volatile, the scraping pipeline (`fb_pipeline/b
 3. **Mandatory Retrospectives**: Any bug fix or structural change to the scraper must include an inline `# Retrospective [Date]` comment documenting the exact Facebook UI anomaly that required the change (e.g., bypassing physical mouse wheels when scroll containers disappear, or handling 'Inbox' header overrides). These retrospectives guarantee that future iterations do not blindly wipe out defensive logic.
 4. **State Verification**: The pipeline proves physical DOM manipulation (like scrolling) by asserting actual `scrollTop` coordinate changes before and after the event, breaking free of infinite silent hangs.
 
+### Retrospective Log
+- **[2026-04-06] Historical Sync Reversal & Chronological Parsing**: An architecture flaw in the Python scraping loop occurred because threads processed progressively down the native Facebook inbox list (older threads) received *newer* `datetime('now')` execution inserts during the loop. This mathematically inverted the chronological index. 
+  - **Fix**: The backend Python pipeline was migrated to dynamically stagger timestamp injection via `datetime('now', '-{dom_index} minutes')`. Concurrently, the Next.js frontend presentation reversed priority back to strict string extraction of Facebook's precise `lastMessageTimestampText` strings to guarantee the UI mirrors the physical inbox.
+
 ## Validation Gates
 
 **Universal ID**: `doc:architecture-validation-001`

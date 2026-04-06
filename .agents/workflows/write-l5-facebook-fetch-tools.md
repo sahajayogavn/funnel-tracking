@@ -162,7 +162,7 @@ This workflow provides step-by-step instructions for writing Python scripts for 
 
 10. **Mandatory Retrospectives and Anti-Regression Documentation**:
    After resolving a bug or optimizing the pipeline, you must never leave "naked" fixes.
-   - **Retrospective Comments**: Above the modified code blocks, add explicit `# Retrospective [Date]` comments explaining *why* the code was structured this way. Detail the exact Facebook UI anomaly, the root cause of the previous failure (e.g., a silent hang, an obfuscated state), and the mechanics of the fix.
+   - **Retrospective Comments & Docs**: You MUST place explicit `# Retrospective [Date]` comments above the modified code blocks explaining *why* the code was structured this way. Additionally, you MUST proactively add a summary of this retrospective into the project documentation (e.g. `docs/ARCHITECTURE.md` under Anti-Fragile Scraper & Retrospectives). Detail the exact Facebook UI anomaly, the root cause of the previous failure, and the mechanics of the fix.
    - **Continuous Evolution**: You must actively respect the retrospective. When touching existing code adorned with retrospective comments, do not obliterate the lessons learned. Instead, append new findings or adjust the strategy while maintaining the historical context.
 
 11. **Chronological Data Integrity (Data Ordering)**:

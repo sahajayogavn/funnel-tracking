@@ -244,14 +244,13 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
                 new_customer_message_added = True
     cursor.execute('''
         INSERT INTO threads (id, page_id, thread_name, last_synced_time)
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?, datetime('now'))
         ON CONFLICT(id) DO UPDATE SET
             last_synced_time=excluded.last_synced_time
     ''', (
         thread_record.thread_id,
         thread_record.page_id,
         thread_record.thread_name,
-        thread_record.preview_text,
     ))
 
     for aid in thread_record.ad_ids:
@@ -279,10 +278,13 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     if thread_record.sidebar_time_text:
         time_data = parse_sidebar_time_token(thread_record.sidebar_time_text)
         if time_data and time_data.get("parsed_at"):
-            # Set to 23:59:59 of that day to ensure it floats above older days
-            # If it's today, we can just use now
+            # Retrospective [2026-04-06]: Historical Sync Reversal
+            # Fix: Replaced hardcoded `datetime('now')` with a dynamically staggered timestamp via `datetime('now', '-{dom_index} minutes')`.
+            # Root Cause: The scraper sequentially extracts UI threads from newest (top) to oldest (bottom). 
+            # Previously, all threads evaluated as 'today' were blindly given the exact execution time.
+            # This mathematically assigned the oldest threads the *most recent* datetime value, permanently reversing their UI order. 
             if time_data.get("days_ago", -1) == 0:
-                interaction_time_sql = "datetime('now')"
+                interaction_time_sql = f"datetime('now', '-{thread_record.dom_index} minutes')"
             else:
                 parsed_dt = time_data["parsed_at"]
                 if "T" in parsed_dt:
