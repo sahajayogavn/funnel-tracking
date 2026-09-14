@@ -10,7 +10,7 @@ This document defines the rules for DevOps, QA, and Testing workflows. The Agent
 
 ## 1. Writing Tests
 
-- All new Python code (especially in the `tools/` folder) must include corresponding unit tests.
+- All Python code modifications (whether adding new code, refactoring, or fixing bugs in the `tools/` folder or elsewhere) MUST include corresponding unit tests. Do not skip this under any circumstances.
 - Test files should be placed appropriately alongside the code or in a dedicated `tests/` directory.
 
 ## 2. QA and E2E Testing Plan
@@ -20,6 +20,7 @@ This document defines the rules for DevOps, QA, and Testing workflows. The Agent
 
 ## 3. Code Coverage & Execution
 
+- **MANDATORY EXECUTION GATE**: You are **FORBIDDEN** from completing a coding task or asking for commit permission unless you have explicitly executed the test suite and printed the result into the log. **Never skip testing after coding, even for minor changes.**
 - Upon finishing the code, the Agent MUST run the tests.
 - The Agent must check and report both code coverage and test plan coverage.
 - If errors are found, fix the bugs and rerun the suite.

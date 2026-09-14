@@ -7,9 +7,14 @@ def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fi
                          is_first_thread: bool, thread_record) -> tuple[str, bool]:
     # Initialize with hovercard fallback immediately so early returns don't lose it
     fb_url = getattr(thread_record, "fb_url", "") if hasattr(thread_record, "fb_url") else ""
+    target_item_id = getattr(thread_record, "selected_item_id", "")
+    # Retrospective [Apr 2026]: Missing fb_url for the first thread
+    # Provide an immediate fallback from target_item_id (DOM a[href]) if hovercard failed, so fb_url is never empty
+    if not fb_url and target_item_id:
+        fb_url = target_item_id
+        
     url_changed = False
     name_matched = False
-    target_item_id = getattr(thread_record, "selected_item_id", "")
 
     for _poll in range(20):
         try:
@@ -49,9 +54,30 @@ def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fi
                 # so React Router can populate the ID. If candidate appears early, or 1.5s passes (for Guest users), we return safely.
                 if candidate:
                     logger.info(f"thread_switch_verified method=is_first_thread_with_id thread='{name}'")
+                    # Retrospective [Apr 2026]: Ensure fb_url is not lost when candidate == prev_fb_url and target_item_id is absent
+                    if not fb_url:
+                        fb_url = candidate
                     return fb_url, True
                 elif _poll >= 3:
                     logger.info(f"thread_switch_verified method=is_first_thread_no_id thread='{name}'")
+                    if not fb_url:
+                        # Retrospective [Apr 2026]: Anti-Fragile Last Resort fb_url extraction
+                        # If ReactRouter hasn't updated the URL, and the sidebar stripped hrefs for the active thread, 
+                        # we forcefully extract the ID from the chat panel's header avatars or buttons.
+                        fallback_id = page.evaluate('''() => {
+                            let links = Array.from(document.querySelectorAll('a[href]'));
+                            for (let a of links) {
+                                let h = a.getAttribute('href') || '';
+                                let m1 = h.match(/selected_item_id=(\d+)/);
+                                if (m1) return m1[1];
+                                let m2 = h.match(/\/messages\/t\/(\d+)/);
+                                if (m2) return m2[1];
+                            }
+                            return "";
+                        }''')
+                        if fallback_id:
+                            fb_url = fallback_id
+                            logger.info(f"thread_switch_verified fallback_dom_extraction SUCCESS fb_url='{fb_url}'")
                     return fb_url, True
 
             if url_changed and name_matched:

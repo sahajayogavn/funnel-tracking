@@ -45,8 +45,8 @@ This workflow provides step-by-step instructions for writing Python scripts for 
        pass
    ```
 
-5. **Write Unit Tests**:
-   Create a corresponding test file in the `tests/` directory and ensure it passes before finalizing the tool.
+5. **Write Unit Tests & Test Everything**:
+   Whether you are creating a new tool or modifying an existing one (adding features, refactoring, or bug fixing), you MUST create or update corresponding test files in the `tests/` directory. You MUST NOT skip testing under any circumstances. Ensure it passes before finalizing the tool.
 
    ```bash
    python -m unittest tests/test_my_new_tool.py
@@ -161,9 +161,9 @@ This workflow provides step-by-step instructions for writing Python scripts for 
      - **Stage 2 (Extraction)**: Reset the viewport. Loop sequentially through the immutable list of discovered items from Stage 1, using stable visual identifiers (like `sidebarIdentityKey`) to dynamically re-locate, select, and safely extract the deep payloads.
 
 10. **Mandatory Retrospectives and Anti-Regression Documentation**:
-   After resolving a bug or optimizing the pipeline, you must never leave "naked" fixes.
+   After resolving a bug, adding a feature, or optimizing the pipeline, you must never leave "naked" fixes.
    - **Retrospective Comments & Docs**: You MUST place explicit `# Retrospective [Date]` comments above the modified code blocks explaining *why* the code was structured this way. Additionally, you MUST proactively add a summary of this retrospective into the project documentation (e.g. `docs/ARCHITECTURE.md` under Anti-Fragile Scraper & Retrospectives). Detail the exact Facebook UI anomaly, the root cause of the previous failure, and the mechanics of the fix.
-   - **Mandatory Regression Testcases**: To ensure that bugs do not appear again, if you fixed a bug, you MUST write testcases covering that specific failure scenario alongside your retrospective documentation.
+   - **Mandatory Regression Testcases**: To ensure bugs do not appear again, and features are explicitly verified, you MUST write testcases covering that specific failure scenario or implementation alongside your retrospective documentation. **This applies to ALL code changes, not just bug fixes.**
    - **Continuous Evolution**: You must actively respect the retrospective. When touching existing code adorned with retrospective comments, do not obliterate the lessons learned. Instead, append new findings or adjust the strategy while maintaining the historical context.
 
 11. **Chronological Data Integrity (Data Ordering)**:
