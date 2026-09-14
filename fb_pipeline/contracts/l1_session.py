@@ -15,8 +15,13 @@ class AuthorizedSession:
     inbox_url: str
     selected_existing_tab: bool = False
     created_tab: bool = False
+    tab_role: str | None = None
 
     def close_page(self):
+        # Role tabs are long-lived workers. Closing them at the end of one
+        # polling cycle would erase scan/outbound isolation.
+        if self.tab_role:
+            return
         if not self.created_tab:
             return
         try:

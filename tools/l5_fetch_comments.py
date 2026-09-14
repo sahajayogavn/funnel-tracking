@@ -88,8 +88,8 @@ def fetch_comments(page_input: str, credential_id: str, time_range: str = "7d",
         with sync_playwright() as p:
             session = None
             try:
-                session = attach_to_authorized_session(p, page_id, inbox_url)
-                logger.info(f"Connected to CDP session. Opened new tab (total tabs: {len(session.context.pages)}).")
+                session = attach_to_authorized_session(p, page_id, inbox_url, tab_role="scan_comments")
+                logger.info(f"Connected to dedicated comments scanning tab (total tabs: {len(session.context.pages)}).")
 
                 stats = _scrape_comments(session.page, page_id, time_range, max_posts, conn)
 

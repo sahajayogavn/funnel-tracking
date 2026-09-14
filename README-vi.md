@@ -10,6 +10,7 @@ Chào mừng bạn đến với repo **Funnel Tracking**. Mục tiêu của dự
 4. **Agent Memory**: Inbox MAS nạp `memory/SOUL.md`, `memory/agent_memory/faq.md`, `memory/agent_memory/lop-hoc.md`, `memory/agent_memory/su-kien.md`, `memory/research.md`, và `memory/mas_strategy.md` vào runtime `knowledge_context`.
 5. **AI Agent Software (ADK)**: Google ADK vận hành luồng trả lời inbox (Classifier → Responder), còn các route react / warm-up / event hiện là scaffold trong scheduler và tools.
 6. **Web Dashboard**: Ứng dụng Next.js 16 với Dashboard, Seekers CRM, Network Graph, Journey Workflow.
+7. **Danh mục lớp học**: Google Sheet vận hành là nguồn chuẩn cho thông tin lớp; thiết kế yêu cầu đồng bộ đọc-only mỗi ngày một lần trước khi MAS dùng dữ liệu này để tạo đề xuất HITL.
 
 ## 🏗 Kiến trúc dự án & Quy tắc
 
@@ -27,6 +28,10 @@ Dự án được khởi tạo theo phương pháp Agile XP dành cho AI Agents.
 | `memory/agent_memory/` | Kiến thức — khóa học, sự kiện, log seekers, FrankenSQLite DB            |
 | `logs/`                | Báo cáo chuyển giao và logs                                             |
 | `docs/`                | Tài liệu kiến trúc (`ARCHITECTURE.md`)                                   |
+
+### Nguồn thông tin lớp học
+
+Thông tin lớp học là nguồn nội bộ, được cấu hình cục bộ qua `CLASS_CATALOG_SHEET_URL` trong `.env` (không commit). Hệ thống phải đồng bộ mỗi ngày một lần, không chép URL hoặc danh sách lớp vào mã nguồn/README. Hợp đồng dữ liệu, chính sách upsert/stale-data và ranh giới HITL được mô tả trong [Architecture](docs/ARCHITECTURE.md#lớp-học-nguồn-dữ-liệu-vận-hành-và-đồng-bộ-hằng-ngày).
 
 ## 🔧 Công cụ Fetch Tin Nhắn Facebook (`tools/fetch_fb_messages.py`)
 

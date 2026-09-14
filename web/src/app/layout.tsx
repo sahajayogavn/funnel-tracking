@@ -42,6 +42,10 @@ export default function RootLayout({
               <span className="nav-icon">🛤️</span>
               Journey Workflow
             </Link>
+            <Link href="/queues" className="nav-link">
+              <span className="nav-icon">✅</span>
+              Approval Queues
+            </Link>
           </nav>
         </aside>
         <main className="main-content">

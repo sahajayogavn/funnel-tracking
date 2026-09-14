@@ -77,6 +77,64 @@ Acceptance intent for the hierarchy:
 
 ## Shared Package Boundaries
 
+## Lớp học: nguồn dữ liệu vận hành và đồng bộ hằng ngày
+
+**Universal ID:** `doc:class-catalog-001`
+**Trạng thái:** yêu cầu đã chốt tài liệu — chưa phải cam kết triển khai scheduler/importer.
+
+### Nguồn chuẩn
+
+Danh mục lớp học Sahaja Yoga Vietnam dùng Google Sheet nội bộ làm **nguồn dữ liệu chuẩn duy nhất**. URL không được lưu trong README, source code, test fixture, hay tài liệu được commit. Runtime nhận URL từ cấu hình local-only:
+
+```dotenv
+CLASS_CATALOG_SHEET_URL=<internal Google Sheet URL; worksheet gid=0>
+```
+
+MAS, WebUI, Telegram HITL, và các agent tạo nội dung phải dùng bản đồng bộ gần nhất từ nguồn này khi trả lời về lớp học. Không sao chép thủ công URL, danh sách lớp hay thông tin người liên hệ vào prompt, source code, hay tài liệu repo: Sheet là nơi vận hành cập nhật.
+
+### Hợp đồng dữ liệu hiện tại
+
+Một hàng là một **lần mở lớp/lớp cụ thể**; một thành phố có thể có nhiều hàng. Các cột có thể được điều chỉnh nhẹ theo vận hành, nhưng importer phải giữ mapping tương thích sau đây và báo lỗi khi thiếu các trường nhận diện tối thiểu.
+
+| Cột Sheet | Khóa chuẩn đề xuất | Ý nghĩa |
+| --- | --- | --- |
+| `Thành phố` | `city` | Thành phố/khu vực phục vụ; dùng cho matching seeker. |
+| `Thông tin chung` | `general_info` | Mô tả nguyên văn có định dạng; dùng làm context, không phải nguồn để suy đoán mọi trường cấu trúc. |
+| `Khai Giảng` | `start_date_text` | Ngày khai giảng hoặc giá trị vận hành như “Khai giảng thường xuyên”. |
+| `Thời gian học` | `schedule_text` | Khung giờ và tần suất học. |
+| `Online/Offline` | `delivery_mode` | Hình thức học. |
+| `Địa chỉ` | `address` | Địa điểm hoặc “Online”. |
+| `Liên hệ/người Lead` | `contact_leads` | Người phụ trách; chỉ hiển thị theo phạm vi quyền của operator. |
+| `Link nhóm Zalo` | `zalo_group_url` | Link nhóm theo lớp. |
+| `Thông tin khác` | `notes` | Điều kiện nhận học viên, ghi chú lớp, hoặc thông tin vận hành. |
+| `Link Ads` | `ads_url` | Link quảng cáo/nguồn campaign liên quan. |
+
+Importer phải chấp nhận ô trống. Các cột mới không làm hỏng import; chúng được ghi vào metadata chưa sử dụng. Đổi tên/xóa cột chuẩn là thay đổi hợp đồng dữ liệu và phải cập nhật tài liệu + mapping trước khi chạy production.
+
+### Chính sách đồng bộ
+
+1. Chạy **một lần mỗi ngày** để tải worksheet `gid=0`; mốc khuyến nghị là **05:00 Asia/Ho_Chi_Minh**, trước các luồng MAS chủ động trong ngày.
+2. Đồng bộ đọc snapshot mới, chuẩn hóa whitespace/link và upsert theo một `class_offering_key` ổn định. Khóa ưu tiên: thành phố + khai giảng + thời gian học + hình thức + địa chỉ; nếu nguồn bổ sung mã lớp thì dùng mã đó làm khóa chính.
+3. Không xóa ngay lớp không còn trong snapshot. Đánh dấu `inactive`/`missing_from_source_at` sau lần import đầu tiên không thấy; chỉ archive sau chính sách retention được phê duyệt.
+4. Lưu `source_synced_at`, checksum/snapshot hash, số hàng đọc/được tạo/được cập nhật/vô hiệu hóa và lỗi mapping để operator kiểm tra freshness.
+5. Nếu fetch, parse hoặc validation lỗi, giữ catalog hợp lệ gần nhất, ghi lỗi audit và cảnh báo WebUI/Telegram; MAS không được bịa thông tin lớp thay thế.
+6. Mọi proposal trả lời lớp học phải mang `class_catalog_version`/`source_synced_at` trong payload để người duyệt biết dữ liệu còn mới hay không.
+
+### Ranh giới MAS và HITL
+
+- Class catalog là context đọc-only đối với MAS; agent không được sửa Google Sheet.
+- Khi seeker hỏi lớp, MAS chọn các lớp phù hợp theo thành phố/hình thức/điều kiện từ catalog hiện hành, rồi tạo proposal trong queue HITL tương ứng.
+- WebUI/Telegram approval vẫn là điều kiện bắt buộc trước khi gửi comment hoặc tin nhắn. Đồng bộ catalog không tự tạo hay tự gửi outreach.
+- Thông tin liên hệ và link nhóm là dữ liệu vận hành: chỉ xuất hiện trong proposal khi cần thiết cho câu hỏi của seeker và sau đó vẫn cần người duyệt.
+
+### Acceptance criteria trước khi triển khai
+
+- Lần chạy đầu có thể đọc Sheet công khai và ghi đầy đủ 10 trường chuẩn, kể cả ô rỗng.
+- Lần chạy hằng ngày idempotent: snapshot không đổi không tạo bản ghi trùng.
+- Thay đổi một trường từ Sheet cập nhật đúng lớp, và lớp biến mất được đánh dấu inactive chứ không bị hard-delete.
+- Lỗi Sheet làm lộ trạng thái stale rõ ràng, giữ catalog trước đó và không chặn các queue khác.
+- Test fixture phải dùng dữ liệu đã ẩn danh; không copy thông tin liên hệ thật từ Sheet vào test/repo.
+
 ### L1 — contracts and pure helpers
 
 Shared typed records and pure helpers for normalization and enrichment.
@@ -199,6 +257,36 @@ Rules:
 - L1 contracts stay free of Playwright and CLI concerns
 
 ## Operational Hierarchy
+
+## Human-approved outbound queues (2026-09-14)
+
+All outbound Facebook work now has one durable approval boundary in
+`action_queue`. MAS may create a `pending` proposal but cannot deliver it.
+The WebUI and Telegram are equivalent approval surfaces: a WebUI click or a
+👍 reaction on the linked Telegram proposal changes that exact queue row to
+`approved`. The scheduler can only claim the first non-terminal item in each
+queue, which preserves FIFO ordering and prevents a newer approved proposal
+from overtaking an older undecided proposal.
+
+| Queue key | Operator label | Target action |
+| --- | --- | --- |
+| `reply_message` | Reply tin nhắn | reply to an inbound DM; reactions on a DM are also presented here |
+| `reply_comment` | Reply comments | reply to a comment; reactions on a comment are also presented here |
+| `proactive_comment` | Post comments bài chủ động | make a planned public comment |
+| `proactive_message` | Send message chủ động | send a planned outbound DM |
+
+CDP tabs have explicit long-lived roles. There is one `scan_inbox` tab, one
+`scan_comments` tab, and one `outbound:<queue-id>` tab for each simultaneous
+delivery worker. Scan tabs are reused across polling cycles and never double
+as outbound tabs. This isolates virtualized list navigation from typing/sending
+work.
+
+An executor must mark a claimed item `executed` or `failed`; it must never
+silently record a reaction/comment that it cannot actually perform. At present
+the shared CDP executor supports approved direct-message delivery. Public
+comment and Facebook reaction selectors remain explicit failed work until a
+live executor is configured, leaving them visible to an operator rather than
+claiming a false success.
 
 The runtime hierarchy for inbox automation is:
 

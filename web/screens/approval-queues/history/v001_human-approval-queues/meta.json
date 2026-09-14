@@ -1,0 +1,1 @@
+{"id":"CHG-001","screen":"approval-queues","element":".queue-grid","property":"new human approval surface","before_value":"absent","after_value":"four FIFO decision queues","token_ref":"--bg-card, --accent-indigo","reason":"MAS proposals require explicit human authorization","status":"PENDING"}

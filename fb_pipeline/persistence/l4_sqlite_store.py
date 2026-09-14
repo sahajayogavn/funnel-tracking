@@ -343,6 +343,36 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Human-approved outbound work. MAS may only insert a pending item; a WebUI
+    # click or an approved Telegram reaction is required before an executor can
+    # claim it.  `id` is also the FIFO order within each queue_type.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS action_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            queue_type TEXT NOT NULL,
+            page_id TEXT,
+            target_type TEXT NOT NULL,
+            target_id TEXT,
+            target_name TEXT,
+            action_text TEXT,
+            reaction_type TEXT,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            approval_source TEXT,
+            approved_at DATETIME,
+            claimed_at DATETIME,
+            executed_at DATETIME,
+            error_text TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            CHECK (queue_type IN ('reply_message', 'reply_comment', 'proactive_comment', 'proactive_message')),
+            CHECK (status IN ('pending', 'approved', 'executing', 'executed', 'rejected', 'failed'))
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_action_queue_fifo
+        ON action_queue(queue_type, status, id)
+    ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS telegram_offset (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -431,6 +461,31 @@ def setup_comment_database(conn: sqlite3.Connection):
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Comments-only deployments use the same human approval queue.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS action_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            queue_type TEXT NOT NULL,
+            page_id TEXT,
+            target_type TEXT NOT NULL,
+            target_id TEXT,
+            target_name TEXT,
+            action_text TEXT,
+            reaction_type TEXT,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            approval_source TEXT,
+            approved_at DATETIME,
+            claimed_at DATETIME,
+            executed_at DATETIME,
+            error_text TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            CHECK (queue_type IN ('reply_message', 'reply_comment', 'proactive_comment', 'proactive_message')),
+            CHECK (status IN ('pending', 'approved', 'executing', 'executed', 'rejected', 'failed'))
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_action_queue_fifo ON action_queue(queue_type, status, id)')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS telegram_offset (
             id INTEGER PRIMARY KEY CHECK (id = 1),

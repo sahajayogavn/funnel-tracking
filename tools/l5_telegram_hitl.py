@@ -168,6 +168,17 @@ def poll_telegram_updates():
                         (target_msg_id,)
                     ).rowcount
                     if matched:
+                        queue_row = conn.execute(
+                            "SELECT payload_json FROM telegram_hitl_queue WHERE telegram_message_id = ? ORDER BY id DESC LIMIT 1",
+                            (target_msg_id,),
+                        ).fetchone()
+                        try:
+                            queue_id = json.loads(queue_row["payload_json"] or "{}").get("action_queue_id")
+                            if queue_id:
+                                from tools.l5_action_queue import approve_action
+                                approve_action(int(queue_id), "telegram:👍")
+                        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                            logger.warning("Could not approve linked action queue item: %s", exc)
                         logger.info(f"HITL message {target_msg_id} APPROVED via reaction.")
 
         if max_update_id > offset:

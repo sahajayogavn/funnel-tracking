@@ -29,6 +29,24 @@ function tableExists(tableName: string): boolean {
   return !!result;
 }
 
+export type ActionQueueItem = {
+  id: number; queueType: string; targetType: string; targetId: string | null;
+  targetName: string | null; actionText: string | null; reactionType: string | null;
+  status: string; approvalSource: string | null; errorText: string | null; createdAt: string;
+};
+
+export function getActionQueueItems(): ActionQueueItem[] {
+  if (!tableExists('action_queue')) return [];
+  return getDb().prepare(`
+    SELECT id, queue_type AS queueType, target_type AS targetType, target_id AS targetId,
+           target_name AS targetName, action_text AS actionText, reaction_type AS reactionType,
+           status, approval_source AS approvalSource, error_text AS errorText, created_at AS createdAt
+    FROM action_queue
+    WHERE status NOT IN ('executed', 'rejected')
+    ORDER BY queue_type, id
+  `).all() as ActionQueueItem[];
+}
+
 // ── Heuristics to fix older scraped messages ──
 // Scraper may have incorrectly recorded Page messages as "Customer" due to DOM changes
 function normalizeMessageSender(content: string | null, originalSender: string | null): string | null {

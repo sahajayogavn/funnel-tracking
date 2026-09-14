@@ -26,7 +26,7 @@ def run_fetch_cycle(page_id: str, dry_run: bool = True):
 
 
 def run_react_cycle(page_id: str, dry_run: bool = True):
-    """Route 1: React to new messages/comments."""
+    """Route 1: propose reactions; a human approval is required to execute."""
     logger.info(f"[REACT] {'[DRY-RUN]' if dry_run else '[LIVE]'} Starting reaction cycle...")
     try:
         from adk_agents.tools.l5_reaction_tools import (
@@ -40,16 +40,19 @@ def run_react_cycle(page_id: str, dry_run: bool = True):
         processed = 0
         for item in unreacted["items"]:
             reaction_type = run_adk_reactor(item, dry_run=True) or _select_reaction_heuristic(item)
-            log_reaction(
-                item_type=item["item_type"],
-                item_id=item["item_id"],
-                reaction_type=reaction_type,
-                dry_run=dry_run
+            from tools.l5_action_queue import enqueue_action
+            # Reactions share the queue for their source so the UI retains only
+            # the four requested decision groups.
+            queue_type = "reply_comment" if item["item_type"] == "comment" else "reply_message"
+            enqueue_action(
+                queue_type=queue_type, page_id=page_id, target_type=item["item_type"],
+                target_id=item["item_id"], target_name=item.get("thread_name"),
+                reaction_type=reaction_type, payload={"source": "reactor"},
             )
             processed += 1
             logger.info(
                 f"[REACT] {'[DRY-RUN]' if dry_run else '[SENT]'} "
-                f"{reaction_type} on {item['item_type']} {item['item_id'][:20]}..."
+                f"proposal {reaction_type} on {item['item_type']} {item['item_id'][:20]}..."
             )
 
         return {"status": "complete", "processed": processed}
@@ -257,11 +260,16 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
             from tools.l5_telegram_hitl import send_proposal_to_telegram
             logger.info(f"[WARMUP] Proposing {len(proposals)} individual messages to Telegram HITL.")
             for p in proposals:
+                from tools.l5_action_queue import enqueue_action
+                action_queue_id = enqueue_action(
+                    queue_type="proactive_message", page_id=page_id, target_type="thread",
+                    target_id=p["thread_id"], target_name=p["seeker_name"], action_text=p["message_text"], payload=p,
+                )
                 send_proposal_to_telegram(
                     "warmup",
                     p["thread_id"],
                     f"Warmup proposal for {p['seeker_name']}:\\n\\n{p['message_text']}",
-                    {"proposals": [p], "page_id": page_id}
+                    {"action_queue_id": action_queue_id, "proposals": [p], "page_id": page_id}
                 )
 
         return {"status": "complete", "processed": processed, "skipped": skipped, "decisioned": decisioned, "proposed": len(proposals)}
@@ -388,7 +396,13 @@ def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
                 summary += f"{i}. {p['seeker_name']}: {p['message_text'][:40]}...\\n"
             if len(proposals) > 5:
                 summary += f"...and {len(proposals) - 5} more."
-            send_proposal_to_telegram("event", "batch", summary, {"proposals": proposals, "page_id": page_id})
+            from tools.l5_action_queue import enqueue_action
+            for p in proposals:
+                action_queue_id = enqueue_action(
+                    queue_type="proactive_message", page_id=page_id, target_type="thread",
+                    target_id=p["thread_id"], target_name=p["seeker_name"], action_text=p["message_text"], payload=p,
+                )
+                send_proposal_to_telegram("event", p["thread_id"], f"Event proposal for {p['seeker_name']}:\\n\\n{p['message_text']}", {"action_queue_id": action_queue_id, "proposals": [p], "page_id": page_id})
             logger.info(f"[EVENT] Proposed {len(proposals)} messages to Telegram HITL.")
 
         return {"status": "complete", "sent": total_sent, "skipped": skipped, "decisioned": decisioned, "proposed": len(proposals)}

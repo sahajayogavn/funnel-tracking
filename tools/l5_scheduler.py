@@ -88,58 +88,30 @@ def telegram_poller_job():
 
 
 def hitl_execution_job(page_id: str, dry_run: bool = True):
+    """Claim and execute only FIFO action-queue items humans approved.
+
+    Telegram's status table is retained for discussion/rewrite history, but it
+    is never a delivery queue on its own.
+    """
+    from tools.l5_action_queue import QUEUE_TYPES, claim_next_action, finish_action
     from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
     from tools.l5_telegram_hitl import mark_hitl_executed, send_proposal_to_telegram
     import json
-    
+
+    for queue_type in QUEUE_TYPES:
+        item = claim_next_action(queue_type)
+        if not item:
+            continue
+        try:
+            _execute_approved_action(item, page_id)
+        except Exception as exc:
+            logger.exception("Action queue item %s failed", item["id"])
+            finish_action(item["id"], str(exc))
+        else:
+            finish_action(item["id"])
+
     conn = get_db_connection()
     try:
-        approved = conn.execute("SELECT * FROM telegram_hitl_queue WHERE status = 'approved' AND route IN ('warmup', 'event', 'inbox') LIMIT 10").fetchall()
-        if approved:
-            from playwright.sync_api import sync_playwright
-            from fb_pipeline.session.l2_bootstrap import attach_to_authorized_session
-            from adk_agents.tools.l5_facebook_tools import navigate_to_thread, send_reply_via_cdp, commit_reply_via_cdp
-            from adk_agents.tools.l5_warmup_tools import log_warmup_campaign
-            from adk_agents.tools.l5_event_tools import log_event_campaign
-            
-            for row in approved:
-                msg_id = row['telegram_message_id']
-                route = row['route']
-                payload = json.loads(row['payload_json'])
-                proposals = payload.get("proposals", [])
-                
-                if not proposals:
-                    mark_hitl_executed(msg_id)
-                    continue
-
-                logger.info(f"Executing approved {route} batch from HITL...")
-                with sync_playwright() as p:
-                    inbox_url = f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}"
-                    try:
-                        session = attach_to_authorized_session(p, page_id, inbox_url)
-                        cdp_page = session.page
-                        for prop in proposals:
-                            thread_id = prop['thread_id']
-                            message_text = prop['message_text']
-                            if navigate_to_thread(cdp_page, page_id, prop['seeker_name'], thread_id):
-                                send_reply_via_cdp(cdp_page, message_text, dry_run=True)
-                                commit_reply_via_cdp(cdp_page)
-                                
-                                if route == 'warmup':
-                                    log_warmup_campaign(thread_id, prop['seeker_name'], prop['strategy']['type'], message_text, dry_run=dry_run)
-                                    _update_user_decision_state(thread_id, prop['next_temperature'], warmup_sent=not dry_run, cool_step=prop['next_cool_step'])
-                                elif route == 'event':
-                                    log_event_campaign(prop['event']['id'], thread_id, prop['seeker_name'], message_text, dry_run=dry_run)
-                    except Exception as e:
-                        logger.error(f"HITL Execution failed for {route}: {e}")
-                    else:
-                        from tools.l5_telegram_hitl import send_telegram_reaction
-                        send_telegram_reaction(msg_id, "💯")
-                    finally:
-                        if 'session' in locals() and session:
-                            session.close_page()
-                mark_hitl_executed(msg_id)
-
         rejected = conn.execute("SELECT * FROM telegram_hitl_queue WHERE status = 'rejected' AND route IN ('warmup', 'event', 'inbox') LIMIT 10").fetchall()
         for row in rejected:
             msg_id = row['telegram_message_id']
@@ -185,6 +157,37 @@ def hitl_execution_job(page_id: str, dry_run: bool = True):
 
     finally:
         conn.close()
+
+
+def _execute_approved_action(item: dict, fallback_page_id: str) -> None:
+    """The sole CDP delivery boundary; approval is already persisted."""
+    if item.get("reaction_type"):
+        raise RuntimeError("Live Facebook reaction executor is not configured")
+    if item["queue_type"] in {"reply_comment", "proactive_comment"}:
+        raise RuntimeError("Live Facebook comment executor is not configured")
+
+    from playwright.sync_api import sync_playwright
+    from fb_pipeline.session.l2_bootstrap import attach_to_authorized_session
+    from fb_pipeline.browser.l2_actions import navigate_to_thread, send_reply_via_cdp, commit_reply_via_cdp
+    page_id = item.get("page_id") or fallback_page_id
+    with sync_playwright() as p:
+        session = attach_to_authorized_session(
+            p, page_id, f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}",
+            tab_role=f"outbound:{item['id']}",
+        )
+        if not navigate_to_thread(session.page, page_id, item.get("target_name") or "", item.get("target_id")):
+            raise RuntimeError("Facebook inbox thread could not be opened")
+        if not send_reply_via_cdp(session.page, item.get("action_text") or "", dry_run=False):
+            raise RuntimeError("Facebook composer could not be filled")
+        if not commit_reply_via_cdp(session.page):
+            raise RuntimeError("Facebook message could not be sent")
+        if item["queue_type"] == "reply_message":
+            from adk_agents.tools.l5_facebook_tools import log_auto_reply
+            log_auto_reply(
+                item.get("target_id") or "", item.get("action_text") or "",
+                agent_name="human_approved_executor", dry_run=False,
+                customer_message_timestamp=item.get("payload", {}).get("customer_message_timestamp"),
+            )
 
 
 # --- Scheduler Setup ---

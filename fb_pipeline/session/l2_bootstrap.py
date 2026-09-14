@@ -26,21 +26,41 @@ def connect_to_cdp_browser(playwright, cdp_url: str = CDP_URL):
 
 
 def attach_to_authorized_session(playwright, page_id: str, inbox_url: str,
-                                 cdp_url: str = CDP_URL, prefer_new_tab: bool = True) -> AuthorizedSession:
+                                 cdp_url: str = CDP_URL, prefer_new_tab: bool = True,
+                                 tab_role: str | None = None) -> AuthorizedSession:
+    """Attach one role to one reusable CDP tab.
+
+    Roles keep scanning isolated from outbound work: ``scan_inbox``,
+    ``scan_comments``, and any number of ``outbound:<worker-id>`` tabs.
+    The marker lives in the page DOM and therefore survives scheduler cycles
+    while the browser remains open.
+    """
     browser = connect_to_cdp_browser(playwright, cdp_url)
     context = browser.contexts[0]
 
-    if prefer_new_tab:
+    page = None
+    if tab_role:
+        for candidate in context.pages:
+            try:
+                if candidate.evaluate("document.documentElement.dataset.masTabRole") == tab_role:
+                    page = candidate
+                    break
+            except Exception:
+                continue
+    if page:
+        selected_existing_tab, created_tab = True, False
+    elif prefer_new_tab:
         page = context.new_page()
-        selected_existing_tab = False
-        created_tab = True
+        selected_existing_tab, created_tab = False, True
     else:
         page = context.pages[0] if context.pages else context.new_page()
-        selected_existing_tab = bool(context.pages)
-        created_tab = not selected_existing_tab
+        selected_existing_tab, created_tab = bool(context.pages), not bool(context.pages)
 
     page.goto(inbox_url, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(3000)
+
+    if tab_role:
+        page.evaluate("role => { document.documentElement.dataset.masTabRole = role; document.title = `[MAS:${role}] ${document.title}`; }", tab_role)
 
     ensure_facebook_authorized(page)
     ensure_page_access(page, page_id)
@@ -54,6 +74,7 @@ def attach_to_authorized_session(playwright, page_id: str, inbox_url: str,
         inbox_url=inbox_url,
         selected_existing_tab=selected_existing_tab,
         created_tab=created_tab,
+        tab_role=tab_role,
     )
 
 

@@ -92,9 +92,9 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
         session = None
         try:
             inbox_url = f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}"
-            session = attach_to_authorized_session(p, page_id, inbox_url)
+            session = attach_to_authorized_session(p, page_id, inbox_url, tab_role="scan_inbox")
             cdp_page = session.page
-            logger.info("Connected to CDP. Opened new tab.")
+            logger.info("Connected to dedicated inbox scanning tab.")
         except Exception as e:
             logger.error(f"CDP connection failed: {e}")
             return {"status": "error", "error": f"CDP connection failed: {e}"}
@@ -273,8 +273,6 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                         continue
 
 
-                    log_auto_reply(thread_id, reply_text, agent_name="responder", escalated=False, dry_run=True, customer_message_timestamp=latest_customer_message_timestamp)
-                    
                     stage_result = evaluate_stage_gate(thread_id)
                     if stage_result.get("promoted"):
                         log_mas_decision(page_id, "stage_gate", "thread", thread_id, "promoted", stage_result.get("reason"), dry_run=dry_run, payload=stage_result)
@@ -283,9 +281,20 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                     if len(combined_text) > 3500:
                         combined_text = combined_text[:3500] + "... (truncated)"
 
+                    from tools.l5_action_queue import enqueue_action
+                    action_queue_id = enqueue_action(
+                        queue_type="reply_message", page_id=page_id, target_type="thread",
+                        target_id=thread_id, target_name=thread_name, action_text=reply_text,
+                        payload={
+                            "classification": classification,
+                            "customer_message_timestamp": latest_customer_message_timestamp,
+                            "seeker": payload["seeker"],
+                        },
+                    )
                     msg_id = send_proposal_to_telegram(
                         route="inbox", thread_id=thread_id, proposed_text=combined_text,
                         payload={
+                            "action_queue_id": action_queue_id,
                             "classification": classification,
                             "msg_messages_json": payload["full_messages_json"],
                             "seeker_dict": payload["seeker"],
@@ -297,8 +306,8 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                         logger.info(f"### ASYNC INBOX: Proposal {msg_id} queued to HITL DB ###")
 
                     results.append({
-                        "status": "drafted",
-                        "mode": "draft_only",
+                        "status": "queued_for_human_approval",
+                        "action_queue_id": action_queue_id,
                         "thread_name": thread_name,
                         "classification": classification,
                         "reply_text": reply_text,
