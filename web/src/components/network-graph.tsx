@@ -3,6 +3,8 @@
 
 import { useRef, useState, useEffect, useCallback } from 'react';
 import dynamic from 'next/dynamic';
+import { FunnelFilterBar, type FilterState } from './funnel-filter-bar';
+import { getDateRangeBounds } from '@/lib/funnel-filters';
 
 // Use 2D ForceGraph which uses Canvas2D (WebGL-accelerated) for better performance
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
@@ -47,15 +49,45 @@ export function NetworkGraph() {
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
   const [hoveredNodeDetails, setHoveredNodeDetails] = useState<HoveredNodeDetails | null>(null);
   const fgRef = useRef<{ d3Force: (name: string) => { strength: (s: number) => void } | undefined }>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [dimensions, setDimensions] = useState<{ width: number; height: number }>({ width: 900, height: 600 });
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   
   // Double-click manually tracked
   const clickNodeIdRef = useRef<string | null>(null);
   const clickTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  useEffect(() => {
+    const updateDimensions = () => {
+      if (containerRef.current) {
+        const { clientWidth, clientHeight } = containerRef.current;
+        if (clientWidth > 0 && clientHeight > 0) {
+          setDimensions({ width: clientWidth, height: clientHeight });
+        }
+      }
+    };
+    updateDimensions();
+    window.addEventListener('resize', updateDimensions);
+    return () => window.removeEventListener('resize', updateDimensions);
+  }, [graphData]);
+
+  useEffect(() => {
+    return () => {
+      if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+    };
+  }, []);
+
   // Fetch detailed data when hovering over a node for more than 400ms
   const fetchNodeDetails = useCallback(async (node: GraphNode) => {
     try {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
       const typeParam = node.type;
       let idParam = node.id;
       
@@ -69,7 +101,9 @@ export function NetworkGraph() {
       // City/Page don't have detail streams yet
       if (node.type === 'city' || node.type === 'page') return;
 
-      const res = await fetch(`/api/graph/details?id=${encodeURIComponent(idParam)}&type=${typeParam}`);
+      const res = await fetch(`/api/graph/details?id=${encodeURIComponent(idParam)}&type=${typeParam}`, {
+        signal: controller.signal,
+      });
       if (!res.ok) {
         const errorData = await res.json().catch(() => null);
         setHoveredNodeDetails({ error: errorData?.error || 'Details not found' });
@@ -77,7 +111,10 @@ export function NetworkGraph() {
       }
       const data = await res.json();
       setHoveredNodeDetails(data);
-    } catch (err) {
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return;
+      }
       console.error('Failed to fetch node details:', err);
       setHoveredNodeDetails({ error: 'Failed to connect to server' });
     }
@@ -87,6 +124,11 @@ export function NetworkGraph() {
     // Clear existing timeout
     if (hoverTimeoutRef.current) {
       clearTimeout(hoverTimeoutRef.current);
+      hoverTimeoutRef.current = null;
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
     }
 
     setHoveredNode(node);
@@ -102,12 +144,22 @@ export function NetworkGraph() {
     }
   }, [fetchNodeDetails]);
 
-  useEffect(() => {
-    fetch('/api/graph')
+  const fetchGraph = useCallback((filters: FilterState) => {
+    const params = new URLSearchParams();
+    if (filters.city !== 'all') params.set('city', filters.city);
+    const { startDate, endDate } = getDateRangeBounds(filters.dateRange);
+    if (startDate) params.set('startDate', startDate);
+    if (endDate) params.set('endDate', endDate);
+    const query = params.toString() ? `?${params.toString()}` : '';
+    fetch(`/api/graph${query}`)
       .then(res => res.json())
       .then(data => setGraphData(data))
       .catch(console.error);
   }, []);
+
+  const handleFilterChange = useCallback((filters: FilterState) => {
+    fetchGraph(filters);
+  }, [fetchGraph]);
 
   useEffect(() => {
     if (fgRef.current) {
@@ -164,60 +216,66 @@ export function NetworkGraph() {
     ctx.fillText(emoji, x, y);
   }, []);
 
-  if (!graphData) {
-    return <div className="loading-spinner"><div className="spinner" /></div>;
-  }
-
   return (
     <div style={{ position: 'relative' }}>
-      <div className="graph-container">
-        {/* @ts-expect-error - dynamic import type mismatch */}
-        <ForceGraph2D
-          ref={fgRef}
-          graphData={graphData}
-          nodeCanvasObject={nodeCanvasObject}
-          nodePointerAreaPaint={(node: GraphNode, color: string, ctx: CanvasRenderingContext2D) => {
-            const x = node.x ?? 0;
-            const y = node.y ?? 0;
-            ctx.fillStyle = color;
-            ctx.beginPath();
-            ctx.arc(x, y, node.val / 2, 0, 2 * Math.PI);
-            ctx.fill();
-          }}
-          linkColor={() => 'rgba(99, 102, 241, 0.2)'}
-          linkWidth={1.5}
-          onNodeHover={handleNodeHover}
-          onNodeClick={(node: GraphNode) => {
-            if (clickNodeIdRef.current === node.id && clickTimerRef.current) {
-              // Double click detected
-              clearTimeout(clickTimerRef.current);
-              clickTimerRef.current = null;
-              clickNodeIdRef.current = null;
-              
-              if (node.type === 'user' && node.dbId) {
-                // Navigate to seeker detail page with clean numeric ID
-                window.location.href = `/seekers/${node.dbId}`;
-              } else if (node.fbUrl) {
-                const url = node.fbUrl.startsWith('http') ? node.fbUrl : `https://facebook.com/${node.fbUrl}`;
-                window.open(url, '_blank');
-              }
-            } else {
-              // Single click (start timer)
-              if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
-              clickNodeIdRef.current = node.id;
-              clickTimerRef.current = setTimeout(() => {
-                clickTimerRef.current = null;
-                clickNodeIdRef.current = null;
-              }, 300);
-            }
-          }}
-          backgroundColor="#1a1a2e"
-          width={typeof window !== 'undefined' ? window.innerWidth - 340 : 1000}
-          height={typeof window !== 'undefined' ? window.innerHeight - 200 : 600}
-          warmupTicks={50}
-          cooldownTicks={100}
-        />
-      </div>
+      <FunnelFilterBar
+        onFilterChange={handleFilterChange}
+        totalCount={graphData?.nodes.length || 0}
+        filteredCount={graphData?.nodes.length || 0}
+        unitLabel="nút mạng"
+      />
+      {!graphData ? (
+        <div className="loading-spinner"><div className="spinner" /></div>
+      ) : (
+        <>
+          <div className="graph-container" ref={containerRef}>
+            {/* @ts-expect-error - dynamic import type mismatch */}
+            <ForceGraph2D
+              ref={fgRef}
+              graphData={graphData}
+              nodeCanvasObject={nodeCanvasObject}
+              nodePointerAreaPaint={(node: GraphNode, color: string, ctx: CanvasRenderingContext2D) => {
+                const x = node.x ?? 0;
+                const y = node.y ?? 0;
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(x, y, node.val / 2, 0, 2 * Math.PI);
+                ctx.fill();
+              }}
+              linkColor={() => 'rgba(99, 102, 241, 0.2)'}
+              linkWidth={1.5}
+              onNodeHover={handleNodeHover}
+              onNodeClick={(node: GraphNode) => {
+                if (clickNodeIdRef.current === node.id && clickTimerRef.current) {
+                  // Double click detected
+                  clearTimeout(clickTimerRef.current);
+                  clickTimerRef.current = null;
+                  clickNodeIdRef.current = null;
+                  
+                  if (node.type === 'user' && node.dbId) {
+                    // Navigate to seeker detail page with clean numeric ID
+                    window.location.href = `/seekers/${node.dbId}`;
+                  } else if (node.fbUrl) {
+                    const url = node.fbUrl.startsWith('http') ? node.fbUrl : `https://facebook.com/${node.fbUrl}`;
+                    window.open(url, '_blank');
+                  }
+                } else {
+                  // Single click (start timer)
+                  if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+                  clickNodeIdRef.current = node.id;
+                  clickTimerRef.current = setTimeout(() => {
+                    clickTimerRef.current = null;
+                    clickNodeIdRef.current = null;
+                  }, 300);
+                }
+              }}
+              backgroundColor="#1a1a2e"
+              width={dimensions.width}
+              height={dimensions.height}
+              warmupTicks={50}
+              cooldownTicks={100}
+            />
+          </div>
 
       {hoveredNode && (
         <div
@@ -267,6 +325,11 @@ export function NetworkGraph() {
             {hoveredNode.fbUrl && (
               <a href={hoveredNode.fbUrl.startsWith('http') ? hoveredNode.fbUrl : `https://facebook.com/${hoveredNode.fbUrl}`} target="_blank" rel="noopener noreferrer" className="fb-link" style={{ fontSize: '12px', display: 'block' }}>
                 Facebook Profile ↗
+              </a>
+            )}
+            {hoveredNodeDetails?.post?.post_url && (
+              <a href={hoveredNodeDetails.post.post_url} target="_blank" rel="noopener noreferrer" className="fb-link" style={{ fontSize: '12px', display: 'block' }}>
+                Facebook Post ↗
               </a>
             )}
           </div>
@@ -325,18 +388,28 @@ export function NetworkGraph() {
               )}
               
               <div style={{ display: 'flex', gap: '12px', marginBottom: '12px', fontSize: '12px' }}>
-                <span style={{ color: '#10b981' }}>💬 {hoveredNodeDetails.stats?.total || 0} Comments</span>
+                <span style={{ color: '#10b981' }}>
+                  💬 {hoveredNodeDetails.stats?.total || 0} {hoveredNode.type === 'ad' && !hoveredNodeDetails.post?.post_url ? 'Inquiries' : 'Comments'}
+                </span>
                 <span style={{ color: '#8b5cf6' }}>👥 {hoveredNodeDetails.stats?.unique_users || 0} Users</span>
               </div>
 
-              <div style={{ fontSize: '12px', fontWeight: 600, color: '#e2e8f0', marginBottom: '8px' }}>Recent Comments</div>
+              <div style={{ fontSize: '12px', fontWeight: 600, color: '#e2e8f0', marginBottom: '8px' }}>
+                {hoveredNode.type === 'ad' && !hoveredNodeDetails.post?.post_url ? 'Recent Inquiries' : 'Recent Comments'}
+              </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                {Array.isArray(hoveredNodeDetails.comments) && hoveredNodeDetails.comments.slice(0, 10).map((c: { commenter_name: string; comment_text?: string }, i: number) => (
-                  <div key={i} style={{ fontSize: '12px', background: 'rgba(255,255,255,0.03)', padding: '6px 8px', borderRadius: '6px' }}>
-                    <div style={{ color: '#cbd5e1', fontWeight: 600, marginBottom: '2px' }}>{c.commenter_name}</div>
-                    <div style={{ color: 'var(--text-muted)' }}>{c.comment_text}</div>
+                {Array.isArray(hoveredNodeDetails.comments) && hoveredNodeDetails.comments.length > 0 ? (
+                  hoveredNodeDetails.comments.slice(0, 10).map((c: { commenter_name: string; comment_text?: string }, i: number) => (
+                    <div key={i} style={{ fontSize: '12px', background: 'rgba(255,255,255,0.03)', padding: '6px 8px', borderRadius: '6px' }}>
+                      <div style={{ color: '#cbd5e1', fontWeight: 600, marginBottom: '2px' }}>{c.commenter_name}</div>
+                      <div style={{ color: 'var(--text-muted)' }}>{c.comment_text}</div>
+                    </div>
+                  ))
+                ) : (
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    {hoveredNode.type === 'ad' ? 'No recent inquiries found.' : 'No comments found.'}
                   </div>
-                ))}
+                )}
               </div>
             </div>
           )}
@@ -370,6 +443,8 @@ export function NetworkGraph() {
           </div>
         ))}
       </div>
+      </>
+      )}
     </div>
   );
 }

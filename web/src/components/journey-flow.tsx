@@ -1,7 +1,7 @@
 // code:web-component-004:journey-flow
 'use client';
 
-import { useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import {
   ReactFlow,
   Background,
@@ -15,8 +15,10 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { JOURNEY_STAGES, type JourneyStage } from '@/lib/types';
-import { JOURNEY_TRANSITIONS } from '@/lib/journey-engine';
+import { JOURNEY_STAGES, type JourneyStage, type Seeker } from '@/lib/types';
+import { JOURNEY_TRANSITIONS, normalizeJourneyStage } from '@/lib/journey-engine';
+import { FunnelFilterBar, type FilterState } from './funnel-filter-bar';
+import { isDateInRange } from '@/lib/funnel-filters';
 
 // ── Custom Journey Node ──
 interface JourneyNodeData extends Record<string, unknown> {
@@ -64,10 +66,36 @@ function JourneyNodeComponent({ data }: NodeProps<Node<JourneyNodeData>>) {
 
 // ── Main Component ──
 interface JourneyFlowProps {
-  seekerCountByStage: Record<string, number>;
+  seekerCountByStage?: Record<string, number>;
+  initialSeekers?: Seeker[];
 }
 
-export function JourneyFlow({ seekerCountByStage }: JourneyFlowProps) {
+export function JourneyFlow({ seekerCountByStage, initialSeekers }: JourneyFlowProps) {
+  const [filterState, setFilterState] = useState<FilterState>({ city: 'all', dateRange: 'all' });
+
+  const filteredSeekers = useMemo(() => {
+    if (!initialSeekers) return [];
+    return initialSeekers.filter(s => {
+      if (filterState.city !== 'all') {
+        if ((s.city || 'Unknown').toLowerCase() !== filterState.city.toLowerCase()) return false;
+      }
+      if (!isDateInRange(s.lastMessageTimestampText || s.lastInteraction || s.firstSeen, filterState.dateRange)) return false;
+      return true;
+    });
+  }, [initialSeekers, filterState]);
+
+  const counts: Record<string, number> = useMemo(() => {
+    if (initialSeekers) {
+      const c: Record<string, number> = {};
+      for (const s of filteredSeekers) {
+        const stage = normalizeJourneyStage(s.leadStage);
+        c[stage] = (c[stage] || 0) + 1;
+      }
+      return c;
+    }
+    return seekerCountByStage || {};
+  }, [initialSeekers, filteredSeekers, seekerCountByStage]);
+
   const nodeTypes = useMemo(() => ({ journeyNode: JourneyNodeComponent }), []);
 
   const nodes: Node<JourneyNodeData>[] = useMemo(() => 
@@ -79,11 +107,11 @@ export function JourneyFlow({ seekerCountByStage }: JourneyFlowProps) {
         label: stage.label,
         description: stage.description,
         stage: stage.key,
-        seekerCount: seekerCountByStage[stage.key] || 0,
-        isActive: (seekerCountByStage[stage.key] || 0) > 0,
+        seekerCount: counts[stage.key] || 0,
+        isActive: (counts[stage.key] || 0) > 0,
       },
     })),
-  [seekerCountByStage]);
+  [counts]);
 
   // Deduplicate edges
   const edges: Edge[] = useMemo(() => {
@@ -112,10 +140,19 @@ export function JourneyFlow({ seekerCountByStage }: JourneyFlowProps) {
   }, []);
 
   return (
-    <div style={{ height: 'calc(100vh - 320px)', minHeight: '500px' }}>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
+    <div>
+      {initialSeekers && (
+        <FunnelFilterBar
+          onFilterChange={setFilterState}
+          totalCount={initialSeekers.length}
+          filteredCount={filteredSeekers.length}
+          unitLabel="seekers"
+        />
+      )}
+      <div style={{ height: 'calc(100vh - 360px)', minHeight: '500px' }}>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
         nodeTypes={nodeTypes}
         onInit={onInit}
         fitView
@@ -144,6 +181,7 @@ export function JourneyFlow({ seekerCountByStage }: JourneyFlowProps) {
           }}
         />
       </ReactFlow>
+      </div>
     </div>
   );
 }

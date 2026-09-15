@@ -2,6 +2,8 @@
 'use client';
 
 import type { SeekerDetail } from '@/lib/types';
+import { SevenStarProgress } from './seven-star-progress';
+import { SeekerJourneyTimeline } from './seeker-journey-timeline';
 
 const PAGE_ID = '1548373332058326';
 
@@ -32,9 +34,7 @@ function fbPostUrl(postUrl: string) {
 export function SeekerDetailView({ detail }: Props) {
   const { seeker, messages, comments, adSource } = detail;
   const cityStyle = CITY_COLORS[seeker.city] || CITY_COLORS['Unknown'];
-  const stageColor = (seeker.leadStage === 'Seeker')
-    ? { bg: 'rgba(99, 102, 241, 0.2)', text: '#818cf8' }
-    : { bg: 'rgba(167, 139, 250, 0.15)', text: '#a78bfa' };
+
 
   // Extract FB user ID from fbProfileUrl or fb_url for inbox link
   const fbUserId = seeker.fbProfileUrl
@@ -61,7 +61,7 @@ export function SeekerDetailView({ detail }: Props) {
           </div>
           <div>
             <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', marginBottom: '4px' }}>Stage</div>
-            <span className="badge" style={{ background: stageColor.bg, color: stageColor.text }}>{seeker.leadStage}</span>
+            <SevenStarProgress leadStage={seeker.leadStage} size="sm" />
           </div>
           <div>
             <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', marginBottom: '4px' }}>Source</div>
@@ -75,6 +75,12 @@ export function SeekerDetailView({ detail }: Props) {
           <div>
             <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', marginBottom: '4px' }}>First Seen</div>
             <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{seeker.firstSeen || '—'}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', marginBottom: '4px' }}>Last Active</div>
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+              {seeker.lastMessageDate || seeker.lastMessageTimestampText || seeker.lastInteraction || '—'}
+            </div>
           </div>
         </div>
 
@@ -93,6 +99,11 @@ export function SeekerDetailView({ detail }: Props) {
             </a>
           )}
         </div>
+      </div>
+
+      {/* ── Journey Timeline & Actionable Queued Recommendations ── */}
+      <div className="card" style={{ padding: '20px' }}>
+        <SeekerJourneyTimeline seeker={seeker} />
       </div>
 
       {/* Stats row */}

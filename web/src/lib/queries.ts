@@ -2,6 +2,7 @@
 // Server-side query functions that read from FrankenSQLite
 import { getDb } from './db';
 import type { Seeker, SeekerDetail, Post, CommentRow, MessageRow, ThreadRow, TouchPoint } from './types';
+import { parseRealDate } from './funnel-filters';
 
 // ── FB URL normalization ──
 // All FB URLs like facebook.com/SahajaVietnam?__cft__[0]=... are the same page.
@@ -45,6 +46,20 @@ export function getActionQueueItems(): ActionQueueItem[] {
     WHERE status NOT IN ('executed', 'rejected')
     ORDER BY queue_type, id
   `).all() as ActionQueueItem[];
+}
+
+export function getSeekerActionQueueItems(targetId?: string | null, targetName?: string | null): ActionQueueItem[] {
+  if (!tableExists('action_queue')) return [];
+  const db = getDb();
+  if (!targetId && !targetName) return [];
+  return db.prepare(`
+    SELECT id, queue_type AS queueType, target_type AS targetType, target_id AS targetId,
+           target_name AS targetName, action_text AS actionText, reaction_type AS reactionType,
+           status, approval_source AS approvalSource, error_text AS errorText, created_at AS createdAt
+    FROM action_queue
+    WHERE (target_id = ? OR (target_name IS NOT NULL AND target_name = ?))
+    ORDER BY id DESC
+  `).all(targetId || '', targetName || '') as ActionQueueItem[];
 }
 
 // ── Heuristics to fix older scraped messages ──
@@ -129,8 +144,18 @@ export function getAllSeekers(): Seeker[] {
   const allSeekers = [...dmUsers, ...commentUsers].map(s => ({
     ...s,
     fbProfileUrl: normalizeFbUrl(s.fbProfileUrl),
-    // Dynamic stage: has phone → Seeker (registered), else → User (just interacted)
-    leadStage: (s.phone && s.phone.trim() !== '') ? 'Seeker' : 'User',
+    // Dynamic stage:
+    // If DB has an advanced stage (Public Program, 18-Weeks, Seed, Yogi, Mahayogi), preserve it.
+    // If DB is Intake / User or empty: has phone → 'Seeker', else → 'Intake'.
+    leadStage: (() => {
+      const stored = s.leadStage?.trim();
+      const isBaseStage = !stored || stored === 'Intake' || stored === 'User';
+      if (isBaseStage) {
+        return (s.phone && s.phone.trim() !== '') ? 'Seeker' : (stored || 'Intake');
+      }
+      return stored;
+    })(),
+
   }));
 
   // Deduplicate:
@@ -164,86 +189,8 @@ export function getAllSeekers(): Seeker[] {
     }
   }
 
-  // Retrospective [2026-04-06]: Date Parser & Priority Overhaul
-  // Fix: Rebuilt Next.js chronological parser to explicitly extract minute/hour values from FB UI strings (e.g., '10:38 PM') and re-elevated `lastMessageTimestampText` to the primary sort key.
-  // Root Cause: The previous logic relied entirely on `last_interaction` synced from the DB, which was highly volatile to scraping loop glitches (reversed timestamps). 
-  // Simultaneously, the JS parser collapsed all "today" times into a static `-3600000ms`, creating massive sorting ties and rendering chronological CRM ordering impossible. 
-  // Resolving exact time inputs completely bypasses backend extraction anomalies and perfectly preserves chronological integrity.
-  const parseRealDate = (ts?: string | null): number => {
-    if (!ts) return 0;
-    const now = new Date();
-    
-    // Clean string
-    const cleanTs = ts.replace(/\u202f/g, ' ').trim();
-    
-    // Fallbacks for standard ISO/JS parsable Strings (like "Mar 29, 2026, 2:51 PM")
-    const standardParse = new Date(cleanTs.replace(' at ', ' ')).getTime();
-    if (!isNaN(standardParse)) return standardParse;
-    
-    const lowerTs = cleanTs.toLowerCase();
-    
-    if (lowerTs === 'now' || lowerTs.includes('vài giây') || lowerTs === 'vừa xong') return now.getTime();
-    if (lowerTs.match(/(\d+)\s*(m|phút)/)) return now.getTime() - parseInt(lowerTs.match(/(\d+)\s*(m|phút)/)![1], 10) * 60000;
-    if (lowerTs.match(/(\d+)\s*(h|giờ)/)) return now.getTime() - parseInt(lowerTs.match(/(\d+)\s*(h|giờ)/)![1], 10) * 3600000;
-    if (lowerTs.match(/(\d+)\s*(d|ngày)/)) return now.getTime() - parseInt(lowerTs.match(/(\d+)\s*(d|ngày)/)![1], 10) * 86400000;
-
-    let timeMs = 0;
-    let timeString = null;
-    const timeMatch = cleanTs.match(/(\d{1,2}:\d{2}\s*(?:am|pm)?)/i);
-    if (timeMatch) {
-       timeString = timeMatch[1].toUpperCase();
-       const tDate = new Date(`1970-01-01 ${timeString}`);
-       if (!isNaN(tDate.getTime())) {
-           timeMs = tDate.getHours() * 3600000 + tDate.getMinutes() * 60000;
-       }
-    } else {
-       timeMs = 12 * 3600000;
-    }
-
-    const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    
-    // Just time -> Today
-    if (timeString && cleanTs.toUpperCase() === timeString) {
-        return dayStart + timeMs;
-    }
-
-    // Yesterday
-    if (lowerTs.includes('yesterday') || lowerTs.includes('hôm qua')) {
-        return dayStart - 86400000 + timeMs;
-    }
-    
-    const weekDays = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
-    const vnDays = ['cn', 't2', 't3', 't4', 't5', 't6', 't7'];
-    
-    let wIndex = weekDays.findIndex(wd => lowerTs.startsWith(wd));
-    if (wIndex === -1) wIndex = vnDays.findIndex(wd => lowerTs.startsWith(wd));
-    
-    if (wIndex !== -1) {
-        const todayIdx = now.getDay();
-        let diff = todayIdx - wIndex;
-        if (diff <= 0) diff += 7; // it was the past week
-        return dayStart - (diff * 86400000) + timeMs;
-    }
-    
-    const mMatch = cleanTs.match(/(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:,?\s*(\d{4}))?/i);
-    if (mMatch) {
-        const year = mMatch[3] ? parseInt(mMatch[3], 10) : now.getFullYear();
-        const month = mMatch[1];
-        const day = parseInt(mMatch[2], 10);
-        const parsed = new Date(`${month} ${day}, ${year} ${timeString || ''}`);
-        if (!isNaN(parsed.getTime())) {
-            // FB omits year if within last 12 months, if date is physically in future, it's last year
-            if (!mMatch[3] && parsed.getTime() > now.getTime()) {
-                parsed.setFullYear(year - 1);
-            }
-            return parsed.getTime();
-        }
-    }
-
-    return 0;
-  };
-
   // Sanitize lastMessageTimestampText against scraped non-date texts (e.g. ad links)
+  // and compute actual datetime for accurate sorting and display
   for (const s of result) {
     if (s.lastMessageTimestampText && !parseRealDate(s.lastMessageTimestampText)) {
       s.lastMessageTimestampText = null;
@@ -252,12 +199,14 @@ export function getAllSeekers(): Seeker[] {
     if (!s.lastMessageTimestampText && s.lastInteraction) {
       s.lastMessageTimestampText = s.lastInteraction;
     }
+    const realTime = parseRealDate(s.lastMessageTimestampText) || parseRealDate(s.lastInteraction) || parseRealDate(s.firstSeen) || 0;
+    s.lastMessageDate = realTime > 0 ? new Date(realTime).toISOString() : null;
   }
 
-  // Parse dates and sort chronologically, prioritizing the exact text of the last message bubble over DB interaction generic timestamps
+  // Parse dates and sort chronologically, prioritizing actual datetime
   result.sort((a, b) => {
-    const timeA = parseRealDate(a.lastMessageTimestampText) || parseRealDate(a.lastInteraction) || 0;
-    const timeB = parseRealDate(b.lastMessageTimestampText) || parseRealDate(b.lastInteraction) || 0;
+    const timeA = (a.lastMessageDate ? new Date(a.lastMessageDate).getTime() : 0) || parseRealDate(a.lastMessageTimestampText) || parseRealDate(a.lastInteraction) || 0;
+    const timeB = (b.lastMessageDate ? new Date(b.lastMessageDate).getTime() : 0) || parseRealDate(b.lastMessageTimestampText) || parseRealDate(b.lastInteraction) || 0;
     return timeB - timeA;
   });
 
@@ -432,6 +381,11 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
       `).all(cuRow.name) as (CommentRow & { postName?: string; postUrl?: string })[];
     }
 
+    const lastCmt = comments.length > 0 ? comments[comments.length - 1] : null;
+    cuRow.lastMessageTimestampText = lastCmt?.commentDate || cuRow.lastInteraction;
+    const commentRealTime = parseRealDate(cuRow.lastMessageTimestampText) || parseRealDate(cuRow.lastInteraction) || parseRealDate(cuRow.firstSeen) || 0;
+    cuRow.lastMessageDate = commentRealTime > 0 ? new Date(commentRealTime).toISOString() : null;
+
     return {
       seeker: cuRow,
       messages: [],
@@ -501,6 +455,11 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
     `).all(uRow.name) as (CommentRow & { postName?: string; postUrl?: string })[];
   }
 
+  const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+  uRow.lastMessageTimestampText = lastMsg?.messageTimestamp || null;
+  const dmRealTime = parseRealDate(lastMsg?.messageTimestamp) || parseRealDate(lastMsg?.timestamp) || parseRealDate(uRow.lastInteraction) || parseRealDate(uRow.firstSeen) || 0;
+  uRow.lastMessageDate = dmRealTime > 0 ? new Date(dmRealTime).toISOString() : null;
+
   return {
     seeker: uRow,
     messages,
@@ -560,11 +519,23 @@ export interface GraphData {
   links: GraphLink[];
 }
 
-export function getGraphData(): GraphData {
+export function getGraphData(filter?: { city?: string; startDate?: string; endDate?: string }): GraphData {
   const db = getDb();
   const nodes: GraphNode[] = [];
   const links: GraphLink[] = [];
   const nodeIds = new Set<string>();
+
+  const targetCity = filter?.city && filter.city !== 'all' ? filter.city : null;
+  const commentRangeParams: string[] = [];
+  const dmRangeParams: string[] = [];
+  const rangeClauses = (column: string, params: string[]) => {
+    const clauses: string[] = [];
+    if (filter?.startDate) { clauses.push(`AND datetime(${column}) >= datetime(?)`); params.push(filter.startDate); }
+    if (filter?.endDate) { clauses.push(`AND datetime(${column}) <= datetime(?)`); params.push(`${filter.endDate} 23:59:59.999`); }
+    return clauses.join(' ');
+  };
+  const commentRangePredicate = rangeClauses('COALESCE(c.comment_date, c.timestamp)', commentRangeParams);
+  const dmRangePredicate = rangeClauses('u.last_interaction', dmRangeParams);
 
   const addNode = (node: GraphNode) => {
     if (!nodeIds.has(node.id)) {
@@ -577,16 +548,19 @@ export function getGraphData(): GraphData {
   const pageId = 'page-root';
   addNode({ id: pageId, name: 'Thiền Sahaja Yoga Việt Nam', type: 'page', val: 30, color: '#10b981' });
 
-  // City nodes — always present
+  // City nodes
   for (const city of CITIES) {
+    if (targetCity && targetCity !== city) continue;
     const cityId = `city-${city}`;
     addNode({ id: cityId, name: city, type: 'city', val: 20, color: '#3b82f6' });
     links.push({ source: pageId, target: cityId });
   }
   // Unknown city
-  const unknownCityId = 'city-Unknown';
-  addNode({ id: unknownCityId, name: 'Other / Unknown', type: 'city', val: 15, color: '#6b7280' });
-  links.push({ source: pageId, target: unknownCityId });
+  if (!targetCity || targetCity === 'Unknown') {
+    const unknownCityId = 'city-Unknown';
+    addNode({ id: unknownCityId, name: 'Other / Unknown', type: 'city', val: 15, color: '#6b7280' });
+    links.push({ source: pageId, target: unknownCityId });
+  }
 
   // Helper: detect city from text content (post name, ad content, etc)
   function detectCityFromText(text: string): string {
@@ -612,13 +586,15 @@ export function getGraphData(): GraphData {
       FROM posts p
       JOIN comments c ON c.post_id = p.id
       WHERE c.commenter_name != ?
+      ${commentRangePredicate}
       GROUP BY p.id
       ORDER BY commenter_count DESC
-    `).all(PAGE_NAME) as { id: string; post_name: string; commenter_count: number }[];
+    `).all(PAGE_NAME, ...commentRangeParams) as { id: string; post_name: string; commenter_count: number }[];
   }
 
   for (const post of allPosts) {
     const postCity = detectCityFromText(post.post_name || '');
+    if (targetCity && postCity !== targetCity) continue;
     const cityId = `city-${postCity}`;
     const postNodeId = `post-${post.id}`;
 
@@ -636,7 +612,8 @@ export function getGraphData(): GraphData {
       SELECT DISTINCT c.commenter_name
       FROM comments c
       WHERE c.post_id = ? AND c.commenter_name != ?
-    `).all(post.id, PAGE_NAME) as { commenter_name: string }[] : [];
+      ${commentRangePredicate}
+    `).all(post.id, PAGE_NAME, ...commentRangeParams) as { commenter_name: string }[] : [];
 
     for (const commenter of commenters) {
       // Look up user in comment_users for FB URL / phone data
@@ -673,8 +650,9 @@ export function getGraphData(): GraphData {
     LEFT JOIN user_ad_ids uai ON uai.thread_id = t.id
     LEFT JOIN ad_posts ap ON ap.ad_id = uai.ad_id
     WHERE u.thread_name IS NOT NULL AND u.thread_name != ?
+    ${dmRangePredicate}
     ORDER BY u.last_interaction DESC
-  `).all(PAGE_NAME) as { db_id: number; thread_name: string; fb_url: string | null; phone: string | null; city: string; thread_id: string; ad_id: string | null; ad_content: string | null }[];
+  `).all(PAGE_NAME, ...dmRangeParams) as { db_id: number; thread_name: string; fb_url: string | null; phone: string | null; city: string; thread_id: string; ad_id: string | null; ad_content: string | null }[];
 
   // Cache all post names for ad→post fuzzy matching
   const postNameCache = tableExists('posts') ? db.prepare(`SELECT id, post_name FROM posts WHERE post_name IS NOT NULL`).all() as { id: string; post_name: string }[] : [];
@@ -734,6 +712,7 @@ export function getGraphData(): GraphData {
 
   for (const user of dmUsers) {
     if (processedDmUsers.has(user.thread_name)) continue;
+    if (targetCity && user.city !== targetCity) continue;
     processedDmUsers.add(user.thread_name);
 
     if (user.ad_id) {
