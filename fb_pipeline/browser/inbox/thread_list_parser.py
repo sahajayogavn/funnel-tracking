@@ -9,12 +9,42 @@ from .constants import (
     thread_card_selector,
 )
 
+# Inbox navigation labels can match the broad conversation-card selectors.
+# They are never a person's Facebook display name and must not enter the
+# ingestion pipeline, even if Facebook changes the tab DOM hierarchy.
+INVALID_THREAD_NAMES = frozenset({
+    "all message",
+    "all messages",
+    "unread",
+    "done",
+    "spam",
+    "follow up",
+    "tất cả tin nhắn",
+    "chưa đọc",
+    "đã xong",
+    "thư rác",
+    "theo dõi",
+})
+
+
+# code:bug-inbox-thread-name-001:reject-navigation-label
+def is_conversation_name(name: str) -> bool:
+    """Return whether *name* can be a Facebook conversation identity."""
+    normalized = " ".join((name or "").casefold().split())
+    return bool(normalized) and normalized not in INVALID_THREAD_NAMES
+
+
 def extract_visible_threads(page) -> list[dict]:
     selector = thread_card_selector()
     return page.evaluate(
         r'''(config) => {
             const threadSelector = config.threadSelector;
-            const candidates = Array.from(document.querySelectorAll(threadSelector));
+            // The broad inbox selector also matches filter tabs (such as
+            // "All messages"). They have no conversation identity and must
+            // not be returned to the ingestion pipeline as threads.
+            const invalidNames = new Set(config.invalidThreadNames);
+            const candidates = Array.from(document.querySelectorAll(threadSelector))
+                .filter(el => !el.closest('[role="tablist"]'));
 
             let scroller = null;
             if (candidates.length > 0) {
@@ -105,9 +135,12 @@ def extract_visible_threads(page) -> list[dict]:
                     fbUrl,
                     absoluteTop,
                 };
-            }).filter(item => item.name || item.text);
+            }).filter(item => {
+                const normalizedName = item.name.toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+                return normalizedName && !invalidNames.has(normalizedName);
+            });
         }''',
-        {"threadSelector": selector},
+        {"threadSelector": selector, "invalidThreadNames": list(INVALID_THREAD_NAMES)},
     )
 
 def parse_sidebar_time_token(token: str, now: datetime | None = None) -> dict:

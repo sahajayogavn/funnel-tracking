@@ -12,7 +12,10 @@ from fb_pipeline.contracts.l1_inbox import (
     extract_user_info,
     parse_ad_ids,
 )
-from fb_pipeline.browser.inbox.thread_list_parser import parse_sidebar_time_token
+from fb_pipeline.browser.inbox.thread_list_parser import (
+    is_conversation_name,
+    parse_sidebar_time_token,
+)
 
 
 
@@ -157,7 +160,17 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
     )
 
 
+# code:bug-inbox-thread-name-001:persist-valid-fb-name
 def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city) -> dict:
+    # The display name can change between crawls.  A valid name read from the
+    # live conversation must replace a previously persisted navigation label
+    # such as "All messages" for the same stable Facebook identity.
+    if not is_conversation_name(thread_record.thread_name):
+        raise ValueError(
+            f"Refusing to persist an inbox navigation label as a seeker name: "
+            f"{thread_record.thread_name!r}"
+        )
+
     cursor = conn.cursor()
     messages_added = 0
     new_customer_message_added = False
@@ -246,6 +259,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
         INSERT INTO threads (id, page_id, thread_name, last_synced_time)
         VALUES (?, ?, ?, datetime('now'))
         ON CONFLICT(id) DO UPDATE SET
+            thread_name=excluded.thread_name,
             last_synced_time=excluded.last_synced_time
     ''', (
         thread_record.thread_id,
@@ -293,6 +307,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, last_interaction, last_synced_at)
             VALUES (?, ?, ?, ?, ?, ?, {{interaction_time}}, datetime('now'))
             ON CONFLICT(thread_id) DO UPDATE SET
+                thread_name=excluded.thread_name,
                 phone = COALESCE(excluded.phone, users.phone),
                 email = COALESCE(excluded.email, users.email),
                 fb_url = COALESCE(excluded.fb_url, users.fb_url),
@@ -313,6 +328,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, last_synced_at)
             VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(thread_id) DO UPDATE SET
+                thread_name=excluded.thread_name,
                 phone = COALESCE(excluded.phone, users.phone),
                 email = COALESCE(excluded.email, users.email),
                 fb_url = COALESCE(excluded.fb_url, users.fb_url),

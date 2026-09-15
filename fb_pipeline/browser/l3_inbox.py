@@ -11,6 +11,7 @@ from .inbox.scroll_helpers import (
 )
 from .inbox.thread_list_parser import (
     extract_visible_threads,
+    is_conversation_name,
     parse_sidebar_time_token,
     is_thread_older_than_range,
     validate_quick_fetch_cache,
@@ -114,7 +115,11 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
         new_in_round = 0
         for vt in visible_threads:
             name = (vt.get("name") or "").strip()
-            if not name:
+            # Keep a Python-side guard as well as the DOM parser guard. This
+            # prevents a navigation label from being persisted if a caller
+            # supplies a visible-thread payload from a different parser.
+            if not is_conversation_name(name):
+                logger.warning("Skipping invalid inbox conversation label: %r", name)
                 continue
             if thread_counter >= max_threads:
                 break
