@@ -64,7 +64,7 @@ def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fi
                         # Retrospective [Apr 2026]: Anti-Fragile Last Resort fb_url extraction
                         # If ReactRouter hasn't updated the URL, and the sidebar stripped hrefs for the active thread, 
                         # we forcefully extract the ID from the chat panel's header avatars or buttons.
-                        fallback_id = page.evaluate('''() => {
+                        fallback_id = page.evaluate(r'''() => {
                             let links = Array.from(document.querySelectorAll('a[href]'));
                             for (let a of links) {
                                 let h = a.getAttribute('href') || '';
@@ -264,7 +264,7 @@ def scroll_up_message_panel(page, logger, name: str) -> int:
 
 def extract_thread_messages(page) -> list[dict]:
     """Extract raw messages from DOM and process sender validation via module"""
-    raw_messages = page.evaluate('''() => {
+    raw_messages = page.evaluate(r'''() => {
         let region = document.querySelector(
             'div[aria-label*="Message list container"], ' +
             'div[role="region"][aria-label*="message"]'
@@ -275,10 +275,24 @@ def extract_thread_messages(page) -> list[dict]:
         let elements = region.querySelectorAll('.x14vqqas, .x1fqp7bg');
         let processedBubbles = new Set();
 
+        function isValidTimestamp(ts) {
+            if (!ts || ts.length > 50) return false;
+            let lower = ts.toLowerCase();
+            if (/(\.com|\.me|\.vn|\.pdf|\.gl|mib|kib|mb|kb|audio call|cuộc gọi|facebook|zalo|hỏi|xem|chi tiết|chia sẻ|đăng nhập|trả lời|reply|like|love)/i.test(lower)) {
+                return false;
+            }
+            let hasTime = /\b\d{1,2}:\d{2}(?:\s*[ap]m)?\b/i.test(lower);
+            let hasMonth = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|tháng|thg)\b/i.test(lower);
+            let hasSlashDate = /\b\d{1,2}[\/\.-]\d{1,2}(?:[\/\.-]\d{2,4})?\b/.test(lower);
+            let hasRelativeDay = /\b(today|yesterday|hôm nay|hôm qua|now|vừa xong)\b/i.test(lower);
+            let hasWeekday = /\b(mon|tue|wed|thu|fri|sat|sun|thứ\s*[2-7]|chủ nhật)\b/i.test(lower);
+            return hasTime || hasMonth || hasSlashDate || hasRelativeDay || hasWeekday;
+        }
+
         for (let el of elements) {
             if (el.classList.contains('x14vqqas')) {
                 let ts = el.innerText.trim();
-                if (ts && ts.length < 50) currentTimestamp = ts;
+                if (isValidTimestamp(ts)) currentTimestamp = ts;
                 continue;
             }
             if (el.classList.contains('x1fqp7bg')) {
@@ -395,7 +409,7 @@ def extract_thread_messages(page) -> list[dict]:
                 }
 
                 if (texts.length > 0) {
-                    let combinedText = texts.join('\\n[Quoted Reply/Link]: ');
+                    let combinedText = texts.join('\n[Quoted Reply/Link]: ');
                     results.push({htmlStr, bg, text: combinedText, timestamp: currentTimestamp});
                 }
             }
@@ -480,3 +494,28 @@ def extract_ad_id_labels(page) -> list:
     }''')
     raw = re.findall(r'ad_id\.?(\d{5,})', labels_text)
     return list(dict.fromkeys(raw))
+
+
+def is_valid_timestamp_text(ts: str | None) -> bool:
+    """Validate if a scraped string is a genuine Facebook message timestamp."""
+    if not ts or len(ts.strip()) > 50:
+        return False
+    lower = ts.strip().lower()
+    if re.search(r'(\.com|\.me|\.vn|\.pdf|\.gl|mib|kib|mb|kb|audio call|cuộc gọi|facebook|zalo|hỏi|xem|chi tiết|chia sẻ|đăng nhập|trả lời|reply|like|love)', lower):
+        return False
+    has_time = bool(re.search(r'\b\d{1,2}:\d{2}(?:\s*[ap]m)?\b', lower))
+    has_month = bool(re.search(r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|tháng|thg)\b', lower))
+    has_slash = bool(re.search(r'\b\d{1,2}[\/\.-]\d{1,2}(?:[\/\.-]\d{2,4})?\b', lower))
+    has_rel = bool(re.search(r'\b(today|yesterday|hôm nay|hôm qua|now|vừa xong)\b', lower))
+    has_day = bool(re.search(r'\b(mon|tue|wed|thu|fri|sat|sun|thứ\s*[2-7]|chủ nhật)\b', lower))
+    return has_time or has_month or has_slash or has_rel or has_day
+
+
+__all__ = [
+    "extract_ad_context",
+    "extract_ad_id_labels",
+    "extract_messages",
+    "is_valid_timestamp_text",
+    "scroll_up_message_panel",
+    "verify_thread_switch",
+]

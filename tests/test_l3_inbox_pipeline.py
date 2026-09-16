@@ -7,12 +7,91 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from fb_pipeline.contracts.l1_inbox import detect_city, extract_user_info
-from fb_pipeline.browser.l3_inbox import _parse_sidebar_time_token, _sidebar_loading_count, scrape_inbox
+from fb_pipeline.browser.l3_inbox import (
+    _parse_sidebar_time_token,
+    _sidebar_loading_count,
+    _sidebar_snapshot_progressed,
+    _thread_panel_loading_count,
+    scrape_inbox,
+)
+from fb_pipeline.browser.inbox.scroll_helpers import reset_sidebar_to_top, scroll_sidebar_and_wait
 from fb_pipeline.inbox.l3_pipeline import build_thread_record, enrich_thread_record, persist_thread_record
 from fb_pipeline.persistence.l4_sqlite_store import setup_database
 from fb_pipeline.browser.inbox.thread_detail_parser import extract_thread_messages, verify_thread_switch
+from fb_pipeline.browser.inbox.thread_list_parser import extract_visible_threads, is_conversation_name
 
 class TestThreadDetailParser(unittest.TestCase):
+    def test_stage2_sidebar_progress_requires_position_or_card_change(self):
+        static = {"scrollTop": 0, "fingerprint": "same-cards"}
+        self.assertFalse(_sidebar_snapshot_progressed(static, static))
+        self.assertTrue(_sidebar_snapshot_progressed(static, {"scrollTop": 0, "fingerprint": "next-cards"}))
+        self.assertTrue(_sidebar_snapshot_progressed(static, {"scrollTop": 300, "fingerprint": "same-cards"}))
+
+    def test_sidebar_scroll_stops_on_static_loading_marker(self):
+        class _Mouse:
+            def move(self, *_args):
+                pass
+
+            def wheel(self, *_args):
+                pass
+
+        class _Page:
+            mouse = _Mouse()
+
+            def evaluate(self, *_args, **_kwargs):
+                return {
+                    "before": 0,
+                    "after": 500,
+                    "domMoved": True,
+                    "targetX": 200,
+                    "targetY": 300,
+                    "targetHeight": 500,
+                    "conversationCardCount": 12,
+                }
+
+            def wait_for_timeout(self, _ms):
+                pass
+
+        class _Logger:
+            def info(self, _msg):
+                pass
+
+            def warning(self, _msg):
+                pass
+
+        static_loading = {
+            "count": 12,
+            "fingerprint": "same-cards",
+            "loadingCount": 1,
+            "globalLoadingCount": 0,
+        }
+        with patch(
+            "fb_pipeline.browser.inbox.scroll_helpers.sidebar_loading_snapshot",
+            return_value=static_loading,
+        ):
+            result = scroll_sidebar_and_wait(_Page(), _Logger(), scroll_round=1, timeout_ms=60000)
+
+        self.assertTrue(result["stalled"])
+
+    def test_thread_panel_loading_count_uses_message_panel_scope(self):
+        class _Page:
+            def evaluate(self, _script, _args):
+                return 2
+
+        self.assertEqual(_thread_panel_loading_count(_Page()), 2)
+
+    def test_extract_visible_threads_excludes_filter_tabs(self):
+        class _Page:
+            def __init__(self):
+                self.script = ""
+            def evaluate(self, script, *_args, **_kwargs):
+                self.script = script
+                return []
+
+        page = _Page()
+        self.assertEqual(extract_visible_threads(page), [])
+        self.assertIn("!el.closest('[role=\"tablist\"]')", page.script)
+
     def test_extract_thread_messages_includes_reactions(self):
         class _Page:
             def evaluate(self, script, *args, **kwargs):
@@ -158,6 +237,9 @@ class TestInboxContracts(unittest.TestCase):
         now = __import__("datetime").datetime(2026, 4, 1)
         self.assertEqual(_parse_sidebar_time_token("Today", now)["days_ago"], 0)
         self.assertEqual(_parse_sidebar_time_token("Yesterday", now)["days_ago"], 1)
+        self.assertEqual(_parse_sidebar_time_token("Today 8:56 PM", now)["parsed_at"], "2026-04-01 20:56:00")
+        self.assertEqual(_parse_sidebar_time_token("Yesterday 8:56 PM", now)["parsed_at"], "2026-03-31 20:56:00")
+        self.assertEqual(_parse_sidebar_time_token("Feb 6, 2026, 1:58 PM", now)["parsed_at"], "2026-02-06 13:58:00")
         self.assertEqual(_parse_sidebar_time_token("Mon", now)["kind"], "weekday")
         self.assertEqual(_parse_sidebar_time_token("Mar 15", now)["kind"], "month_day")
         self.assertEqual(_parse_sidebar_time_token("??", now)["kind"], "unknown")
@@ -171,6 +253,88 @@ class TestInboxContracts(unittest.TestCase):
             _sidebar_loading_count({"hasContainer": False, "loadingCount": 0, "globalLoadingCount": 3}),
             3,
         )
+
+    def test_sidebar_scroll_uses_wheel_over_list_when_dom_scroll_does_not_move(self):
+        # code:test-validation-001:l3-sidebar-wheel-fallback
+        class _Mouse:
+            def __init__(self):
+                self.moves = []
+                self.wheels = []
+
+            def move(self, x, y):
+                self.moves.append((x, y))
+
+            def wheel(self, dx, dy):
+                self.wheels.append((dx, dy))
+
+        class _Page:
+            def __init__(self):
+                self.mouse = _Mouse()
+
+            def evaluate(self, *_args, **_kwargs):
+                return {
+                    "before": 0,
+                    "after": 0,
+                    "domMoved": False,
+                    "targetX": 210,
+                    "targetY": 330,
+                    "targetHeight": 618,
+                    "conversationCardCount": 8,
+                }
+
+            def wait_for_timeout(self, _ms):
+                pass
+
+        class _Logger:
+            def __init__(self):
+                self.messages = []
+
+            def info(self, message):
+                self.messages.append(message)
+
+            def warning(self, message):
+                self.messages.append(message)
+
+        snapshot = {
+            "count": 8,
+            "loadingCount": 0,
+            "globalLoadingCount": 0,
+            "hasContainer": True,
+            "fingerprint": "same",
+        }
+        page = _Page()
+        logger = _Logger()
+        with patch("fb_pipeline.browser.inbox.scroll_helpers.sidebar_loading_snapshot", side_effect=[snapshot] * 4):
+            scroll_sidebar_and_wait(page, logger, scroll_round=1, timeout_ms=1000, poll_ms=0)
+
+        self.assertEqual(page.mouse.moves, [(210, 330)])
+        self.assertEqual(page.mouse.wheels, [(0, 618)])
+        self.assertTrue(any("sidebar_scroll_wheel_fallback" in message for message in logger.messages))
+
+    def test_sidebar_reset_uses_tab_aware_conversation_scroller(self):
+        # code:test-validation-001:l3-stage2-sidebar-reset
+        class _Page:
+            def evaluate(self, *_args, **_kwargs):
+                return {
+                    "before": 66451.25,
+                    "after": 0,
+                    "found": True,
+                    "conversationCardCount": 14,
+                }
+
+        class _Logger:
+            def __init__(self):
+                self.messages = []
+
+            def info(self, message):
+                self.messages.append(message)
+
+        logger = _Logger()
+        result = reset_sidebar_to_top(_Page(), logger)
+
+        self.assertTrue(result["found"])
+        self.assertEqual(result["after"], 0)
+        self.assertTrue(any("scrollTop=66451.25->0" in message for message in logger.messages))
 
     def test_scrape_inbox_performs_one_sidebar_scroll_and_one_wait_cycle(self):
         # code:test-validation-001:l3-sidebar-loading
@@ -254,8 +418,8 @@ class TestInboxContracts(unittest.TestCase):
                 detect_city=detect_city,
             )
 
-        # The script utilizes mouse move and scrollIntoView
-        self.assertIn((200, 400), page.mouse.moves)
+        # The script targets the resolved sidebar geometry before scrolling.
+        self.assertTrue(page.mouse.moves)
         self.assertTrue(any("scrollIntoView" in script for script in page.evaluate_calls))
         self.assertEqual(record_fetch_calls, [("1548373332058326", 1, 1)])
 
@@ -307,6 +471,7 @@ class TestInboxContracts(unittest.TestCase):
 
         thread = self.conn.execute("SELECT * FROM threads WHERE id = ?", (thread_record.thread_id,)).fetchone()
         self.assertEqual(thread["page_id"], "page1")
+        self.assertEqual(thread["inbox_sort_index"], thread_record.dom_index)
 
         user = self.conn.execute("SELECT * FROM users WHERE thread_id = ?", (thread_record.thread_id,)).fetchone()
         self.assertEqual(user["fb_url"], "selected456")
@@ -319,6 +484,32 @@ class TestInboxContracts(unittest.TestCase):
         msgs = self.conn.execute("SELECT content, seq FROM messages WHERE thread_id = ? ORDER BY seq", (thread_record.thread_id,)).fetchall()
         self.assertIn("--- [AD SOURCE]: Thiền miễn phí tại Hà Nội ---", msgs[0]["content"])
         self.assertEqual(msgs[1]["seq"], 1)
+
+    # Gate 3: code:test-validation-001:l1-to-l4 (dedup stability)
+    def test_persist_thread_record_dedups_literal_newline_and_late_reaction(self):
+        def _record(js_messages):
+            return enrich_thread_record(
+                build_thread_record("page1", {"name": "User A", "text": "User A\nPreview"}),
+                js_messages, extract_user_info, detect_city,
+            )
+
+        first = _record([
+            {"sender": "Customer", "text": "Đăng ký\n[Quoted Reply/Link]: Em ở Đà Nẵng", "timestamp": "Fri 3:49 PM"},
+            {"sender": "Page", "text": "Tụi mình có lớp sáng chủ nhật", "timestamp": "8:04 AM"},
+        ])
+        persist_thread_record(self.conn, first, detect_city)
+
+        # Re-sync: same messages, but with a literal backslash-n (legacy parser
+        # bug), a weekday-prefixed relative time, and a reaction added later.
+        resync = _record([
+            {"sender": "Customer", "text": "Đăng ký\\n[Quoted Reply/Link]: Em ở Đà Nẵng", "timestamp": "Fri 3:49 PM"},
+            {"sender": "Page", "text": "Tụi mình có lớp sáng chủ nhật\n[Quoted Reply/Link]: :::REACTION_LOVE:::", "timestamp": "Mon 8:04 AM"},
+        ])
+        result = persist_thread_record(self.conn, resync, detect_city)
+
+        self.assertEqual(result["messages_added"], 0)
+        count = self.conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id = ?", (first.thread_id,)).fetchone()[0]
+        self.assertEqual(count, 2)
 
     # Gate 3: code:test-validation-001:l1-to-l4 (CRM Timing State)
     def test_persist_thread_record_only_refreshes_last_synced_at_without_new_customer_message(self):
@@ -365,6 +556,51 @@ class TestInboxContracts(unittest.TestCase):
         ).fetchone()
         self.assertEqual(user["last_interaction"], stale_interaction)
         self.assertNotEqual(user["last_synced_at"], stale_synced)
+
+    def test_is_valid_timestamp_text_filters_noise(self):
+        from fb_pipeline.browser.inbox.thread_detail_parser import is_valid_timestamp_text
+        # Valid timestamps
+        self.assertTrue(is_valid_timestamp_text("8:20 AM"))
+        self.assertTrue(is_valid_timestamp_text("Feb 6, 2026, 1:58 PM"))
+        self.assertTrue(is_valid_timestamp_text("9/5/18, 4:09 PM"))
+        self.assertTrue(is_valid_timestamp_text("Today"))
+        self.assertTrue(is_valid_timestamp_text("Yesterday"))
+        # Invalid buttons/labels
+        self.assertFalse(is_valid_timestamp_text("Hỏi chi tiết"))
+        self.assertFalse(is_valid_timestamp_text("Thiền Sahaja Yoga Việt Nam"))
+        self.assertFalse(is_valid_timestamp_text("zalo.me"))
+        self.assertFalse(is_valid_timestamp_text("New Advanced Print FreeMeditation.pdf"))
+        self.assertFalse(is_valid_timestamp_text("3.35 MiB"))
+        self.assertFalse(is_valid_timestamp_text("Audio call"))
+        self.assertFalse(is_valid_timestamp_text(""))
+
+    def test_persist_thread_record_prioritizes_message_timestamp_and_avoids_future_times(self):
+        import datetime as dt
+        now = dt.datetime.now()
+        thread_record = enrich_thread_record(
+            build_thread_record("page1", {
+                "name": "Khanh Van Quach",
+                "text": "Khanh Van Quach\nThanks bạn",
+                "sidebarTimeText": "Today",
+                "sidebarTimeKind": "today",
+            }),
+            [
+                {"sender": "Customer", "text": "Hà Nội", "timestamp": "Feb 6, 2026, 1:58 PM"},
+                {"sender": "Customer", "text": "Thanks bạn", "timestamp": "8:20 AM"},
+            ],
+            extract_user_info,
+            detect_city,
+        )
+        persist_thread_record(self.conn, thread_record, detect_city)
+        user = self.conn.execute("SELECT * FROM users WHERE thread_id = ?", (thread_record.thread_id,)).fetchone()
+        self.assertIsNotNone(user)
+        # Should record exact 8:20:00, not 23:59:59
+        self.assertIn("08:20:00", user["last_interaction"])
+        # Must never be in the future
+        user_dt = dt.datetime.strptime(user["last_interaction"], "%Y-%m-%d %H:%M:%S")
+        self.assertLessEqual(user_dt, now)
+        thread = self.conn.execute("SELECT last_message_at FROM threads WHERE id = ?", (thread_record.thread_id,)).fetchone()
+        self.assertIn("08:20:00", thread["last_message_at"])
 
 
 if __name__ == '__main__':

@@ -1,4 +1,5 @@
 import hashlib
+from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
 from fb_pipeline.contracts.l1_inbox import (
@@ -8,6 +9,7 @@ from fb_pipeline.contracts.l1_inbox import (
     SeekerInfo,
     ThreadRecord,
     detect_city,
+    detect_city_and_program_smart,
     detect_city_smart,
     extract_user_info,
     parse_ad_ids,
@@ -87,6 +89,7 @@ def build_thread_record(page_id: str, visible_thread: dict) -> ThreadRecord:
         thread_lines=thread_lines,
         dom_index=visible_thread.get("domIndex", 0),
         sidebar_time_text=sidebar_time_text,
+        sidebar_timestamp_ms=visible_thread.get("sidebarTimestampMs"),
         sidebar_time_kind=sidebar_time_kind,
         sidebar_identity_key=sidebar_identity_key,
         selected_item_id=selected_item_id,
@@ -99,13 +102,11 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
                          ad_ids: list | None = None) -> EnrichedThreadRecord:
     db_msgs = [{"sender": m.get("sender"), "content": m.get("text", "")} for m in js_messages]
     user_info = extract_user_info(db_msgs, thread_record.thread_name, ad_context)
-    # code:tool-citydetect-001:smart-detect-integration
-    # Use LLM-first city detection with all message signals
-    city = detect_city_smart(
-        ad_context, db_msgs,
-        thread_name=thread_record.thread_name,
-        customer_messages=db_msgs,
-    )
+    # Classification is intentionally deferred to one batch + independent
+    # verification pass after crawling. This local fallback must never make a
+    # per-thread LLM request or invent a programme choice.
+    city = detect_city(ad_context, db_msgs)
+    program_code = None
     normalized_messages = []
     for idx, msg in enumerate(js_messages):
         text = (msg.get("text") or "").strip()
@@ -125,6 +126,7 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
         phone=user_info["phone"],
         email=user_info["email"],
         city=city,
+        program_code=program_code,
         lead_stage="Intake",
     )
     mas_handoff = MasHandoff(
@@ -147,6 +149,7 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
         thread_lines=thread_record.thread_lines,
         dom_index=thread_record.dom_index,
         sidebar_time_text=thread_record.sidebar_time_text,
+        sidebar_timestamp_ms=thread_record.sidebar_timestamp_ms,
         sidebar_time_kind=thread_record.sidebar_time_kind,
         sidebar_identity_key=thread_record.sidebar_identity_key,
         selected_item_id=thread_record.selected_item_id,
@@ -155,6 +158,7 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
         ad_ids=list(ad_ids or []),
         user_info=user_info,
         city=city,
+        program_code=program_code,
         messages=normalized_messages,
         mas_handoff=mas_handoff,
     )
@@ -181,8 +185,15 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     
     import re
     def _normalize(s):
+        s = str(s)
         s = re.sub(r'^---\s*\[AD SOURCE\]:.*?---\s*', '', s, flags=re.DOTALL)
-        return re.sub(r'\s+', '', str(s).lower())
+        # Legacy rows may carry a literal backslash-n instead of a newline.
+        s = s.replace('\\n', '\n')
+        # Reactions are added after the fact; they must not make an old
+        # message look new. Drop the tag and any now-empty quoted marker.
+        s = re.sub(r':::REACTION_[A-Z]+:::', '', s)
+        s = re.sub(r'(\[Quoted Reply/Link\]:\s*)+$', '', s.strip())
+        return re.sub(r'\s+', '', s.lower())
 
     existing_list = [(_normalize(row['sender']), _normalize(row['content'])) for row in existing_msgs]
     existing_set = set(existing_list)
@@ -255,16 +266,37 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             messages_added += 1
             if msg.sender == "Customer":
                 new_customer_message_added = True
+    # The sidebar describes the thread's most recent message regardless of
+    # sender. Prefer it over `users.last_interaction`, which intentionally
+    # tracks customer activity only and therefore cannot reproduce Inbox order.
+    last_message_at = None
+    if thread_record.sidebar_timestamp_ms:
+        last_message_at = datetime.fromtimestamp(thread_record.sidebar_timestamp_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    sidebar_time = parse_sidebar_time_token(thread_record.sidebar_time_text)
+    if not last_message_at and sidebar_time.get("parsed_at") and " " in sidebar_time["parsed_at"]:
+        last_message_at = sidebar_time["parsed_at"].replace("T", " ")
+    if not last_message_at:
+        for message in reversed(thread_record.messages):
+            parsed_message_time = parse_sidebar_time_token(message.message_timestamp or "")
+            parsed_at = parsed_message_time.get("parsed_at")
+            if parsed_at and " " in parsed_at:
+                last_message_at = parsed_at.replace("T", " ")
+                break
+
     cursor.execute('''
-        INSERT INTO threads (id, page_id, thread_name, last_synced_time)
-        VALUES (?, ?, ?, datetime('now'))
+        INSERT INTO threads (id, page_id, thread_name, last_synced_time, inbox_sort_index, last_message_at)
+        VALUES (?, ?, ?, datetime('now'), ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             thread_name=excluded.thread_name,
-            last_synced_time=excluded.last_synced_time
+            last_synced_time=excluded.last_synced_time,
+            inbox_sort_index=excluded.inbox_sort_index,
+            last_message_at=COALESCE(excluded.last_message_at, threads.last_message_at)
     ''', (
         thread_record.thread_id,
         thread_record.page_id,
         thread_record.thread_name,
+        thread_record.dom_index,
+        last_message_at,
     ))
 
     for aid in thread_record.ad_ids:
@@ -287,31 +319,47 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     
     # Chronological Sorting Integrity Logic (Rule 11)
     # Never use datetime('now') blindly for historical scraping, it breaks UI order.
-    # We now strictly trust the mathematically evaluated exact timestamp derived from Facebook relative strings.
+    # Priority 1: Check if the latest message has an exact, valid timestamp (like "8:20 AM" or "Feb 6, 2026, 1:58 PM")
     interaction_time_sql = "datetime('now')"
-    if thread_record.sidebar_time_text:
+    latest_msg_ts = None
+    for msg in reversed(thread_record.messages):
+        ts_cand = (msg.message_timestamp or "").strip()
+        if ts_cand:
+            t_cand_data = parse_sidebar_time_token(ts_cand)
+            if t_cand_data and t_cand_data.get("parsed_at") and " " in t_cand_data.get("parsed_at", ""):
+                latest_msg_ts = t_cand_data["parsed_at"].replace("T", " ")
+                break
+
+    if latest_msg_ts:
+        interaction_time_sql = f"'{latest_msg_ts}'"
+    elif thread_record.sidebar_time_text:
         time_data = parse_sidebar_time_token(thread_record.sidebar_time_text)
         if time_data and time_data.get("parsed_at"):
             parsed_dt = time_data["parsed_at"]
             if "T" in parsed_dt:
                 parsed_dt = parsed_dt.replace("T", " ")
             elif len(parsed_dt) == 10: # YYYY-MM-DD
-                # If we only got a raw Date string without time, fallback to end-of-day tied with a dom_index stagger to completely prevent reverse chronologies
                 import datetime as dt_mod
-                staggered = dt_mod.datetime.now().replace(hour=23, minute=59, second=59) - dt_mod.timedelta(minutes=thread_record.dom_index)
+                now = dt_mod.datetime.now()
+                # If date is today, never place it in the future! Use current time staggered backward.
+                if time_data.get("kind") == "today" or time_data.get("days_ago") == 0 or parsed_dt == now.strftime("%Y-%m-%d"):
+                    staggered = now - dt_mod.timedelta(minutes=thread_record.dom_index)
+                else:
+                    staggered = now.replace(hour=23, minute=59, second=59) - dt_mod.timedelta(minutes=thread_record.dom_index)
                 parsed_dt = f"{parsed_dt} {staggered.strftime('%H:%M:%S')}"
             interaction_time_sql = f"'{parsed_dt}'"
 
     if new_customer_message_added:
         cursor.execute(f'''
-            INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, last_interaction, last_synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, {{interaction_time}}, datetime('now'))
+            INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, program_code, last_interaction, last_synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, {{interaction_time}}, datetime('now'))
             ON CONFLICT(thread_id) DO UPDATE SET
                 thread_name=excluded.thread_name,
                 phone = COALESCE(excluded.phone, users.phone),
                 email = COALESCE(excluded.email, users.email),
                 fb_url = COALESCE(excluded.fb_url, users.fb_url),
                 city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE users.city END,
+                program_code = COALESCE(excluded.program_code, users.program_code),
                 last_interaction = {{interaction_time}},
                 last_synced_at = datetime('now')
         '''.replace('{interaction_time}', interaction_time_sql), (
@@ -321,18 +369,20 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             user_info.get("email"),
             thread_record.fb_url,
             thread_record.city,
+            thread_record.program_code,
 
         ))
     else:
         cursor.execute('''
-            INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, last_synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, program_code, last_synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(thread_id) DO UPDATE SET
                 thread_name=excluded.thread_name,
                 phone = COALESCE(excluded.phone, users.phone),
                 email = COALESCE(excluded.email, users.email),
                 fb_url = COALESCE(excluded.fb_url, users.fb_url),
                 city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE users.city END,
+                program_code = COALESCE(excluded.program_code, users.program_code),
                 last_synced_at = datetime('now')
         ''', (
             thread_record.thread_id,
@@ -341,6 +391,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             user_info.get("email"),
             thread_record.fb_url,
             thread_record.city,
+            thread_record.program_code,
         ))
 
     conn.commit()
@@ -349,6 +400,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
         "messages_added": messages_added,
         "ad_ids_count": len(thread_record.ad_ids),
         "city": thread_record.city,
+        "program_code": thread_record.program_code,
         "mas_handoff": _mas_handoff_to_dict(thread_record.mas_handoff),
     }
 
