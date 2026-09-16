@@ -527,31 +527,34 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
           {/* Sidebar content */}
           {sidebarData && !sidebarLoading && (
             <>
-              {/* Stats */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '14px' }}>
-                <div style={{ textAlign: 'center', padding: '10px 4px', background: 'rgba(99,102,241,0.06)', borderRadius: '8px' }}>
-                  <div style={{ fontSize: '20px', fontWeight: 800, color: '#818cf8' }}>{sidebarData.messageCount ?? 0}</div>
-                  <div style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>Msgs</div>
-                </div>
-                <div style={{ textAlign: 'center', padding: '10px 4px', background: 'rgba(245,158,11,0.06)', borderRadius: '8px' }}>
-                  <div style={{ fontSize: '20px', fontWeight: 800, color: '#f59e0b' }}>{sidebarData.commentCount ?? 0}</div>
-                  <div style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>Cmts</div>
-                </div>
-                <div style={{ textAlign: 'center', padding: '10px 4px', background: sidebarData.adSource ? 'rgba(236,72,153,0.06)' : 'rgba(107,114,128,0.06)', borderRadius: '8px' }}>
-                  <div style={{ fontSize: '20px', fontWeight: 800, color: sidebarData.adSource ? '#ec4899' : 'var(--text-muted)' }}>{sidebarData.adSource ? '✓' : '✗'}</div>
-                  <div style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>Ad</div>
-                </div>
+              {/* Compact general stats */}
+              <div className="sidebar-general-stats" aria-label="General stats">
+                <span className="sidebar-general-stats-label">General stats</span>
+                <span className="sidebar-stat-badge sidebar-stat-badge--messages" title={`${sidebarData.messageCount ?? 0} messages`}>
+                  <span aria-hidden="true">💬</span>
+                  <strong>{sidebarData.messageCount ?? 0}</strong>
+                  <span>Msgs</span>
+                </span>
+                <span className="sidebar-stat-badge sidebar-stat-badge--comments" title={`${sidebarData.commentCount ?? 0} comments`}>
+                  <span aria-hidden="true">💭</span>
+                  <strong>{sidebarData.commentCount ?? 0}</strong>
+                  <span>Cmts</span>
+                </span>
+                {sidebarData.adSource && (
+                  <span
+                    className="sidebar-ad-badge"
+                    title={sidebarData.adSource.matchedPostId
+                      ? `Facebook Ad post · ad_id: ${sidebarData.adSource.matchedPostId}`
+                      : sidebarData.adSource.matchedPostName || 'Facebook Ad post'}
+                    aria-label={sidebarData.adSource.matchedPostId
+                      ? `Facebook Ad post, ad_id ${sidebarData.adSource.matchedPostId}`
+                      : 'Facebook Ad post'}
+                  >
+                    <span aria-hidden="true">📢</span>
+                    <span className="sr-only">Facebook Ad post</span>
+                  </span>
+                )}
               </div>
-
-              {/* Ad Source */}
-              {sidebarData.adSource && (
-                <div style={{ padding: '10px 12px', background: 'rgba(236,72,153,0.06)', border: '1px solid rgba(236,72,153,0.15)', borderRadius: '8px', marginBottom: '12px' }}>
-                  <div style={{ fontSize: '10px', fontWeight: 700, color: '#ec4899', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px' }}>📢 Ad Source</div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
-                    {sidebarData.adSource.matchedPostName?.slice(0, 100) || 'Replied to ad post'}
-                  </div>
-                </div>
-              )}
 
               {/* Recent messages */}
               {sidebarData.messages?.length > 0 && (

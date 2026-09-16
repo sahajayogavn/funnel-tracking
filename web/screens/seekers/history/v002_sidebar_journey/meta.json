@@ -1,0 +1,11 @@
+{
+  "id": "CHG-004",
+  "screen": "seekers",
+  "element": ".seeker-sidebar-header, .seeker-timeline-header, .seeker-timeline-wrapper + queue",
+  "property": "sidebar action-link density, timeline label, compact general stats, approval queue placement",
+  "before_value": "text action links below header; large stat cards and ad source block; Hành trình 7 giai đoạn; MAS queue grouped with timeline",
+  "after_value": "icon-only links beside identity; compact inline badges and ad icon tooltip; Journey on one line; MAS queue at sidebar bottom",
+  "token_ref": "--accent-indigo, --accent-blue, --border-subtle",
+  "reason": "Keep the right sidebar compact and make the conversation context the primary reading order before pending approvals.",
+  "status": "PENDING"
+}

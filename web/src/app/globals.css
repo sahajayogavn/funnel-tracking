@@ -537,3 +537,388 @@ body {
 .react-flow-controls-dark button:hover svg {
   fill: #ffffff !important;
 }
+
+/* code:web-style-007:seeker-journey-timeline */
+/* ── Compact 7-Stage Seeker Journey Timeline ── */
+.seeker-timeline-wrapper {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.seeker-timeline-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.seeker-timeline-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.seeker-sidebar-heading {
+  min-width: 0;
+  flex: 1;
+}
+
+.seeker-sidebar-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seeker-sidebar-quick-links {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+.seeker-sidebar-link {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  text-decoration: none;
+  font-size: 13px;
+  line-height: 1;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.seeker-sidebar-link:hover {
+  transform: translateY(-1px);
+}
+
+.seeker-sidebar-link--details,
+.seeker-sidebar-link--inbox {
+  background: rgba(99, 102, 241, 0.12);
+  color: #818cf8;
+}
+
+.seeker-sidebar-link--details:hover,
+.seeker-sidebar-link--inbox:hover {
+  background: rgba(99, 102, 241, 0.24);
+}
+
+.seeker-sidebar-link--profile {
+  background: rgba(59, 130, 246, 0.12);
+  color: #60a5fa;
+}
+
+.seeker-sidebar-link--profile:hover {
+  background: rgba(59, 130, 246, 0.24);
+}
+
+.sidebar-general-stats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  margin-bottom: 12px;
+  color: var(--text-muted);
+}
+
+.sidebar-general-stats-label {
+  margin-right: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.sidebar-stat-badge,
+.sidebar-ad-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 26px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.sidebar-stat-badge {
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+}
+
+.sidebar-stat-badge strong {
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.sidebar-stat-badge--messages {
+  background: rgba(99, 102, 241, 0.1);
+  border-color: rgba(99, 102, 241, 0.22);
+  color: #a5b4fc;
+}
+
+.sidebar-stat-badge--comments {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.22);
+  color: #fbbf24;
+}
+
+.sidebar-ad-badge {
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(236, 72, 153, 0.28);
+  background: rgba(236, 72, 153, 0.1);
+  color: #ec4899;
+  cursor: help;
+}
+
+.seeker-timeline-current-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(99, 102, 241, 0.16);
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  color: #c7d2fe;
+}
+
+.seeker-timeline-pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #818cf8;
+  box-shadow: 0 0 6px #818cf8;
+  animation: timeline-pulse 2s infinite ease-in-out;
+}
+
+@keyframes timeline-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.55; }
+}
+
+/* 7-Step Connecting Stepper Rail */
+.seeker-timeline-rail {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  margin-bottom: 2px;
+}
+
+.seeker-timeline-rail-track {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  top: 50%;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateY(-50%);
+  z-index: 0;
+}
+
+.seeker-timeline-rail-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981, #6366f1);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.seeker-timeline-rail-node {
+  position: relative;
+  z-index: 1;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 800;
+  transition: all 0.2s ease;
+}
+
+.seeker-timeline-rail-node.is-prior {
+  background: #10b981;
+  color: #ffffff;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+}
+
+.seeker-timeline-rail-node.is-current {
+  background: #6366f1;
+  color: #ffffff;
+  border: 2px solid #a5b4fc;
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.6);
+  transform: scale(1.18);
+}
+
+.seeker-timeline-rail-node.is-future {
+  background: var(--bg-card);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-muted);
+}
+
+/* 7-Stage Grid Cards */
+.seeker-timeline-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.seeker-timeline-grid > li:last-child:nth-child(odd) {
+  grid-column: span 2;
+}
+
+@container (min-width: 700px) {
+  .seeker-timeline-grid {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+  }
+  .seeker-timeline-grid > li:last-child:nth-child(odd) {
+    grid-column: auto;
+  }
+}
+
+.seeker-timeline-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+  position: relative;
+  outline: none;
+  cursor: default;
+}
+
+.seeker-timeline-card:focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: 1px;
+}
+
+.seeker-timeline-card.is-current {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.12));
+  border: 1px solid rgba(99, 102, 241, 0.55);
+  box-shadow: 0 0 12px rgba(99, 102, 241, 0.18);
+}
+
+.seeker-timeline-card.is-prior {
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.22);
+}
+
+.seeker-timeline-card.is-future {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  opacity: 0.6;
+}
+
+.seeker-timeline-card-badge {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.seeker-timeline-card.is-current .seeker-timeline-card-badge {
+  background: #6366f1;
+  color: #ffffff;
+  box-shadow: 0 0 6px rgba(99, 102, 241, 0.6);
+}
+
+.seeker-timeline-card.is-prior .seeker-timeline-card-badge {
+  background: #10b981;
+  color: #ffffff;
+}
+
+.seeker-timeline-card.is-future .seeker-timeline-card-badge {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+}
+
+.seeker-timeline-card-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.seeker-timeline-card-name {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.seeker-timeline-card.is-current .seeker-timeline-card-name {
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.seeker-timeline-card.is-prior .seeker-timeline-card-name {
+  color: #a7f3d0;
+}
+
+.seeker-timeline-card.is-future .seeker-timeline-card-name {
+  color: var(--text-secondary);
+}
+
+.seeker-timeline-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  line-height: 1.1;
+  margin-top: 1px;
+}
+
+.seeker-timeline-card.is-current .seeker-timeline-card-meta {
+  color: #fbbf24;
+  font-weight: 600;
+}
+
+.seeker-timeline-card.is-prior .seeker-timeline-card-meta {
+  color: #34d399;
+  font-weight: 500;
+}
+
+.seeker-timeline-card.is-future .seeker-timeline-card-meta {
+  color: var(--text-muted);
+}
+
+/* Accessible screen-reader utility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}

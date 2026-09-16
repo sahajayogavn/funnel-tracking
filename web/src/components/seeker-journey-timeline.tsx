@@ -13,10 +13,18 @@ import type { ActionQueueItem } from '@/lib/queries';
 interface SeekerJourneyTimelineProps {
   seeker: Seeker;
   compact?: boolean;
+  showTimeline?: boolean;
+  showQueue?: boolean;
   onRefreshSeeker?: () => void;
 }
 
-export function SeekerJourneyTimeline({ seeker, compact = false, onRefreshSeeker }: SeekerJourneyTimelineProps) {
+export function SeekerJourneyTimeline({
+  seeker,
+  compact = false,
+  showTimeline = true,
+  showQueue = true,
+  onRefreshSeeker,
+}: SeekerJourneyTimelineProps) {
   const currentStageNum = getStageNumber(seeker.leadStage);
 
   // Queued recommendations for this seeker
@@ -45,8 +53,9 @@ export function SeekerJourneyTimeline({ seeker, compact = false, onRefreshSeeker
   }, [seeker.threadId, seeker.name]);
 
   useEffect(() => {
+    if (!showQueue) return;
     fetchQueuedItems();
-  }, [fetchQueuedItems]);
+  }, [fetchQueuedItems, showQueue]);
 
   const handleDecision = async (id: number, decision: 'approve' | 'reject') => {
     setActionError('');
@@ -113,11 +122,11 @@ export function SeekerJourneyTimeline({ seeker, compact = false, onRefreshSeeker
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
       {/* ── Compact 7-Stage Seeker Journey Timeline ── */}
-      <div className="seeker-timeline-wrapper">
+      {showTimeline && <div className="seeker-timeline-wrapper">
         <div className="seeker-timeline-header">
           <div className="seeker-timeline-title">
             <span aria-hidden="true">🛤️</span>
-            <span>Hành trình 7 giai đoạn</span>
+            <span>Journey</span>
           </div>
           <div
             className="seeker-timeline-current-chip"
@@ -239,10 +248,10 @@ export function SeekerJourneyTimeline({ seeker, compact = false, onRefreshSeeker
             })}
           </ol>
         )}
-      </div>
+      </div>}
 
       {/* ── Actionable Queued Recommendations ── */}
-      <div style={{ marginTop: '6px', borderTop: '1px solid rgba(255, 255, 255, 0.08)', paddingTop: '14px' }}>
+      {showQueue && <div style={{ marginTop: '6px', borderTop: '1px solid rgba(255, 255, 255, 0.08)', paddingTop: '14px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
           <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>
             ⚡ Đề xuất MAS chờ duyệt ({queuedItems.filter(i => i.status === 'pending').length})
@@ -402,7 +411,7 @@ export function SeekerJourneyTimeline({ seeker, compact = false, onRefreshSeeker
             })}
           </div>
         )}
-      </div>
+      </div>}
     </div>
   );
 }
