@@ -1,7 +1,97 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { execFile } from 'child_process';
+import path from 'path';
 import { getDb } from '@/lib/db';
 
 const DEFAULT_PAGE_ID = '1548373332058326';
+const PROJECT_ROOT = path.resolve(process.cwd(), '..');
+const MAS_PYTHON = process.env.MAS_PYTHON || path.join(PROJECT_ROOT, '.venv', 'bin', 'python');
+const MAS_SCRIPT = path.join(PROJECT_ROOT, 'tools', 'l5_mas_recommend.py');
+const MAS_TIMEOUT_MS = Number(process.env.MAS_TIMEOUT_MS || 240_000);
+
+type Proposal = { id: number; queueType: string; targetId: string; targetName: string; actionText: string; kind?: string };
+type MasResult = {
+  status: 'ok' | 'error';
+  error?: string;
+  count?: number;
+  proposals?: Proposal[];
+  skipped?: { threadId: string; reason: string }[];
+};
+type RecommendationJob = {
+  id: number;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  phase: string;
+  type: string;
+  threadIds: string[];
+  createdAt: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  result?: Record<string, unknown> | null;
+  error?: string | null;
+};
+
+function ensureRecommendationJobsTable(db: ReturnType<typeof getDb>) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mas_recommendation_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+      phase TEXT NOT NULL DEFAULT 'queued',
+      request_json TEXT NOT NULL,
+      result_json TEXT,
+      error_text TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      started_at DATETIME,
+      completed_at DATETIME,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_mas_recommendation_jobs_status ON mas_recommendation_jobs(status, id);
+  `);
+}
+
+function formatJob(row: Record<string, unknown>): RecommendationJob {
+  const request = JSON.parse(String(row.request_json || '{}')) as { type?: string; threadIds?: string[] };
+  return {
+    id: Number(row.id),
+    status: row.status as RecommendationJob['status'],
+    phase: String(row.phase || 'queued'),
+    type: request.type || 'all',
+    threadIds: request.threadIds || [],
+    createdAt: String(row.created_at),
+    startedAt: row.started_at as string | null,
+    completedAt: row.completed_at as string | null,
+    result: row.result_json ? JSON.parse(String(row.result_json)) : null,
+    error: row.error_text as string | null,
+  };
+}
+
+// code:api-recommendations-001:mas-engine
+// Spawns the Python MAS entrypoint (ADK BatchInboxAgent / WarmUpComposer / EventAdvertiser).
+// The script only enqueues pending proposals; it never opens a browser or sends messages.
+function runMasEngine(opts: { type: string; threadIds: string[]; city?: string }): Promise<MasResult> {
+  const args = [MAS_SCRIPT, '--thread-ids', opts.threadIds.join(','), '--type', opts.type, '--page-id', DEFAULT_PAGE_ID];
+  if (opts.city && opts.city !== 'all') args.push('--city', opts.city);
+  return new Promise(resolve => {
+    execFile(
+      MAS_PYTHON,
+      args,
+      { cwd: PROJECT_ROOT, timeout: MAS_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
+      (err, stdout, stderr) => {
+        // LiteLLM's logging worker may print to stdout after our JSON line, so
+        // scan from the end for the last line that parses as a MAS result.
+        const lines = String(stdout || '').trim().split('\n').map(l => l.trim()).filter(l => l.startsWith('{'));
+        for (const line of lines.reverse()) {
+          try {
+            const parsed = JSON.parse(line) as MasResult;
+            if (parsed && (parsed.status === 'ok' || parsed.status === 'error')) return resolve(parsed);
+          } catch {
+          }
+        }
+        const tail = String(stderr || '').trim().split('\n').slice(-3).join(' | ');
+        resolve({ status: 'error', error: err ? `${err.message}${tail ? ` — ${tail}` : ''}` : `Unparseable MAS output: ${String(stdout || '').slice(-200)}` });
+      }
+    );
+  });
+}
 
 const WARMUP_TEMPLATES: Record<string, string> = {
   Intake: 'Xin chào bạn! Chúng mình có các lớp thiền Sahaja Yoga hoàn toàn MIỄN PHÍ hàng tuần. Bạn có muốn tìm hiểu thêm về thời gian và địa điểm không ạ? 🧘',
@@ -11,19 +101,17 @@ const WARMUP_TEMPLATES: Record<string, string> = {
   Seed: 'Chào bạn! Chúc mừng bạn đã hoàn thành khóa học căn bản. Bạn có muốn tham gia buổi thiền tập thể tuần này để củng cố thói quen thiền định không ạ? 🌿',
 };
 
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json().catch(() => ({}));
-    const {
-      type = 'all',
-      threadId,
-      seekerName,
-      city,
-      limit = 5,
-    } = body;
-
-    const db = getDb();
-    const created: { id: number; queueType: string; targetId: string; targetName: string; actionText: string }[] = [];
+// code:api-recommendations-001:template-engine
+// Legacy rule-based engine (hard-coded templates). Used only as a fallback when
+// the MAS process cannot run, or for non-selected bulk/comment requests.
+function runTemplateEngine(
+  db: ReturnType<typeof getDb>,
+  { type, threadId, targetThreadIds, selectedOnly, seekerName, city, limit }: {
+    type: string; threadId?: string; targetThreadIds: string[]; selectedOnly: boolean;
+    seekerName?: string; city?: string; limit: number;
+  }
+): { created: Proposal[]; existing?: Proposal } {
+    const created: Proposal[] = [];
 
     // Helper to insert into action_queue safely as pending
     const insertProposal = (
@@ -71,6 +159,9 @@ export async function POST(request: NextRequest) {
       if (threadId) {
         query += ` AND t.id = ?`;
         params.push(threadId);
+      } else if (selectedOnly) {
+        query += ` AND t.id IN (${targetThreadIds.map(() => '?').join(', ')})`;
+        params.push(...targetThreadIds);
       }
       query += ` ORDER BY t.last_synced_time DESC LIMIT ?`;
       params.push(Number(limit));
@@ -89,7 +180,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 2. Comment reply recommendations
-    if ((type === 'all' || type === 'comment') && !threadId) {
+    if ((type === 'all' || type === 'comment') && !threadId && !selectedOnly) {
       try {
         const comments = db.prepare(`
           SELECT c.id, c.commenter_name, c.comment_text, c.post_id
@@ -123,6 +214,9 @@ export async function POST(request: NextRequest) {
       if (threadId) {
         query += ` AND u.thread_id = ?`;
         params.push(threadId);
+      } else if (selectedOnly) {
+        query += ` AND u.thread_id IN (${targetThreadIds.map(() => '?').join(', ')})`;
+        params.push(...targetThreadIds);
       }
       query += ` ORDER BY u.last_interaction ASC LIMIT ?`;
       params.push(Number(limit));
@@ -167,6 +261,9 @@ export async function POST(request: NextRequest) {
       if (threadId) {
         query += ` AND u.thread_id = ?`;
         params.push(threadId);
+      } else if (selectedOnly) {
+        query += ` AND u.thread_id IN (${targetThreadIds.map(() => '?').join(', ')})`;
+        params.push(...targetThreadIds);
       } else if (city && city !== 'all') {
         query += ` AND (u.city = ? OR u.city = 'Unknown')`;
         params.push(city);
@@ -190,7 +287,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 5. Targeted proposal fallback for single seeker
-    if ((threadId || seekerName) && created.length === 0) {
+    if (!selectedOnly && (threadId || seekerName) && created.length === 0) {
       const existing = db.prepare(`
         SELECT id, queue_type AS queueType, target_id AS targetId, target_name AS targetName, action_text AS actionText
         FROM action_queue
@@ -199,12 +296,7 @@ export async function POST(request: NextRequest) {
       `).get(threadId || '', seekerName || '') as { id: number; queueType: string; targetId: string; targetName: string; actionText: string } | undefined;
 
       if (existing) {
-        return NextResponse.json({
-          success: true,
-          count: 0,
-          proposals: [existing],
-          message: 'Đã có đề xuất đang chờ duyệt trong hàng đợi.',
-        });
+        return { created, existing };
       }
 
       // Contextual recommendation generation based on user stage
@@ -235,12 +327,108 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    return NextResponse.json({
-      success: true,
-      count: created.length,
-      proposals: created,
-      message: `Đã tạo an toàn ${created.length} đề xuất mới vào hàng đợi chờ duyệt (status: pending).`,
-    });
+    return { created };
+}
+
+function summarizeSkipped(skipped: { threadId: string; reason: string }[]): string {
+  const counts = new Map<string, number>();
+  for (const s of skipped) counts.set(s.reason, (counts.get(s.reason) || 0) + 1);
+  return [...counts.entries()].map(([reason, n]) => `${reason}×${n}`).join(', ');
+}
+
+async function runRecommendationJob(jobId: number) {
+  const db = getDb();
+  ensureRecommendationJobsTable(db);
+  // Claim once. A poll after a dev-server restart can safely resume a queued job.
+  const claimed = db.prepare(`
+    UPDATE mas_recommendation_jobs
+    SET status = 'running', phase = 'preparing_context', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now')
+    WHERE id = ? AND status = 'queued'
+  `).run(jobId);
+  if (!claimed.changes) return;
+
+  const row = db.prepare('SELECT request_json FROM mas_recommendation_jobs WHERE id = ?').get(jobId) as { request_json: string } | undefined;
+  if (!row) return;
+  const request = JSON.parse(row.request_json) as { type: string; threadId?: string; threadIds: string[]; seekerName?: string; city?: string; limit: number };
+  const setPhase = (phase: string) => db.prepare("UPDATE mas_recommendation_jobs SET phase = ?, updated_at = datetime('now') WHERE id = ?").run(phase, jobId);
+
+  try {
+    const selectedOnly = request.threadIds.length > 0;
+    let result: Record<string, unknown>;
+    if (selectedOnly && ['all', 'reply', 'warmup', 'event'].includes(request.type)) {
+      setPhase('waiting_for_llm');
+      const mas = await runMasEngine({ type: request.type, threadIds: request.threadIds, city: request.city });
+      if (mas.status === 'ok') {
+        setPhase('saving_recommendations');
+        const proposals = mas.proposals || [];
+        const skipped = mas.skipped || [];
+        const skippedNote = skipped.length ? ` Bỏ qua ${skipped.length}: ${summarizeSkipped(skipped)}.` : '';
+        result = {
+          success: true, engine: 'inbox_mas', count: proposals.length, createdCount: proposals.length, proposals, skipped,
+          message: `MAS đã tạo ${proposals.length} đề xuất mới vào hàng đợi chờ duyệt (status: pending).${skippedNote}`,
+        };
+      } else {
+        setPhase('creating_safe_fallback');
+        const fallback = runTemplateEngine(db, { type: request.type, threadId: request.threadId, targetThreadIds: request.threadIds, selectedOnly, seekerName: request.seekerName, city: request.city, limit: request.limit }).created;
+        result = {
+          success: true, engine: 'template_fallback', masError: mas.error, count: fallback.length, createdCount: fallback.length, proposals: fallback,
+          message: `⚠️ MAS không chạy được (${mas.error}). Đã tạo ${fallback.length} đề xuất tạm bằng template vào hàng đợi chờ duyệt.`,
+        };
+      }
+    } else {
+      setPhase('creating_safe_fallback');
+      const { created, existing } = runTemplateEngine(db, { type: request.type, threadId: request.threadId, targetThreadIds: request.threadIds, selectedOnly, seekerName: request.seekerName, city: request.city, limit: request.limit });
+      result = existing
+        ? { success: true, engine: 'template', count: 0, proposals: [existing], message: 'Đã có đề xuất đang chờ duyệt trong hàng đợi.' }
+        : { success: true, engine: 'template', count: created.length, createdCount: created.length, proposals: created, message: `Đã tạo an toàn ${created.length} đề xuất mới vào hàng đợi chờ duyệt (status: pending).` };
+    }
+    db.prepare("UPDATE mas_recommendation_jobs SET status = 'completed', phase = 'completed', result_json = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
+      .run(JSON.stringify(result), jobId);
+  } catch (error) {
+    console.error('Recommendation job failed:', error);
+    db.prepare("UPDATE mas_recommendation_jobs SET status = 'failed', phase = 'failed', error_text = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?")
+      .run(error instanceof Error ? error.message : 'Lỗi không xác định khi chạy MAS', jobId);
+  }
+}
+
+export async function GET(request: NextRequest) {
+  const jobId = Number(new URL(request.url).searchParams.get('jobId'));
+  if (!Number.isInteger(jobId) || jobId < 1) return NextResponse.json({ error: 'jobId không hợp lệ' }, { status: 400 });
+  const db = getDb();
+  ensureRecommendationJobsTable(db);
+  const row = db.prepare('SELECT * FROM mas_recommendation_jobs WHERE id = ?').get(jobId) as Record<string, unknown> | undefined;
+  if (!row) return NextResponse.json({ error: 'Không tìm thấy MAS job' }, { status: 404 });
+  if (row.status === 'queued') void runRecommendationJob(jobId);
+  return NextResponse.json({ job: formatJob(row) });
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json().catch(() => ({}));
+    const {
+      type = 'all',
+      threadId,
+      threadIds,
+      seekerName,
+      city,
+      limit = 5,
+    } = body;
+
+    const targetThreadIds = Array.isArray(threadIds)
+      ? [...new Set(threadIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+      : [];
+    const selectedOnly = targetThreadIds.length > 0;
+
+    const db = getDb();
+    ensureRecommendationJobsTable(db);
+    const jobRequest = { type, threadId, threadIds: targetThreadIds, seekerName, city, limit, selectedOnly };
+    const result = db.prepare("INSERT INTO mas_recommendation_jobs (status, phase, request_json) VALUES ('queued', 'queued', ?)")
+      .run(JSON.stringify(jobRequest));
+    const jobId = Number(result.lastInsertRowid);
+    // Deliberately do not await: the request is now durable and the UI follows it via GET.
+    void runRecommendationJob(jobId);
+    const job = db.prepare('SELECT * FROM mas_recommendation_jobs WHERE id = ?').get(jobId) as Record<string, unknown>;
+    return NextResponse.json({ job: formatJob(job) }, { status: 202 });
   } catch (error) {
     console.error('Recommendations error:', error);
     return NextResponse.json({ error: 'Lỗi khi tạo đề xuất MAS' }, { status: 500 });

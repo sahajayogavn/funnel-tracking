@@ -3,12 +3,14 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { formatRelativeElapsed, getStageNumber, type Seeker, type TouchPoint } from '@/lib/types';
+import { formatRelativeElapsed, getStageNumber, type Seeker } from '@/lib/types';
 import { isDateInRange, parseRealDate } from '@/lib/funnel-filters';
 import { InteractionHistogram } from './interaction-histogram';
 import { FunnelFilterBar, type FilterState } from './funnel-filter-bar';
 import { SevenStarProgress } from './seven-star-progress';
 import { SeekerJourneyTimeline } from './seeker-journey-timeline';
+import { MasProgress, type MasJob, type MasRunType } from './mas-progress';
+import { PROGRAMS } from '@/lib/programs';
 
 type SortField = keyof Seeker | 'lastMessageDate' | 'lastMessageTimestampText';
 
@@ -33,17 +35,6 @@ function getCityStyle(city: string) {
 }
 
 
-const touchPointColor = (type: string) => {
-  const colors: Record<string, string> = {
-    comment: '#f59e0b',
-    message: '#6366f1',
-    reply: '#10b981',
-    ad_click: '#ec4899',
-    ad_message: '#ec4899',
-  };
-  return colors[type] || '#6b7280';
-};
-
 const PAGE_ID = '1548373332058326';
 
 function seekerDetailUrl(seeker: Seeker) {
@@ -52,15 +43,30 @@ function seekerDetailUrl(seeker: Seeker) {
     : `/seekers/comment-${seeker.id}`;
 }
 
+function seekerSelectionKey(seeker: Seeker) {
+  return `${seeker.source}:${seeker.id}`;
+}
+
 function facebookProfileUrl(value: string | null) {
   if (!value) return null;
-  const candidate = value.trim().startsWith('http') ? value.trim() : `https://${value.trim()}`;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) return `https://www.facebook.com/${trimmed}`;
+  const candidate = trimmed.startsWith('http') ? trimmed : `https://${trimmed}`;
   try {
     const url = new URL(candidate);
     return /(^|\.)facebook\.com$/i.test(url.hostname) && url.pathname.length > 1 ? url.toString() : null;
   } catch {
     return null;
   }
+}
+
+function facebookInboxUrl(seeker: Seeker) {
+  const profileUrl = facebookProfileUrl(seeker.fbProfileUrl);
+  const profileId = profileUrl ? new URL(profileUrl).pathname.split('/').filter(Boolean).at(-1) : null;
+  const userId = seeker.fbUserId?.trim() || profileId;
+  return seeker.source === 'dm' && userId
+    ? `https://business.facebook.com/latest/inbox/all?asset_id=${PAGE_ID}&selected_item_id=${encodeURIComponent(userId)}&thread_type=FB_MESSAGE`
+    : null;
 }
 
 export function SeekersTable({ initialSeekers }: SeekersTableProps) {
@@ -71,16 +77,12 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
   const [sortField, setSortField] = useState<SortField>('lastMessageDate');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [search, setSearch] = useState('');
-  const [hoveredSeeker, setHoveredSeeker] = useState<string | null>(null);
-  const [touchPoints, setTouchPoints] = useState<TouchPoint[]>([]);
-  const [loadingTp, setLoadingTp] = useState(false);
   const [activityData, setActivityData] = useState<Record<string, { date: string; count: number }[]>>({});
-  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
-  const abortRef = useRef<AbortController | null>(null);
-  const tooltipRef = useRef<HTMLDivElement>(null);
 
   // ── Right Sidebar state ──
   const [selectedSeeker, setSelectedSeeker] = useState<Seeker | null>(null);
+  const [selectedSeekerKeys, setSelectedSeekerKeys] = useState<Set<string>>(new Set());
+  const selectionAnchorRef = useRef<number | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [sidebarData, setSidebarData] = useState<any>(null);
   const [sidebarLoading, setSidebarLoading] = useState(false);
@@ -104,36 +106,11 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
   }, [seekers]);
 
   // ── Filter State (City & Date Range) ──
-  const [filterState, setFilterState] = useState<FilterState>({ city: 'all', dateRange: 'all' });
+  const [filterState, setFilterState] = useState<FilterState>({ city: 'all', programCode: 'all', dateRange: 'all' });
   const [batchModalOpen, setBatchModalOpen] = useState(false);
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchResult, setBatchResult] = useState<string | null>(null);
-
-  const handleRunBatchRec = async (type: string) => {
-    setBatchRunning(true);
-    setBatchResult(null);
-    try {
-      const res = await fetch('/api/action-queue/recommendations', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          type,
-          city: filterState.city !== 'all' ? filterState.city : undefined,
-          limit: 5,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setBatchResult(data.message || `Đã tạo an toàn ${data.count} đề xuất mới vào hàng đợi chờ duyệt.`);
-      } else {
-        setBatchResult(`Lỗi: ${data.error || 'Không thể tạo đề xuất'}`);
-      }
-    } catch {
-      setBatchResult('Lỗi kết nối khi gửi yêu cầu đề xuất.');
-    } finally {
-      setBatchRunning(false);
-    }
-  };
+  const [batchJob, setBatchJob] = useState<MasJob | null>(null);
 
   // Sort & filter
   const sorted = [...seekers]
@@ -144,6 +121,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
         const seekerCity = (s.city || 'Unknown').toLowerCase();
         if (seekerCity !== targetCity) return false;
       }
+      if (filterState.programCode !== 'all' && s.programCode !== filterState.programCode) return false;
       if (!isDateInRange(s.lastMessageDate || s.lastMessageTimestampText || s.lastInteraction || s.firstSeen, filterState.dateRange)) return false;
       if (journeyStage) {
         const targetStageNum = getStageNumber(journeyStage);
@@ -155,11 +133,20 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
       const q = search.toLowerCase();
       return s.name?.toLowerCase().includes(q) ||
         s.city?.toLowerCase().includes(q) ||
+        s.programCode?.toLowerCase().includes(q) ||
         s.phone?.toLowerCase().includes(q) ||
         s.email?.toLowerCase().includes(q);
     })
     .sort((a, b) => {
       if (sortField === 'lastMessageDate' || sortField === 'lastMessageTimestampText' || sortField === 'lastInteraction' || sortField === 'firstSeen') {
+        if (sortField !== 'firstSeen' && sortField !== 'lastInteraction') {
+          const rankA = a.source === 'dm' ? a.inboxSortIndex : null;
+          const rankB = b.source === 'dm' ? b.inboxSortIndex : null;
+          if (rankA != null || rankB != null) {
+            if (rankA == null) return 1;
+            if (rankB == null) return -1;
+          }
+        }
         const getSeekerTime = (s: Seeker) => {
           if (sortField === 'firstSeen') {
             return parseRealDate(s.firstSeen) || new Date(s.firstSeen || 0).getTime() || 0;
@@ -171,11 +158,19 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
             const ms = new Date(s.lastMessageDate).getTime();
             if (!isNaN(ms) && ms > 0) return ms;
           }
-          return parseRealDate(s.lastMessageTimestampText) || parseRealDate(s.lastInteraction) || parseRealDate(s.firstSeen) || 0;
+          return parseRealDate(s.lastMessageAt) || parseRealDate(s.lastInteraction) || parseRealDate(s.firstSeen) || parseRealDate(s.lastMessageTimestampText) || 0;
         };
         const timeA = getSeekerTime(a);
         const timeB = getSeekerTime(b);
-        return sortDir === 'asc' ? timeA - timeB : timeB - timeA;
+        if (timeA !== timeB) return sortDir === 'asc' ? timeA - timeB : timeB - timeA;
+        if (sortField !== 'firstSeen' && sortField !== 'lastInteraction') {
+          const rankA = a.source === 'dm' ? a.inboxSortIndex : null;
+          const rankB = b.source === 'dm' ? b.inboxSortIndex : null;
+          if (rankA != null && rankB != null && rankA !== rankB) {
+            return sortDir === 'desc' ? rankA - rankB : rankB - rankA;
+          }
+        }
+        return 0;
       }
       if (sortField === 'leadStage') {
         const stageA = getStageNumber(a.leadStage);
@@ -188,6 +183,66 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
       return sortDir === 'asc' ? cmp : -cmp;
     });
 
+  const selectedDmThreadIds = sorted
+    .filter(seeker => selectedSeekerKeys.has(seekerSelectionKey(seeker)) && seeker.source === 'dm' && seeker.threadId)
+    .map(seeker => seeker.threadId as string);
+
+  // Keep the modal open while MAS is running so the progress view stays visible.
+  const closeBatchModal = () => {
+    if (batchRunning) return;
+    setBatchModalOpen(false);
+    setBatchResult(null);
+    setBatchJob(null);
+  };
+
+  const pollBatchJob = async (jobId: number) => {
+    try {
+      const res = await fetch(`/api/action-queue/recommendations?jobId=${jobId}`);
+      const data = await res.json();
+      if (!res.ok || !data.job) throw new Error(data.error || 'Không đọc được trạng thái job');
+      const job = data.job as MasJob;
+      setBatchJob(job);
+      if (job.status === 'completed') {
+        setBatchResult(job.result?.message || `Đã tạo ${job.result?.count ?? 0} đề xuất mới vào hàng đợi chờ duyệt.`);
+        setBatchRunning(false);
+        return;
+      }
+      if (job.status === 'failed') {
+        setBatchResult(`Lỗi: ${job.error || 'MAS không thể hoàn tất.'}`);
+        setBatchRunning(false);
+        return;
+      }
+      window.setTimeout(() => { void pollBatchJob(jobId); }, 900);
+    } catch (error) {
+      setBatchResult(`Lỗi: ${error instanceof Error ? error.message : 'Không thể theo dõi MAS job.'}`);
+      setBatchRunning(false);
+    }
+  };
+
+  const handleRunBatchRec = async (type: MasRunType) => {
+    if (!selectedDmThreadIds.length) return;
+    setBatchRunning(true);
+    setBatchResult(null);
+    try {
+      const res = await fetch('/api/action-queue/recommendations', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ type, threadIds: selectedDmThreadIds, city: filterState.city !== 'all' ? filterState.city : undefined, limit: selectedDmThreadIds.length }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.job) {
+        setBatchResult(`Lỗi: ${data.error || 'Không thể tạo MAS job'}`);
+        setBatchRunning(false);
+        return;
+      }
+      setBatchJob(data.job);
+      void pollBatchJob(data.job.id);
+    } catch {
+      setBatchResult('Lỗi kết nối khi gửi yêu cầu đề xuất.');
+      setBatchRunning(false);
+    }
+  };
+
   const handleSort = (field: SortField) => {
     if (sortField === field || (field === 'lastMessageDate' && sortField === 'lastMessageTimestampText')) {
       setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -197,36 +252,15 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
     }
   };
 
-  const handleJourneyHover = useCallback(async (name: string, e: React.MouseEvent) => {
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setHoveredSeeker(name);
-    setTouchPoints([]);
-    setLoadingTp(true);
-    const x = Math.min(e.clientX + 20, window.innerWidth - 420);
-    const y = Math.min(e.clientY - 20, window.innerHeight - 300);
-    setTooltipPos({ x, y });
-    try {
-      const res = await fetch(`/api/seekers?action=touchpoints&name=${encodeURIComponent(name)}`, { signal: controller.signal });
-      const json = await res.json();
-      if (!controller.signal.aborted) { setTouchPoints(json.touchPoints || []); setLoadingTp(false); }
-    } catch {
-      if (!controller.signal.aborted) { setTouchPoints([]); setLoadingTp(false); }
-    }
-  }, []);
-
-  const handleJourneyLeave = useCallback(() => {
-    if (abortRef.current) abortRef.current.abort();
-    setHoveredSeeker(null);
-    setTouchPoints([]);
-    setLoadingTp(false);
-  }, []);
-
   // ── Row click → open sidebar ──
-  const handleRowClick = useCallback(async (seeker: Seeker) => {
-    if (selectedSeeker?.id === seeker.id && selectedSeeker?.source === seeker.source) {
-      setSelectedSeeker(null); setSidebarData(null); return;
+  const handleRowClick = useCallback(async (seeker: Seeker, index: number, shiftKey: boolean) => {
+    if (shiftKey && selectionAnchorRef.current !== null) {
+      const start = Math.min(selectionAnchorRef.current, index);
+      const end = Math.max(selectionAnchorRef.current, index);
+      setSelectedSeekerKeys(new Set(sorted.slice(start, end + 1).map(seekerSelectionKey)));
+    } else {
+      selectionAnchorRef.current = index;
+      setSelectedSeekerKeys(new Set([seekerSelectionKey(seeker)]));
     }
     setSelectedSeeker(seeker);
     setSidebarData(null);
@@ -238,13 +272,14 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
       setSidebarData(data);
     } catch { setSidebarData(null); }
     setSidebarLoading(false);
-  }, [selectedSeeker]);
+  }, [sorted]);
 
   return (
     <div>
       {/* ── City & Date Range Filter Bar ── */}
       <FunnelFilterBar
         onFilterChange={setFilterState}
+        availablePrograms={PROGRAMS}
         totalCount={seekers.length}
         filteredCount={sorted.length}
         unitLabel="seekers"
@@ -263,6 +298,8 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
           <button
             type="button"
             onClick={() => setBatchModalOpen(true)}
+            disabled={selectedDmThreadIds.length === 0}
+            title={selectedDmThreadIds.length ? `Chạy MAS cho ${selectedDmThreadIds.length} seeker DM đã chọn` : 'Chọn ít nhất một seeker DM; giữ Shift để chọn một dải'}
             style={{
               padding: '7px 14px',
               borderRadius: '8px',
@@ -271,14 +308,15 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
               fontWeight: 700,
               fontSize: '12px',
               border: 'none',
-              cursor: 'pointer',
+              cursor: selectedDmThreadIds.length ? 'pointer' : 'not-allowed',
+              opacity: selectedDmThreadIds.length ? 1 : 0.45,
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
               boxShadow: '0 2px 10px rgba(99, 102, 241, 0.3)',
             }}
           >
-            ⚡ Chạy đề xuất MAS
+            ⚡ Chạy đề xuất MAS{selectedDmThreadIds.length ? ` (${selectedDmThreadIds.length})` : ''}
           </button>
           </>
         }
@@ -308,13 +346,12 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
               <thead>
                 <tr>
                   <th style={{ width: '36px' }}>#</th>
-                  <th style={{ width: '42px' }}>Journey</th>
                   <th onClick={() => handleSort('name')}>Name {sortField === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}</th>
                   <th onClick={() => handleSort('phone')}>Phone</th>
                   <th onClick={() => handleSort('lastMessageDate')} style={{ cursor: 'pointer' }}>
                     Last Message {(sortField === 'lastMessageDate' || sortField === 'lastMessageTimestampText') ? (sortDir === 'asc' ? '↑' : '↓') : ''}
                   </th>
-                  <th onClick={() => handleSort('city')}>City</th>
+                  <th onClick={() => handleSort('city')} style={{ minWidth: '230px' }}>City / Class</th>
                   <th onClick={() => handleSort('leadStage')} style={{ minWidth: '130px', textAlign: 'center' }}>
                     Stage {sortField === 'leadStage' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
                   </th>
@@ -323,26 +360,22 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
               <tbody>
                 {sorted.map((seeker, idx) => {
                   const cityStyle = getCityStyle(seeker.city);
-                  const isSelected = selectedSeeker?.id === seeker.id && selectedSeeker?.source === seeker.source;
+                  const isSelected = selectedSeekerKeys.has(seekerSelectionKey(seeker));
                   const profileUrl = facebookProfileUrl(seeker.fbProfileUrl);
+                  const inboxUrl = facebookInboxUrl(seeker);
                   return (
                     <tr
                       key={`${seeker.source}-${seeker.id}-${idx}`}
-                      onClick={() => handleRowClick(seeker)}
+                      onClick={(event) => handleRowClick(seeker, idx, event.shiftKey)}
+                      onMouseDown={(event) => { if (event.shiftKey) event.preventDefault(); }}
                       style={{
                         cursor: 'pointer',
+                        userSelect: 'none',
                         background: isSelected ? 'rgba(99, 102, 241, 0.1)' : undefined,
                         borderLeft: isSelected ? '3px solid #818cf8' : '3px solid transparent',
                       }}
-                    >
+                      >
                       <td style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600 }}>{idx + 1}</td>
-                      <td>
-                        <span
-                          style={{ cursor: 'pointer', fontSize: '16px', display: 'inline-block' }}
-                          onMouseEnter={(e) => { e.stopPropagation(); handleJourneyHover(seeker.name, e); }}
-                          onMouseLeave={handleJourneyLeave}
-                        >🛤️</span>
-                      </td>
                       <td style={{ fontWeight: 600 }}>
                         <button
                           type="button"
@@ -366,6 +399,22 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                             </svg>
                           </a>
                         )}
+                        {inboxUrl && (
+                          <a
+                            href={inboxUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="seeker-profile-icon seeker-inbox-icon"
+                            aria-label={`Mở Facebook Message Inbox của ${seeker.name || 'seeker'} trong tab mới`}
+                            title={`Mở Facebook Message Inbox: ${seeker.name || ''}`}
+                            onClick={e => e.stopPropagation()}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M21 11.5a8.38 8.38 0 0 1-1.88 5.32A8.5 8.5 0 0 1 12.5 20a8.38 8.38 0 0 1-4.3-1.18L3 20l1.18-4.3A8.38 8.38 0 0 1 3 11.5 8.5 8.5 0 0 1 11.5 3 8.5 8.5 0 0 1 21 11.5Z" />
+                              <path d="m8.5 12 2.2 2 4.8-5" />
+                            </svg>
+                          </a>
+                        )}
                       </td>
 
                       <td>{seeker.phone || '—'}</td>
@@ -382,7 +431,18 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                           </div>
                         </div>
                       </td>
-                      <td><span className="badge" style={{ background: cityStyle.bg, color: cityStyle.text }}>{seeker.city}</span></td>
+                      <td>
+                        <span className="badge" style={{ background: cityStyle.bg, color: cityStyle.text }}>{seeker.city}</span>
+                        {seeker.programCode && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', marginTop: '6px', fontSize: '10px', lineHeight: 1.3 }}>
+                          {PROGRAMS.filter(program => program.code === seeker.programCode).map(program => (
+                            <span key={program.code} title={`${program.day} · ${program.time} · ${program.location}`} style={{ color: seeker.programCode ? '#c4b5fd' : 'var(--text-muted)' }}>
+                              {program.code}
+                            </span>
+                          ))}
+                          </div>
+                        )}
+                      </td>
                       <td style={{ textAlign: 'center' }}>
                         <SevenStarProgress leadStage={seeker.leadStage} />
                       </td>
@@ -405,13 +465,37 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
           padding: '20px', marginLeft: '16px', boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
           animation: 'slideIn 0.2s ease-out',
         }}>
-          {/* Header */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
-            <div>
-              <div style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)' }}>{selectedSeeker.name}</div>
+          {/* Header + icon-only quick links */}
+          <div className="seeker-sidebar-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+            <div className="seeker-sidebar-heading">
+              <div className="seeker-sidebar-name" style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)' }}>{selectedSeeker.name}</div>
               <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
                 {selectedSeeker.source === 'dm' ? '💬 DM' : '💬 Comment'} · {selectedSeeker.city}
               </div>
+            </div>
+            <div className="seeker-sidebar-quick-links" aria-label="Seeker links">
+              <a href={seekerDetailUrl(selectedSeeker)} className="seeker-sidebar-link seeker-sidebar-link--details"
+                aria-label="Mở Full Details" title="Full Details" onClick={e => e.stopPropagation()}>
+                <span aria-hidden="true">📋</span>
+              </a>
+              {facebookProfileUrl(selectedSeeker.fbProfileUrl) && (
+                <a href={facebookProfileUrl(selectedSeeker.fbProfileUrl)!} target="_blank" rel="noopener noreferrer"
+                  className="seeker-sidebar-link seeker-sidebar-link--profile"
+                  aria-label={`Mở Facebook profile của ${selectedSeeker.name || 'seeker'} trong tab mới`}
+                  title="Facebook Profile" onClick={e => e.stopPropagation()}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
+                  </svg>
+                </a>
+              )}
+              {selectedSeeker.source === 'dm' && facebookProfileUrl(selectedSeeker.fbProfileUrl) && (
+                <a href={`https://business.facebook.com/latest/inbox/all?asset_id=${PAGE_ID}&selected_item_id=${facebookProfileUrl(selectedSeeker.fbProfileUrl)!.split('/').pop()?.split('?')[0]}&thread_type=FB_MESSAGE`}
+                  target="_blank" rel="noopener noreferrer" className="seeker-sidebar-link seeker-sidebar-link--inbox"
+                  aria-label={`Mở Facebook Message Inbox của ${selectedSeeker.name || 'seeker'} trong tab mới`}
+                  title="Facebook Inbox" onClick={e => e.stopPropagation()}>
+                  <span aria-hidden="true">💬</span>
+                </a>
+              )}
             </div>
             <button onClick={() => { setSelectedSeeker(null); setSidebarData(null); }}
               style={{ background: 'rgba(255,255,255,0.06)', border: 'none', borderRadius: '6px', color: 'var(--text-muted)', fontSize: '14px', cursor: 'pointer', width: '28px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -419,32 +503,12 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
             </button>
           </div>
 
-          {/* Quick links */}
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '14px' }}>
-            <a href={seekerDetailUrl(selectedSeeker)}
-              style={{ padding: '6px 12px', background: 'rgba(99,102,241,0.12)', borderRadius: '6px', fontSize: '11px', fontWeight: 600, color: '#818cf8', textDecoration: 'none' }}>
-              📋 Full Details →
-            </a>
-            {facebookProfileUrl(selectedSeeker.fbProfileUrl) && (
-              <a href={facebookProfileUrl(selectedSeeker.fbProfileUrl)!} target="_blank" rel="noopener noreferrer"
-                style={{ padding: '6px 12px', background: 'rgba(59,130,246,0.12)', borderRadius: '6px', fontSize: '11px', fontWeight: 600, color: '#60a5fa', textDecoration: 'none' }}>
-                👤 FB Profile ↗
-              </a>
-            )}
-            {selectedSeeker.source === 'dm' && facebookProfileUrl(selectedSeeker.fbProfileUrl) && (
-              <a href={`https://business.facebook.com/latest/inbox/all?asset_id=${PAGE_ID}&selected_item_id=${facebookProfileUrl(selectedSeeker.fbProfileUrl)!.split('/').pop()?.split('?')[0]}&thread_type=FB_MESSAGE`}
-                target="_blank" rel="noopener noreferrer"
-                style={{ padding: '6px 12px', background: 'rgba(99,102,241,0.12)', borderRadius: '6px', fontSize: '11px', fontWeight: 600, color: '#818cf8', textDecoration: 'none' }}>
-                💬 FB Inbox ↗
-              </a>
-            )}
-          </div>
-
-          {/* ── Compact Journey Timeline & Actionable Queued Recommendations ── */}
+          {/* ── Compact Journey Timeline ── */}
           <div style={{ marginBottom: '16px', padding: '12px', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-subtle)', borderRadius: '10px' }}>
             <SeekerJourneyTimeline
               seeker={selectedSeeker}
               compact={true}
+              showQueue={false}
               onRefreshSeeker={() => {
                 const seekerId = selectedSeeker.source === 'dm' ? String(selectedSeeker.id) : `comment-${selectedSeeker.id}`;
                 fetch(`/api/seekers/${encodeURIComponent(seekerId)}`)
@@ -583,37 +647,23 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
               )}
             </>
           )}
+
+          {/* MAS approvals stay below the conversation context. */}
+          <SeekerJourneyTimeline
+            seeker={selectedSeeker}
+            compact={true}
+            showTimeline={false}
+            onRefreshSeeker={() => {
+              const seekerId = selectedSeeker.source === 'dm' ? String(selectedSeeker.id) : `comment-${selectedSeeker.id}`;
+              fetch(`/api/seekers/${encodeURIComponent(seekerId)}`)
+                .then(res => res.json())
+                .then(data => setSidebarData(data))
+                .catch(() => {});
+            }}
+          />
         </div>
       )}
       </div>
-
-      {/* Journey Tooltip */}
-      {hoveredSeeker && (
-        <div ref={tooltipRef} style={{
-          position: 'fixed', top: tooltipPos.y, left: tooltipPos.x, zIndex: 1000,
-          background: 'var(--bg-secondary)', border: '1px solid var(--border-glow)', borderRadius: '12px',
-          padding: '16px', minWidth: '320px', maxWidth: '400px', maxHeight: '280px', overflowY: 'auto',
-          boxShadow: '0 8px 32px rgba(0,0,0,0.5)', pointerEvents: 'none',
-        }}>
-          <div style={{ fontSize: '13px', fontWeight: 700, marginBottom: '12px', color: 'var(--accent-indigo)' }}>Journey: {hoveredSeeker}</div>
-          {loadingTp ? (
-            <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Loading touch-points...</div>
-          ) : touchPoints.length > 0 ? (
-            touchPoints.slice(0, 8).map((tp, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
-                <div style={{ width: '7px', height: '7px', borderRadius: '50%', marginTop: '5px', flexShrink: 0, background: touchPointColor(tp.type) }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: touchPointColor(tp.type) }}>{tp.type.replace('_', ' ')}</div>
-                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '1px', lineHeight: 1.3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{tp.detail || '(no content)'}</div>
-                  <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '1px' }}>{tp.date}</div>
-                </div>
-              </div>
-            ))
-          ) : (
-            <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>No touch-points recorded</div>
-          )}
-        </div>
-      )}
 
       {/* ── Batch Recommendations Modal ── */}
       {batchModalOpen && (
@@ -628,7 +678,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
             justifyContent: 'center',
             zIndex: 1100,
           }}
-          onClick={() => setBatchModalOpen(false)}
+          onClick={closeBatchModal}
         >
           <div
             className="card"
@@ -645,11 +695,11 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
               <h3 style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)' }}>
-                ⚡ Chạy đề xuất MAS (Batch Recommendations)
+                ⚡ Chạy đề xuất MAS cho {selectedDmThreadIds.length} seeker
               </h3>
               <button
                 type="button"
-                onClick={() => setBatchModalOpen(false)}
+                onClick={closeBatchModal}
                 style={{
                   background: 'rgba(255,255,255,0.06)',
                   border: 'none',
@@ -666,17 +716,23 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
             </div>
 
             <p style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: '16px' }}>
-              Hệ thống sẽ phân tích dữ liệu tương tác và an toàn tạo các đề xuất hành động vào hàng đợi (action_queue)
-              với trạng thái <strong>pending</strong>. Tuyệt đối <strong>không</strong> tự động gửi tin nhắn đến người dùng.
+              MAS (ADK agents) sẽ đọc lịch sử hội thoại của {selectedDmThreadIds.length} seeker DM đã chọn (giữ Shift khi click để chọn một dải) và tạo đề xuất hành động vào hàng đợi (action_queue)
+              với trạng thái <strong>pending</strong>. Mỗi lượt chạy mất khoảng 10–60 giây tùy số seeker. Tuyệt đối <strong>không</strong> tự động gửi tin nhắn đến người dùng.
             </p>
+
+            {batchJob && (
+              <MasProgress job={batchJob} />
+            )}
 
             {batchResult && (
               <div
                 style={{
                   padding: '10px 14px',
                   borderRadius: '8px',
-                  background: batchResult.startsWith('Lỗi') ? 'rgba(244,63,94,0.1)' : 'rgba(16,185,129,0.1)',
-                  color: batchResult.startsWith('Lỗi') ? '#fb7185' : '#34d399',
+                  background: batchResult.startsWith('Lỗi')
+                    ? 'rgba(244,63,94,0.1)'
+                    : batchResult.startsWith('⚠️') ? 'rgba(245,158,11,0.12)' : 'rgba(16,185,129,0.1)',
+                  color: batchResult.startsWith('Lỗi') ? '#fb7185' : batchResult.startsWith('⚠️') ? '#fbbf24' : '#34d399',
                   fontSize: '12px',
                   lineHeight: 1.4,
                   marginBottom: '14px',
@@ -689,7 +745,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <button
                 type="button"
-                disabled={batchRunning}
+                disabled={batchRunning || selectedDmThreadIds.length === 0}
                 onClick={() => handleRunBatchRec('all')}
                 style={{
                   padding: '10px 14px',
@@ -705,7 +761,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                   alignItems: 'center',
                 }}
               >
-                <span>⚡ Chạy tất cả đề xuất (All Categories)</span>
+                <span>⚡ Chạy đề xuất cho {selectedDmThreadIds.length} seeker</span>
                 <span style={{ fontSize: '11px', opacity: 0.8 }}>Reply + Warmup + Event</span>
               </button>
 
@@ -785,7 +841,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
               </button>
               <button
                 type="button"
-                onClick={() => setBatchModalOpen(false)}
+                onClick={closeBatchModal}
                 style={{
                   padding: '8px 14px',
                   borderRadius: '8px',
