@@ -451,6 +451,35 @@ class TestInboxContracts(unittest.TestCase):
         self.assertEqual(enriched.mas_handoff.ad_ids, ["ad_1"])
 
     # Gate 3: code:test-validation-001:l1-to-l4
+    # code:test-validation-001:message-dedup-002
+    def test_persist_is_idempotent_when_first_row_was_saved_as_auto_page(self):
+        """Retrospective 2026-09-17: the AD SOURCE-prefixed first row is stored
+        with sender Auto_Page while the scraper keeps reporting Page, so a
+        second crawl re-inserted '<name> replied to an ad.' every run."""
+        js_messages = [
+            {"sender": "Page", "text": "User B replied to an ad.", "timestamp": "Today"},
+            {"sender": "Customer", "text": "Cho em hỏi lịch học", "timestamp": "Today"},
+            {"sender": "Page", "text": "Chúng tôi có thể giúp gì cho bạn?", "timestamp": "Today"},
+        ]
+
+        def _record():
+            return enrich_thread_record(
+                build_thread_record("page1", {"name": "User B", "text": "User B\nPreview"}),
+                js_messages, extract_user_info, detect_city,
+                ad_context="Thiền miễn phí tại Hà Nội", fb_url="psid-b",
+            )
+
+        first = persist_thread_record(self.conn, _record(), detect_city)
+        self.assertEqual(first["messages_added"], 3)
+        senders = [r[0] for r in self.conn.execute(
+            "SELECT sender FROM messages WHERE thread_id = ? ORDER BY seq", (first["thread_id"],))]
+        self.assertEqual(senders, ["Auto_Page", "Customer", "Auto_Page"])
+
+        second = persist_thread_record(self.conn, _record(), detect_city)
+        self.assertEqual(second["messages_added"], 0)
+        count = self.conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id = ?", (first["thread_id"],)).fetchone()[0]
+        self.assertEqual(count, 3)
+
     def test_persist_thread_record_writes_all_boundaries(self):
         thread_record = enrich_thread_record(
             build_thread_record("page1", {"name": "User A", "text": "User A\nPreview"}),

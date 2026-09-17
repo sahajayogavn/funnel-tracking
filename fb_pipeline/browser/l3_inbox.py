@@ -1,10 +1,14 @@
 import re
-from urllib.parse import parse_qs, urlparse
+import time
+from typing import Callable
+
+from fb_pipeline.contracts.l1_inbox_tasks import ThreadTask, ThreadResult
 
 from .inbox.scroll_helpers import (
     wait_for_inbox_shell,
     wait_for_initial_threads,
     scroll_sidebar_and_wait,
+    reset_sidebar_to_top,
     sidebar_loading_snapshot,
     sidebar_loading_count,
     wait_for_sidebar_threads,
@@ -24,7 +28,32 @@ from .inbox.thread_detail_parser import (
     extract_ad_id_labels,
 )
 from .inbox.integrity_validator import validate_thread_integrity
-from .inbox.constants import thread_card_selector
+from .inbox.thread_locator import (
+    LocateResult,
+    locate_thread_in_sidebar,
+    MAX_STAGNANT_STAGE2_CLICK_RETRIES,
+    MAX_THREAD_LOADING_WAIT_MS,
+    _sidebar_snapshot_progressed,
+    _thread_panel_loading_count,
+)
+from .inbox.thread_worker import ThreadWorkerDeps, process_thread_task
+from .inbox.constants import (
+    LOADING_INDICATOR_SELECTORS,
+    MESSAGE_REGION_SELECTOR,
+    thread_card_selector,
+)
+
+MAX_IDLE_SIDEBAR_NO_PROGRESS_MS = 120_000
+
+
+# code:inbox-thread-identity-001:stage1-psid
+def _resolve_psid(conn, page_id: str, thread_name: str) -> str:
+    """PSID cached from an earlier crawl (``users.fb_url``), "" when unknown/ambiguous."""
+    try:
+        from fb_pipeline.persistence.l4_sqlite_store import resolve_psid_hint
+        return resolve_psid_hint(conn, page_id, thread_name) or ""
+    except Exception:
+        return ""
 
 # Provide backward-compatible aliases for legacy tools calling l3_inbox directly
 _wait_for_inbox_shell = wait_for_inbox_shell
@@ -38,12 +67,27 @@ _extract_visible_threads = extract_visible_threads
 _parse_sidebar_time_token = parse_sidebar_time_token
 _validate_quick_fetch_cache = validate_quick_fetch_cache
 
+def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn, logger,
+                     record_fetch, *, skip_navigation: bool = False, force_refresh: bool = False,
+                     allow_early_exit: bool = True, target_total_messages: int | None = None,
+                     on_task: Callable[[ThreadTask], None]) -> dict:
+    """Stage 1: discover conversation threads top-down in the sidebar and
+    dispatch a ``ThreadTask`` for every one that needs Stage 2 processing.
 
-def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, logger,
-                 record_fetch, extract_ad_id_labels_arg, extract_user_info, detect_city,
-                 skip_navigation: bool = False, force_refresh: bool = False,
-                 allow_early_exit: bool = True) -> dict:
-    from fb_pipeline.inbox.l3_pipeline import build_thread_record, enrich_thread_record, persist_thread_record
+    ``on_task`` is invoked, in Inbox order, once for every discovered thread
+    that is not a "skip" (already-synced) card, at the end of each
+    visible-cards round, before the next sidebar scroll.
+
+    Returns a dict:
+    - Early-exit cases (cache hit, or the message target already met):
+      ``{"early_exit": True, "stats": <the same stats dict scrape_inbox used
+      to return directly for that case>}``.
+    - Normal completion: ``{"early_exit": False, "stats": <Stage 1 stats>,
+      "existing_message_count": <int>}``.
+
+    # code:inbox-parallel-fetch-001:discover
+    """
+    from fb_pipeline.inbox.l3_pipeline import build_thread_record, canonical_thread_id
 
     inbox_url = f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}"
 
@@ -60,16 +104,30 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
     logger.info("Waiting for initial threads to appear...")
     initial_snapshot = wait_for_initial_threads(page, logger, timeout_ms=30000)
 
+    # Stage 1 establishes the exact ordering shown by Seekers.  Reset before
+    # collecting, not only later for detail extraction, so max_threads means
+    # the actual top N conversations in Meta's Inbox.
+    try:
+        top_reset = reset_sidebar_to_top(page, logger)
+        page.wait_for_timeout(500)
+        logger.info(f"Stage 1 sidebar reset to top: {top_reset}")
+    except Exception as exc:
+        logger.warning(f"Could not reset sidebar before Stage 1: {exc}")
+
     if not force_refresh and allow_early_exit:
         first_glance_threads = extract_visible_threads(page)
         is_cache_hit = validate_quick_fetch_cache(first_glance_threads, conn, logger, page_id)
         if is_cache_hit:
             return {
-                "new_threads": 0, "new_messages": 0, "skipped_threads": len(first_glance_threads),
-                "threads_seen": len(first_glance_threads), "threads_processed": 0,
-                "threads_skipped_duplicate": 0, "threads_skipped_cutoff": 0, "threads_skipped_click_verify": 0,
-                "sidebar_scrolls": 0, "sidebar_wait_ms": initial_snapshot.get("elapsed_ms", 0),
-                "method": "dynamic_cache_hit"
+                "early_exit": True,
+                "stats": {
+                    "new_threads": 0, "new_messages": 0, "skipped_threads": len(first_glance_threads),
+                    "threads_seen": len(first_glance_threads), "threads_processed": 0,
+                    "processed_thread_ids": [],
+                    "threads_skipped_duplicate": 0, "threads_skipped_cutoff": 0, "threads_skipped_click_verify": 0,
+                    "sidebar_scrolls": 0, "sidebar_wait_ms": initial_snapshot.get("elapsed_ms", 0),
+                    "method": "dynamic_cache_hit"
+                },
             }
 
     logger.info(f"Starting sidebar scroll-and-process within {time_range}...")
@@ -84,20 +142,41 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             max_days = 7
 
     cursor = conn.cursor()
+    # A crawl is one authoritative Inbox snapshot.  Remove positions from an
+    # older virtualized viewport so a stale row can never share a top rank.
+    cursor.execute("UPDATE threads SET inbox_sort_index = NULL WHERE page_id = ?", (page_id,))
+    conn.commit()
     processed_thread_keys = set()
     scroll_round = 0
     reached_date_limit = False
-    last_new_round = 0
+    last_new_thread_at = time.monotonic()
     thread_counter = 0
     consecutive_clean_threads = 0
     consecutive_old_threads = 0
     stats = {
         "new_threads": 0, "new_messages": 0, "skipped_threads": 0, "threads_seen": 0,
         "threads_processed": 0, "threads_skipped_duplicate": 0, "threads_skipped_cutoff": 0,
+        "processed_thread_ids": [],
         "threads_skipped_click_verify": 0,
+        "threads_psid_resolved": 0,
         "sidebar_scrolls": 0,
         "sidebar_wait_ms": initial_snapshot.get("elapsed_ms", 0),
     }
+
+    existing_message_count = 0
+    if target_total_messages is not None:
+        existing_message_count = cursor.execute(
+            "SELECT COUNT(*) FROM messages m JOIN threads t ON t.id = m.thread_id WHERE t.page_id = ?",
+            (page_id,),
+        ).fetchone()[0]
+        stats["target_total_messages"] = target_total_messages
+        stats["starting_total_messages"] = existing_message_count
+        if existing_message_count >= target_total_messages:
+            logger.info(
+                f"Message target already met ({existing_message_count}/{target_total_messages}); skipping scrape."
+            )
+            record_fetch(page_id, 0, 0, conn)
+            return {"early_exit": True, "stats": stats}
 
     collected_threads = []
 
@@ -113,6 +192,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             break
 
         new_in_round = 0
+        round_tasks = []
         for vt in visible_threads:
             name = (vt.get("name") or "").strip()
             # Keep a Python-side guard as well as the DOM parser guard. This
@@ -126,7 +206,14 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
 
             parsed_time = parse_sidebar_time_token(vt.get("sidebarTimeText", ""))
             vt["sidebarTimeKind"] = parsed_time.get("kind", "unknown")
-            thread_key = vt.get("selectedItemId") or vt.get("sidebarIdentityKey") or "|".join([
+            # code:inbox-thread-identity-001:stage1-psid
+            # Sidebar cards expose href="#" until selected, so the card rarely
+            # carries a PSID. Recover it from a previous run (users.fb_url,
+            # unique per name) so this thread gets its canonical id *now*:
+            # the DB lookup below can hit (skip already-synced threads) and
+            # Stage 2 can open it by direct URL instead of scrolling the sidebar.
+            psid = (vt.get("selectedItemId") or "").strip() or _resolve_psid(conn, page_id, name)
+            thread_key = psid or vt.get("sidebarIdentityKey") or "|".join([
                 name, vt.get("previewText", ""), vt.get("sidebarTimeText", ""), str(vt.get("domIndex", 0)),
             ])
 
@@ -150,30 +237,53 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             thread_counter += 1
 
             thread_record = build_thread_record(page_id, vt)
-            cursor.execute("SELECT last_synced_time FROM threads WHERE id = ?", (thread_record.thread_id,))
+            # `domIndex` restarts for every virtualized viewport.  Persist the
+            # global Stage-1 ordinal instead, which matches the top-down Inbox
+            # sequence across all sidebar scroll rounds.
+            thread_record.dom_index = thread_counter - 1
+            if psid:
+                thread_record.selected_item_id = psid
+                thread_record.thread_id = canonical_thread_id(page_id, psid)
+                stats["threads_psid_resolved"] += 1
+            cursor.execute("SELECT id FROM threads WHERE id = ?", (thread_record.thread_id,))
             row = cursor.fetchone()
 
             is_match = False
             force_resync = False
 
             if row:
-                db_norm = ''.join(c.lower() for c in (row[0] or "") if c.isalnum())
-                ui_norm = ''.join(c.lower() for c in (thread_record.preview_text or "") if c.isalnum())
-                min_len = min(len(db_norm), len(ui_norm))
-                
-                if min_len > 0:
-                    is_match = db_norm[:min_len] == ui_norm[:min_len]
-                else:
-                    is_match = db_norm == ui_norm
+                # code:inbox-thread-identity-001:preview-match
+                # Compare the sidebar preview with the last few persisted rows,
+                # not only the newest one: system banners such as
+                # "<name> replied to an ad." are sometimes extracted on a later
+                # crawl and land at the end of the thread although they belong
+                # to its start, which made the newest row never match.
+                cursor.execute(
+                    "SELECT content, sender FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 3",
+                    (thread_record.thread_id,)
+                )
+                tail_rows = cursor.fetchall()
+
+                def _normalize_msg(s):
+                    if not s: return ""
+                    s = re.sub(r'^---\s*\[AD SOURCE\]:.*?---\s*', '', s, flags=re.DOTALL)
+                    s = re.sub(r'^(you|bạn):\s*', '', s, flags=re.IGNORECASE)
+                    return ''.join(c.lower() for c in s if c.isalnum())
+
+                ui_norm = _normalize_msg(thread_record.preview_text or "")
+                msg_row = None
+                for candidate in tail_rows:
+                    db_norm = _normalize_msg(candidate[0])
+                    min_len = min(len(db_norm), len(ui_norm))
+                    if (min_len > 0 and db_norm[:min_len] == ui_norm[:min_len]) or (min_len == 0 and db_norm == ui_norm):
+                        is_match = True
+                        msg_row = candidate
+                        break
 
                 if is_match:
                     preview_lower = (thread_record.preview_text or "").strip().lower()
                     if preview_lower.startswith("you:") or preview_lower.startswith("bạn:"):
-                        last_msg_row = cursor.execute(
-                            "SELECT sender FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1",
-                            (thread_record.thread_id,)
-                        ).fetchone()
-                        if last_msg_row and last_msg_row[0] != "Page":
+                        if msg_row and msg_row[1] not in ("Page", "Auto_Page"):
                             force_resync = True
 
                     if not force_resync:
@@ -202,17 +312,35 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                 "vt": vt,
                 "name": name
             })
+            round_tasks.append(ThreadTask(
+                ordinal=thread_record.dom_index,
+                record=thread_record,
+                absolute_top=vt.get("absoluteTop", 0),
+                psid_hint=psid,
+                is_new=(row is None),
+            ))
 
             if row is None:
                 stats["new_threads"] += 1
 
+        # Dispatch every non-skip thread found in this round before the next
+        # sidebar scroll (whether the round ended naturally or via the
+        # cutoff/early-exit breaks above).
+        for task in round_tasks:
+            on_task(task)
+
         if reached_date_limit:
             break
         if new_in_round == 0:
-            if scroll_round - last_new_round >= 7:
+            idle_ms = int((time.monotonic() - last_new_thread_at) * 1000)
+            if idle_ms >= MAX_IDLE_SIDEBAR_NO_PROGRESS_MS:
+                logger.info(
+                    "Stopping Stage 1 after "
+                    f"{idle_ms}ms without a newly discovered sidebar thread."
+                )
                 break
         else:
-            last_new_round = scroll_round
+            last_new_thread_at = time.monotonic()
 
         if thread_counter >= max_threads:
             break
@@ -225,329 +353,78 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
         stats["sidebar_wait_ms"] += scroll_result.get("elapsed_ms", 0)
 
     # END STAGE 1
-    logger.info(f"Stage 1 Complete. Listed {len(collected_threads)} threads in range:")
-    for ct in collected_threads:
-        time_text = ct.get('vt', {}).get('sidebarTimeText', '')
-        if time_text:
-            logger.info(f"  - {ct.get('name', 'Unknown')} [{time_text}]")
-        else:
-            logger.info(f"  - {ct.get('name', 'Unknown')}")
-    threads_to_process = [c for c in collected_threads if not c["skip_process"]]
-    logger.info(f"Stage 2 will extract details for {len(threads_to_process)} threads.")
+    logger.info(f"Stage 1 Complete. Listed {len(collected_threads)} threads in range.")
+
+    return {
+        "early_exit": False,
+        "stats": stats,
+        "existing_message_count": existing_message_count,
+    }
+
+def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, logger,
+                 record_fetch, extract_ad_id_labels_arg, extract_user_info, detect_city,
+                 skip_navigation: bool = False, force_refresh: bool = False,
+                 allow_early_exit: bool = True,
+                 target_total_messages: int | None = None) -> dict:
+    tasks: list[ThreadTask] = []
+    discovery = discover_threads(
+        page, page_id, time_range, max_threads, conn, logger, record_fetch,
+        skip_navigation=skip_navigation, force_refresh=force_refresh,
+        allow_early_exit=allow_early_exit, target_total_messages=target_total_messages,
+        on_task=tasks.append,
+    )
+
+    if discovery["early_exit"]:
+        return discovery["stats"]
+
+    stats = discovery["stats"]
+    existing_message_count = discovery["existing_message_count"]
+
+    # Avoid writing tens of thousands of PII-bearing log lines during an
+    # archive import. The total and per-thread Stage 2 logs remain auditable.
+    logger.info(f"Stage 2 will extract details for {len(tasks)} threads.")
 
     # STAGE 2
-    if len(threads_to_process) > 0:
+    if len(tasks) > 0:
         logger.info("Resetting sidebar scroll to top for Stage 2...")
         try:
-            scroll_reset_info = page.evaluate(f'''() => {{
-                let initial = -1;
-                let final = -1;
-                let cards = Array.from(document.querySelectorAll('{thread_card_selector()}'));
-                if (cards.length > 0) {{
-                    let parent = cards[0].closest('div');
-                    while(parent && parent.tagName !== 'BODY') {{
-                        let style = window.getComputedStyle(parent);
-                        if (parent.scrollHeight > parent.clientHeight || ['auto', 'scroll'].includes(style.overflowY)) {{
-                            initial = parent.scrollTop;
-                            parent.scrollTop = 0;
-                            final = parent.scrollTop;
-                            return {{initial: initial, final: final}};
-                        }}
-                        parent = parent.parentElement;
-                    }}
-                }}
-                return {{initial: initial, final: final}};
-            }}''')
-            initial_st = scroll_reset_info.get("initial", -1)
-            final_st = scroll_reset_info.get("final", -1)
-            logger.info(f"Stage 2 scroll reset verify: scrollTop {initial_st} -> {final_st}")
-            
-            # Retrospective [Apr 2026]: Prevention of Phantom "Stupid Scrolling"
-            # Previously, if JS returned `-1` (meaning no scrollbar found or just a short list of cards),
-            # this script arbitrarily fired 15 physical `page.mouse.wheel` events. This forced the user to watch the 
-            # browser twitch visually for seconds on end, driving complaints of "stupid scrolling".
-            # We safely just ensure the first card is visible with zero delay using JS native methods.
-            if final_st != 0:
-                page.evaluate(f'''() => {{
-                    let cards = Array.from(document.querySelectorAll('{thread_card_selector()}'));
-                    if (cards.length > 0) {{
-                        cards[0].scrollIntoView({{block: 'start', inline: 'nearest'}});
-                    }}
-                }}''')
+            # code:fb-inbox-scroll-001:stage2-reset
+            # Use the same tab-aware virtual-list resolver as Stage 1.
+            scroll_reset_info = reset_sidebar_to_top(page, logger)
+            if scroll_reset_info.get("found") and scroll_reset_info.get("after") != 0:
+                logger.warning("Stage 2 sidebar reset did not reach scrollTop=0; continuing with guarded click retries.")
         except Exception as e:
             logger.warning(f"Failed to run Stage 2 scroll reset: {e}")
 
         page.wait_for_timeout(1500)
 
-        for i, c in enumerate(threads_to_process):
-            thread_record = c["record"]
-            name = c["name"]
-            logger.info(f"Syncing thread '{name}' (#{i+1}/{len(threads_to_process)})...")
-            
-            abs_top = c.get("vt", {}).get("absoluteTop", 0)
-            if abs_top > 0:
-                jump_target = max(0, int(abs_top) - 150)
-                try:
-                    page.evaluate(f'''(pos) => {{
-                        let cards = Array.from(document.querySelectorAll('{thread_card_selector()}'));
-                        if (cards.length > 0) {{
-                            let parent = cards[0].closest('div');
-                            while(parent && parent.tagName !== 'BODY') {{
-                                let style = window.getComputedStyle(parent);
-                                if (parent.scrollHeight > parent.clientHeight || ['auto', 'scroll'].includes(style.overflowY)) {{
-                                    parent.scrollTop = pos;
-                                    return;
-                                }}
-                                parent = parent.parentElement;
-                            }}
-                        }}
-                    }}''', jump_target)
-                    page.wait_for_timeout(1000)
-                except Exception as e:
-                    logger.warning(f"Failed to jump to absoluteTop {jump_target}: {e}")
+        deps = ThreadWorkerDeps(
+            extract_ad_id_labels=extract_ad_id_labels_arg,
+            extract_user_info=extract_user_info,
+            detect_city=detect_city,
+        )
 
-            prev_fb_url = ""
-            try:
-                from urllib.parse import parse_qs, urlparse
-                prev_fb_url = parse_qs(urlparse(page.url).query).get('selected_item_id', [''])[0]
-            except Exception:
-                pass
+        for i, task in enumerate(tasks):
+            if (target_total_messages is not None
+                    and existing_message_count + stats["new_messages"] >= target_total_messages):
+                logger.info(
+                    f"Reached total message target ({existing_message_count + stats['new_messages']}/"
+                    f"{target_total_messages}). Stopping Stage 2."
+                )
+                break
+            name = task.record.thread_name
+            logger.info(f"Syncing thread '{name}' (#{i+1}/{len(tasks)})...")
 
-            pre_click_fingerprint = page.evaluate('''() => {
-                let r = document.querySelector(
-                    'div[aria-label*="Message list container"], ' +
-                    'div[role="region"][aria-label*="message"]'
-                );
-                return (!r) ? "" : (r.innerText || "").substring(0, 200);
-            }''')
+            result = process_thread_task(page, conn, task, deps, logger, is_first_thread=(i == 0))
 
-            # Use thread_card_selector imported at the top of the file
-            clicked = False
-            click_attempts = 0
-            while not clicked and click_attempts < 150:
-                click_attempts += 1
-                try:
-                    clicked = page.evaluate(r'''({sidebarIdentityKey, threadSelector, targetName, targetSelectedItemId, targetPreviewText, targetFbUrl}) => {
-                        let candidates = Array.from(document.querySelectorAll(threadSelector));
-                        function pickTimeToken(lines) {
-                            for (let i = lines.length - 1; i >= 1; i--) {
-                                const token = (lines[i] || '').trim();
-                                if (!token) continue;
-                                if (/^\d+[smhdw]$/i.test(token)) return token;
-                                if (/^(today|yesterday|hôm nay|hôm qua)$/i.test(token)) return token;
-                                if (/^(mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(token)) return token;
-                                if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}$/i.test(token)) return token;
-                            }
-                            return '';
-                        }
-                        function getIdentity(el) {
-                            const text = (el.innerText || '').trim();
-                            const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-                            const name = lines[0] || '';
-                            const sidebarTimeText = pickTimeToken(lines);
-                            const previewLines = lines.slice(1).filter(line => line !== sidebarTimeText);
-                            const hrefEl = el.closest('a[href]') || el.querySelector('a[href]');
-                            const href = hrefEl ? (hrefEl.getAttribute('href') || '') : '';
-                            
-                            let hovercard = el.getAttribute('data-hovercard') || '';
-                            if (!hovercard) {
-                                const hcEl = el.querySelector('[data-hovercard]');
-                                if (hcEl) hovercard = hcEl.getAttribute('data-hovercard') || '';
-                            }
-                            let fbUrl = hovercard ? hovercard.split('?')[0] : '';
-
-                            let selectedItemId = '';
-                            try {
-                                if (href) {
-                                    const absolute = new URL(href, window.location.origin);
-                                    selectedItemId = absolute.searchParams.get('selected_item_id') || '';
-                                }
-                            } catch (_) {}
-                            const attrs = [];
-                            for (const attr of Array.from(el.attributes || [])) {
-                                if (!attr || !attr.name) continue;
-                                if (attr.name.startsWith('data-') || attr.name.startsWith('aria-') || attr.name === 'href') {
-                                    attrs.push(`${attr.name}=${attr.value || ''}`);
-                                }
-                            }
-                            const identityParts = [name, previewLines.join(' | '), sidebarTimeText, selectedItemId, href, fbUrl, attrs.join('|')].filter(Boolean);
-                            return identityParts.join(' || ');
-                        }
-                        let matchCandidates = [];
-                        for (let c of candidates) {
-                            if (sidebarIdentityKey && getIdentity(c) === sidebarIdentityKey) {
-                                c.scrollIntoView({block: "center"});
-                                c.click();
-                                return true;
-                            }
-                            
-                            // Relaxed Match Prep
-                            let norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-                            const text = (c.innerText || '').trim();
-                            const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-                            const elName = lines[0] || '';
-                            
-                            let hovercard = c.getAttribute('data-hovercard') || '';
-                            if (!hovercard) {
-                                const hcEl = c.querySelector('[data-hovercard]');
-                                if (hcEl) hovercard = hcEl.getAttribute('data-hovercard') || '';
-                            }
-                            let elFbUrl = hovercard ? hovercard.split('?')[0] : '';
-                            
-                            const hrefEl = c.closest('a[href]') || c.querySelector('a[href]');
-                            let elSelectedItemId = '';
-                            if (hrefEl) {
-                                try {
-                                    const absolute = new URL(hrefEl.getAttribute('href'), window.location.origin);
-                                    elSelectedItemId = absolute.searchParams.get('selected_item_id') || '';
-                                } catch (_) {}
-                            }
-                            
-                            if (targetSelectedItemId && elSelectedItemId && targetSelectedItemId === elSelectedItemId) {
-                                c.scrollIntoView({block: "center"});
-                                c.click();
-                                return true;
-                            }
-                            
-                            if (targetFbUrl && elFbUrl && targetFbUrl === elFbUrl) {
-                                c.scrollIntoView({block: "center"});
-                                c.click();
-                                return true;
-                            }
-                            
-                            if (elName && norm(elName) === norm(targetName)) {
-                                matchCandidates.push({c, lines});
-                            }
-                        }
-                        
-                        // If we have exactly 1 name match, just click it.
-                        if (matchCandidates.length === 1) {
-                            matchCandidates[0].c.scrollIntoView({block: "center"});
-                            matchCandidates[0].c.click();
-                            return true;
-                        }
-                        
-                        // If multiple name matches, fallback to preview text resolving
-                        let norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-                        for (let mc of matchCandidates) {
-                            let preLines = mc.lines.slice(1).join(' ');
-                            if (!targetPreviewText || norm(preLines).includes(norm(targetPreviewText)) || norm(targetPreviewText).includes(norm(preLines))) {
-                                mc.c.scrollIntoView({block: "center"});
-                                mc.c.click();
-                                return true;
-                            }
-                        }
-                        
-                        return false;
-                    }''', {
-                        "sidebarIdentityKey": thread_record.sidebar_identity_key, 
-                        "threadSelector": thread_card_selector(),
-                        "targetName": thread_record.thread_name,
-                        "targetSelectedItemId": thread_record.selected_item_id,
-                        "targetPreviewText": thread_record.preview_text,
-                        "targetFbUrl": thread_record.fb_url
-                    })
-                except Exception:
-                    pass
-                    
-                if not clicked:
-                    if click_attempts <= 3:
-                        page.wait_for_timeout(500)
-                    else:
-                        try:
-                            # Verify and log scroll action
-                            scroll_script = f'''() => {{
-                                // RETROSPECTIVE: doc:report-scrolling-fix-001
-                                // DO NOT rely solely on scrollHeight. Native implementations often bind 
-                                // scrollHeight = clientHeight and translate items inside. Always fallback to computedStyle!
-                                let cards = Array.from(document.querySelectorAll('{thread_card_selector()}'));
-                                let logs = [];
-                                if (cards.length > 0) {{
-                                    let parent = cards[0].closest('div');
-                                    while(parent && parent.tagName !== 'BODY') {{
-                                        let style = window.getComputedStyle(parent);
-                                        logs.push(`sH=${{parent.scrollHeight}} cH=${{parent.clientHeight}} sT=${{parent.scrollTop}} ovY=${{style.overflowY}}`);
-                                        if (parent.scrollHeight > parent.clientHeight || ['auto', 'scroll'].includes(style.overflowY)) {{
-                                            return {{scrollTop: parent.scrollTop, found: true, logs: logs}};
-                                        }}
-                                        parent = parent.parentElement;
-                                    }}
-                                }}
-                                return {{scrollTop: -1, found: false, logs: logs}};
-                            }}'''
-                            prev_res = page.evaluate(scroll_script)
-                            prev_scroll = prev_res.get("scrollTop", -1)
-                            
-                            # Fallback back to physical mouse.wheel for virtualization to trigger, but restrict magnitude
-                            page.mouse.move(200, 400)
-                            page.mouse.wheel(0, 300)
-                            page.wait_for_timeout(500)
-                            
-                            new_res = page.evaluate(scroll_script)
-                            new_scroll = new_res.get("scrollTop", -1)
-                            diff = (new_scroll - prev_scroll) if prev_scroll != -1 else 0
-                            
-                            if click_attempts % 10 == 0:
-                                logger.info(f"Stage 2 scroll for '{name}' (attempt {click_attempts}): scrollTop {prev_scroll} -> {new_scroll} (diff: {diff}). Diags: {prev_res.get('logs', [])[:3]}")
-                                
-                            # If no container was found, or diff == 0, fallback to scrollIntoView explicitly
-                            if diff == 0 or prev_scroll == -1:
-                                page.evaluate(f'''() => {{
-                                    let cards = Array.from(document.querySelectorAll('{thread_card_selector()}'));
-                                    if (cards.length > 0) {{
-                                        cards[cards.length - 1].scrollIntoView({{block: 'center', inline: 'nearest'}});
-                                    }}
-                                }}''')
-                                page.wait_for_timeout(500)
-                                
-                        except Exception as e:
-                            logger.error(f"Error executing verified scroll: {e}")
-
-            if not clicked:
-                logger.warning(f"Failed to verify click for thread '{name}' in Stage 2 after {click_attempts} scroll attempts.")
+            if result.status == "click_verify_failed":
                 stats["threads_skipped_click_verify"] += 1
-                continue
-
-            try:
-                page.wait_for_selector('div[aria-label*="Message list container"], div[role="region"][aria-label*="message"]', timeout=10000)
-                page.wait_for_timeout(1000)
-            except Exception:
-                page.wait_for_timeout(4000)
-
-            is_first_thread = (i == 0)
-            fb_url, verified = verify_thread_switch(
-                page, logger, name, prev_fb_url, pre_click_fingerprint, is_first_thread, thread_record
-            )
-            if not verified:
-                stats["threads_skipped_click_verify"] += 1
-                continue
-
-            page.wait_for_timeout(1000)
-            
-            ad_context = extract_ad_context(page)
-            scroll_up_message_panel(page, logger, name)
-
-            messages_list = extract_thread_messages(page)
-            is_valid = validate_thread_integrity(messages_list, logger)
-
-            if len(messages_list) == 0:
-                logger.warning(f"No message bubbles found for thread '{name}'.")
-                continue
-
-            ad_ids = extract_ad_id_labels_arg(page) if callable(extract_ad_id_labels_arg) else extract_ad_id_labels(page)
-
-            enriched_record = enrich_thread_record(
-                thread_record,
-                messages_list,
-                extract_user_info=extract_user_info,
-                detect_city=detect_city,
-                ad_context=ad_context,
-                fb_url=fb_url,
-                ad_ids=ad_ids,
-            )
-            persist_result = persist_thread_record(conn, enriched_record, detect_city=detect_city)
-            stats["new_messages"] += persist_result.get("messages_added", 0) if isinstance(persist_result, dict) else 0
-            stats["threads_processed"] += 1
+            elif result.status == "persisted":
+                stats["new_messages"] += result.messages_added
+                stats["threads_processed"] += 1
+                stats["processed_thread_ids"].append(result.thread_id)
+            # "no_messages" -> no stats change, matching the original `continue`
+            # (a warning was already logged inside process_thread_task).
 
     record_fetch(page_id, stats["new_threads"] + stats["skipped_threads"], stats["new_messages"], conn)
     return stats

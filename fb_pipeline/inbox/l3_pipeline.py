@@ -21,6 +21,19 @@ from fb_pipeline.browser.inbox.thread_list_parser import (
 
 
 
+# code:inbox-thread-identity-001:canonical-id
+def canonical_thread_id(page_id: str, psid: str) -> str:
+    """The id Stage 2 persists for a thread: ``<page_id>_<sha256(psid)[:16]>``.
+
+    Retrospective [2026-09-17]: Stage 1 looked the thread up by a provisional
+    id hashed from the sidebar card (name|preview|time|attrs), which never
+    equals this post-click id, so the "already synced" skip never fired and
+    every run re-crawled all threads in range. Both stages now derive the id
+    from the PSID through this one function.
+    """
+    return f"{page_id}_{hashlib.sha256(str(psid).encode('utf-8')).hexdigest()[:16]}"
+
+
 def _compute_thread_id(page_id: str, visible_thread: dict, name: str, preview_text: str,
                        sidebar_time_text: str, sidebar_identity_key: str, selected_item_id: str, fb_url: str = "") -> str:
     fb_uid = ""
@@ -195,7 +208,16 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
         s = re.sub(r'(\[Quoted Reply/Link\]:\s*)+$', '', s.strip())
         return re.sub(r'\s+', '', s.lower())
 
-    existing_list = [(_normalize(row['sender']), _normalize(row['content'])) for row in existing_msgs]
+    # code:bug-inbox-message-dedup-002
+    # Retrospective [2026-09-17]: "Auto_Page" is assigned at save time (canned
+    # replies, and the AD SOURCE-prefixed first row), while the scraper always
+    # reports "Page". Comparing the raw sender made every such row look new,
+    # so "<name> replied to an ad." was appended again on every crawl.
+    def _normalize_sender(s):
+        s = _normalize(s)
+        return "page" if s == "auto_page" else s
+
+    existing_list = [(_normalize_sender(row['sender']), _normalize(row['content'])) for row in existing_msgs]
     existing_set = set(existing_list)
     
     new_tuples = []
@@ -208,7 +230,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
                 "Khóa học thiền ở Hà Nội" in content or
                 "Thời gian: 20h-21h30" in content):
                 sender = "Auto_Page"
-        new_tuples.append((_normalize(sender), _normalize(content)))
+        new_tuples.append((_normalize_sender(sender), _normalize(content)))
         
     max_overlap = min(len(existing_list), len(new_tuples))
     best_overlap = 0
@@ -231,7 +253,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
                 "Thời gian: 20h-21h30" in content):
                 sender = "Auto_Page"
                 
-        sig = (_normalize(sender), _normalize(content))
+        sig = (_normalize_sender(sender), _normalize(content))
         if sig not in existing_set:
             msg.sender = sender
             msgs_to_insert.append(msg)
