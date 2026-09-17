@@ -139,6 +139,14 @@ def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fi
         logger.info(f"thread_switch_verified method=first_thread_already_loaded thread='{name}'")
         return fb_url, True
 
+    # Retrospective [2026-09-16]: after a direct-URL navigation the panel h1 is
+    # the generic "Inbox" and the sidebar click refreshes nothing, but the URL
+    # carries exactly the PSID we asked for. That is the strongest identity
+    # signal available and must not be vetoed by the missing name match.
+    if url_changed and target_item_id and fb_url == target_item_id:
+        logger.info(f"thread_switch_verified method=selected_item_id_exact thread='{name}'")
+        return fb_url, True
+
     if not panel_refreshed and not url_changed and not name_matched:
         logger.warning(f"thread_switch_failed thread='{name}' reason=no_url_change_no_panel_refresh_no_name_match")
         return "", False

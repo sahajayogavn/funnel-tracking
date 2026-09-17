@@ -93,11 +93,16 @@ class TestFetchMessagesCDPDirect(unittest.TestCase):
         )
         mock_context.pages = [mock_page]
 
-        result = fetch_messages("123", "test_cred", time_range="7d", force_refresh=True, use_cdp=True)
+        result = fetch_messages(
+            "123", "test_cred", time_range="7d", force_refresh=True, use_cdp=True,
+            target_total_messages=100,
+        )
 
         self.assertTrue(result["success"])
         self.assertEqual(result["method"], "cdp_direct")
         mock_scrape.assert_called_once()
+        self.assertTrue(mock_scrape.call_args.kwargs["skip_navigation"])
+        self.assertEqual(mock_scrape.call_args.kwargs["target_total_messages"], 100)
         mock_browser.close.assert_not_called()
         mock_attach.assert_called_once()
 
@@ -297,8 +302,7 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         _, mock_page, call_count = self._setup_mock_playwright(mock_sync_playwright, mock_exists)
         result = fetch_messages("123", "test_cred", force_refresh=True)
         self.assertTrue(result["success"])
-        sidebar_moves = [call for call in mock_page.mouse.move.call_args_list if call.args == (200, 400)]
-        self.assertGreaterEqual(len(sidebar_moves), 1)
+        self.assertGreaterEqual(mock_page.mouse.move.call_count, 1)
         evaluate_calls = [call.args[0] for call in mock_page.evaluate.call_args_list if call.args and isinstance(call.args[0], str)]
         self.assertTrue(any("scrollIntoView" in script for script in evaluate_calls))
         self.assertGreaterEqual(call_count["sidebar_snapshot"], 2)

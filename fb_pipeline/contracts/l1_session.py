@@ -4,6 +4,11 @@ from dataclasses import dataclass
 CDP_URL = "http://127.0.0.1:9222"
 FACEBOOK_DOMAINS = ("facebook.com", "messenger.com")
 
+# code:inbox-parallel-fetch-001:worker-session
+# Tab role prefix for parallel-fetch Stage 2 worker tabs, e.g.
+# "scan_inbox_worker:1", "scan_inbox_worker:2", ...
+WORKER_TAB_ROLE_PREFIX = "scan_inbox_worker:"
+
 
 @dataclass
 class AuthorizedSession:
@@ -54,4 +59,5 @@ __all__ = [
     "FACEBOOK_DOMAINS",
     "FacebookAuthorizationError",
     "PageAccessError",
+    "WORKER_TAB_ROLE_PREFIX",
 ]

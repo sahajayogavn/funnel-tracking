@@ -58,24 +58,22 @@ def extract_visible_threads(page) -> list[dict]:
                 }
             }
 
-            function pickTimeToken(lines) {
-                for (let i = lines.length - 1; i >= 1; i--) {
+            function pickSidebarTimestamp(lines) {
+                const timePattern = /^\d{1,2}:\d{2}\s*(?:am|pm)$/i;
+                const datePattern = /^(?:\d+[smhdw]|today|yesterday|hôm nay|hôm qua|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|th(?:g|áng)?)\s*\d{1,2}(?:(?:,\s*|\s+)\d{4})?|\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|th(?:g|áng)?)(?:(?:,\s*|\s+)\d{4})?|\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?)$/i;
+                for (let i = 1; i < lines.length; i++) {
                     const token = (lines[i] || '').trim();
-                    if (!token) continue;
-                    if (/^\d+[smhdw]$/i.test(token)) return token;
-                    if (/^(today|yesterday|hôm nay|hôm qua)$/i.test(token)) return token;
-                    if (/^(mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(token)) return token;
-                    if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|th(?:g|áng)?)\s*\d{1,2}(?:(?:,\s*|\s+)\d{4})?$/i.test(token)) return token;
-                    if (/^\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|th(?:g|áng)?)(?:(?:,\s*|\s+)\d{4})?$/i.test(token)) return token;
-                    if (/^\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?$/.test(token)) return token;
+                    if (!datePattern.test(token)) continue;
+                    const next = (lines[i + 1] || '').trim();
+                    // Meta renders the date and clock as distinct DOM lines.
+                    if (timePattern.test(next)) return { text: `${token} ${next}`, parts: [token, next] };
+                    return { text: token, parts: [token] };
                 }
-                
-                // Fallback: if no regex strictly matches but the last line is very short (like a date), pick it
-                if (lines.length > 1) {
-                    const lastToken = (lines[lines.length - 1] || '').trim();
-                    if (lastToken.length >= 3 && lastToken.length <= 15) return lastToken;
+                for (let i = 1; i < lines.length; i++) {
+                    const token = (lines[i] || '').trim();
+                    if (timePattern.test(token)) return { text: token, parts: [token] };
                 }
-                return '';
+                return { text: '', parts: [] };
             }
 
             return candidates.map((el, idx) => {
@@ -89,8 +87,11 @@ def extract_visible_threads(page) -> list[dict]:
                 const text = (el.innerText || '').trim();
                 const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
                 const name = lines[0] || '';
-                const sidebarTimeText = pickTimeToken(lines);
-                const previewLines = lines.slice(1).filter(line => line !== sidebarTimeText);
+                const sidebarTimestamp = pickSidebarTimestamp(lines);
+                const sidebarTimeText = sidebarTimestamp.text;
+                const previewLines = lines.slice(1).filter(line => !sidebarTimestamp.parts.includes(line));
+                const timestampEl = el.querySelector('abbr[data-utime]');
+                const sidebarTimestampMs = timestampEl ? Number.parseFloat(timestampEl.getAttribute('data-utime') || '') * 1000 : null;
                 const hrefEl = el.closest('a[href]') || el.querySelector('a[href]');
                 const href = hrefEl ? (hrefEl.getAttribute('href') || '') : '';
                 
@@ -129,6 +130,7 @@ def extract_visible_threads(page) -> list[dict]:
                     lines,
                     previewText: previewLines.join(' ').trim(),
                     sidebarTimeText,
+                    sidebarTimestampMs: Number.isFinite(sidebarTimestampMs) ? sidebarTimestampMs : null,
                     sidebarIdentityKey,
                     selectedItemId,
                     href,
@@ -138,7 +140,8 @@ def extract_visible_threads(page) -> list[dict]:
             }).filter(item => {
                 const normalizedName = item.name.toLocaleLowerCase().replace(/\s+/g, ' ').trim();
                 return normalizedName && !invalidNames.has(normalizedName);
-            });
+            }).sort((a, b) => a.absoluteTop - b.absoluteTop)
+              .map((item, domIndex) => ({ ...item, domIndex }));
         }''',
         {"threadSelector": selector, "invalidThreadNames": list(INVALID_THREAD_NAMES)},
     )
@@ -153,9 +156,41 @@ def parse_sidebar_time_token(token: str, now: datetime | None = None) -> dict:
 
     now = now or datetime.now()
     lower = token.lower()
+
+    # Meta's sidebar renders the calendar label and clock separately in the
+    # DOM. `extract_visible_threads` joins them (for example, "Today 8:56 PM").
+    relative_time_match = re.match(
+        r'^(today|yesterday|hôm nay|hôm qua)\s+(\d{1,2}):(\d{2})\s*([ap]m)$', lower
+    )
+    if relative_time_match:
+        day_token, hour_text, minute_text, ampm = relative_time_match.groups()
+        hour, minute = int(hour_text), int(minute_text)
+        if ampm == 'pm' and hour < 12:
+            hour += 12
+        elif ampm == 'am' and hour == 12:
+            hour = 0
+        days_ago = 1 if day_token in ('yesterday', 'hôm qua') else 0
+        parsed = (now - timedelta(days=days_ago)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return {"kind": "relative_day_time", "token": token, "days_ago": days_ago, "parsed_at": parsed.isoformat(sep=" ", timespec="seconds")}
+
+    # Full absolute labels appear in older message bubbles, e.g.
+    # "Feb 6, 2026, 1:58 PM". Preserve their clock instead of reducing them
+    # to a date-only placeholder.
+    absolute_match = re.match(
+        r'^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2}),?\s+(\d{4}),?\s+(\d{1,2}):(\d{2})\s*([ap]m)$', lower
+    )
+    if absolute_match:
+        month, day, year, hour_text, minute_text, ampm = absolute_match.groups()
+        try:
+            parsed = datetime.strptime(
+                f"{month.title()} {day} {year} {hour_text}:{minute_text} {ampm.upper()}",
+                "%b %d %Y %I:%M %p",
+            )
+            return {"kind": "absolute_time", "token": token, "days_ago": (now - parsed).days, "parsed_at": parsed.isoformat(sep=" ", timespec="seconds")}
+        except ValueError:
+            pass
     
     # 10 mins, 2 hrs, etc (Facebook relative)
-    import re
     rel_match = re.match(r'^(\d+)\s*(m|h|d|w)(?:ins?)?(?:rs?)?(?:s)?(?: ago)?$', lower)
     if not rel_match:
         rel_match = re.match(r'^(\d+)\s*(phút|giờ|ngày|tuần).*$', lower)
@@ -168,7 +203,7 @@ def parse_sidebar_time_token(token: str, now: datetime | None = None) -> dict:
         elif unit.startswith('d') or unit == 'ngày': delta = timedelta(days=val)
         elif unit.startswith('w') or unit == 'tuần': delta = timedelta(weeks=val)
         parsed = now - delta
-        return {"kind": "relative", "token": token, "days_ago": parsed.days, "parsed_at": parsed.isoformat(sep=" ", timespec="seconds")}
+        return {"kind": "relative", "token": token, "days_ago": delta.days, "parsed_at": parsed.isoformat(sep=" ", timespec="seconds")}
 
     # Time only: "4:32 pm" (Today)
     time_match = re.match(r'^(\d{1,2}):(\d{2})\s*([ap]m)$', lower)
@@ -263,17 +298,26 @@ def validate_quick_fetch_cache(visible_threads: list, conn, logger, page_id: str
     
     for vt in threads_to_check:
         thread_record = build_thread_record(page_id, vt)
-        cursor.execute("SELECT last_synced_time FROM threads WHERE id = ?", (thread_record.thread_id,))
+        cursor.execute("SELECT id FROM threads WHERE id = ?", (thread_record.thread_id,))
         row = cursor.fetchone()
         
         if not row:
             logger.info(f"Quick Cache Miss: Thread {thread_record.thread_id} not found in DB.")
             return False
+
+        cursor.execute(
+            "SELECT content, sender FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1",
+            (thread_record.thread_id,)
+        )
+        msg_row = cursor.fetchone()
+        db_orig = msg_row[0] if msg_row else ""
             
         def _normalize(s):
+            if not s: return ""
+            s = re.sub(r'^---\s*\[AD SOURCE\]:.*?---\s*', '', s, flags=re.DOTALL)
+            s = re.sub(r'^(you|bạn):\s*', '', s, flags=re.IGNORECASE)
             return ''.join(c.lower() for c in s if c.isalnum())
             
-        db_orig = row[0] or ""
         ui_orig = thread_record.preview_text or ""
         db_norm = _normalize(db_orig)
         ui_norm = _normalize(ui_orig)
@@ -284,19 +328,15 @@ def validate_quick_fetch_cache(visible_threads: list, conn, logger, page_id: str
                 logger.info(f"Quick Cache Miss: Thread {thread_record.thread_name} preview mismatch. DB_NORM='{db_norm}' vs UI_NORM='{ui_norm}'")
                 return False
         elif db_norm != ui_norm:
-            logger.info(f"Quick Cache Miss: Thread {thread_record.thread_name} preview mismatch (empty). DB='{db_orig}' vs UI='{ui_orig}'")
+            logger.info(f"Quick Cache Miss: Thread {thread_record.thread_name} preview mismatch (empty). DB='{db_norm}' vs UI='{ui_norm}'")
             return False
             
         preview_lower = (thread_record.preview_text or "").strip().lower()
         sender_label = "Customer"
         if preview_lower.startswith("you:") or preview_lower.startswith("bạn:"):
             sender_label = "Admin reply"
-            last_msg_row = cursor.execute(
-                "SELECT sender FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1",
-                (thread_record.thread_id,)
-            ).fetchone()
-            if last_msg_row and last_msg_row[0] != "Page":
-                logger.info(f"Quick Cache Miss: Thread {thread_record.thread_name} has admin preview but DB last msg is {last_msg_row[0]}")
+            if msg_row and msg_row[1] not in ("Page", "Auto_Page"):
+                logger.info(f"Quick Cache Miss: Thread {thread_record.thread_name} has admin preview but DB last msg is {msg_row[1]}")
                 return False
         
         prev_30 = (thread_record.preview_text or "").replace("\n", " ")[:30].strip()

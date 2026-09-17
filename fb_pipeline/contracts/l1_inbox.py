@@ -37,6 +37,7 @@ class ThreadRecord:
     thread_lines: list[str]
     dom_index: int
     sidebar_time_text: str = ""
+    sidebar_timestamp_ms: float | None = None
     sidebar_time_kind: str = ""
     sidebar_identity_key: str = ""
     selected_item_id: str = ""
@@ -49,6 +50,7 @@ class SeekerInfo:
     phone: str | None = None
     email: str | None = None
     city: str = "Unknown"
+    program_code: str | None = None
     lead_stage: str = "Intake"
 
 
@@ -73,6 +75,7 @@ class EnrichedThreadRecord(ThreadRecord):
     ad_ids: list[str] = field(default_factory=list)
     user_info: dict[str, Any] = field(default_factory=dict)
     city: str = "Unknown"
+    program_code: str | None = None
     messages: list[InboxMessage] = field(default_factory=list)
     mas_handoff: MasHandoff | None = None
 
@@ -213,6 +216,32 @@ def detect_city_smart(ad_context: str, page_messages: list,
     return detect_city(ad_context, page_messages)
 
 
+def detect_city_and_program_smart(ad_context: str, page_messages: list,
+                                  thread_name: str = "", customer_messages: list | None = None) -> dict:
+    """LLM-first city/class selection, with a safe keyword-only fallback."""
+    import os
+    if os.environ.get("OPENAI_API_BASE", "") and os.environ.get("OPENAI_API_KEY", ""):
+        try:
+            from fb_pipeline.contracts.l1_city_llm import detect_city_llm
+            messages = customer_messages or page_messages
+            customer_texts = [
+                m.get("content", "") or m.get("text", "") for m in messages
+                if m.get("sender") == "Customer" and (m.get("content", "") or m.get("text", ""))
+            ]
+            page_texts = [
+                m.get("content", "") or m.get("text", "") for m in page_messages
+                if m.get("sender") == "Page" and (m.get("content", "") or m.get("text", ""))
+            ]
+            model = os.environ.get("ADK_MODEL", "openai/gpt-5.4").removeprefix("openai/")
+            result = detect_city_llm(thread_name, customer_texts, page_texts, ad_context,
+                                     os.environ["OPENAI_API_BASE"], os.environ["OPENAI_API_KEY"], model)
+            if result.get("city") != "Unknown":
+                return {"city": result["city"], "program_code": result.get("program_code")}
+        except Exception:
+            pass
+    return {"city": detect_city(ad_context, page_messages), "program_code": None}
+
+
 __all__ = [
     "CITY_KEYWORDS",
     "EnrichedThreadRecord",
@@ -222,8 +251,8 @@ __all__ = [
     "ThreadRecord",
     "detect_city",
     "detect_city_smart",
+    "detect_city_and_program_smart",
     "extract_user_info",
     "parse_ad_ids",
     "parse_page_id",
 ]
-

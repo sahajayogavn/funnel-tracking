@@ -144,6 +144,9 @@ class TestMasSchemaMigrations(unittest.TestCase):
         user_cols = {
             row["name"] for row in self.conn.execute("PRAGMA table_info(users)").fetchall()
         }
+        thread_cols = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(threads)").fetchall()
+        }
         auto_reply_cols = {
             row["name"] for row in self.conn.execute("PRAGMA table_info(auto_replies)").fetchall()
         }
@@ -153,6 +156,8 @@ class TestMasSchemaMigrations(unittest.TestCase):
         self.assertIn("temperature", user_cols)
         self.assertIn("last_warmup_at", user_cols)
         self.assertIn("warmup_count", user_cols)
+        self.assertIn("inbox_sort_index", thread_cols)
+        self.assertIn("last_message_at", thread_cols)
         self.assertIn("cool_step", user_cols)
 
     def test_setup_database_migrates_reactions_to_live_only_uniqueness(self):

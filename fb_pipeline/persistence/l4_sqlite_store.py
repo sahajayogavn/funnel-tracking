@@ -47,6 +47,40 @@ def _table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
     return row is not None
 
 
+# code:bug-action-queue-duplicate-proposal-001:migration
+def _dedupe_active_action_queue(cursor: sqlite3.Cursor):
+    """One-time cleanup, run before creating idx_action_queue_one_active_per_target:
+    older DBs may already have more than one live (non-terminal) proposal for the
+    same target_id+queue_type+payload.type, since nothing enforced that before this
+    unique index existed. For each such group, keep the most authoritative row
+    (executing/approved beats pending, ties broken by most recent id) and reject
+    the rest as superseded duplicates, so the CREATE UNIQUE INDEX below succeeds."""
+    if not _table_exists(cursor, "action_queue"):
+        return
+    rows = cursor.execute('''
+        SELECT id, target_id, queue_type, status,
+               COALESCE(json_extract(payload_json, '$.type'), '') AS ptype
+        FROM action_queue
+        WHERE target_id IS NOT NULL AND status NOT IN ('executed', 'rejected', 'failed')
+        ORDER BY target_id, queue_type, ptype,
+                 CASE status WHEN 'executing' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,
+                 id DESC
+    ''').fetchall()
+    seen = set()
+    to_reject = []
+    for row in rows:
+        key = (row[1], row[2], row[4])
+        if key in seen:
+            to_reject.append(row[0])
+        else:
+            seen.add(key)
+    for qid in to_reject:
+        cursor.execute('''
+            UPDATE action_queue SET status='rejected', error_text='superseded_duplicate', updated_at=datetime('now')
+            WHERE id=?
+        ''', (qid,))
+
+
 # code:arch-schema-002
 
 def migrate_schema_v2(conn: sqlite3.Connection):
@@ -61,6 +95,9 @@ def migrate_schema_v2(conn: sqlite3.Connection):
             ("last_warmup_at", "last_warmup_at DATETIME"),
             ("warmup_count", "warmup_count INTEGER DEFAULT 0"),
             ("cool_step", "cool_step INTEGER DEFAULT 0"),
+            ("program_code", "program_code TEXT"),
+            ("classification_proof", "classification_proof TEXT"),
+            ("classification_verified_at", "classification_verified_at DATETIME"),
         ],
         "auto_replies": [
             ("dry_run", "dry_run BOOLEAN DEFAULT 1"),
@@ -107,9 +144,16 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             page_id TEXT,
             thread_name TEXT,
             last_synced_time TEXT,
+            inbox_sort_index INTEGER,
+            last_message_at DATETIME,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # The DOM position is Meta's own inbox ordering.  Keep it separately from
+    # sync time and message display labels, both of which are not sortable
+    # conversation timestamps.
+    _ensure_column(cursor, "threads", "inbox_sort_index", "inbox_sort_index INTEGER")
+    _ensure_column(cursor, "threads", "last_message_at", "last_message_at DATETIME")
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,6 +222,9 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             email TEXT,
             fb_url TEXT,
             city TEXT DEFAULT 'Unknown',
+            program_code TEXT,
+            classification_proof TEXT,
+            classification_verified_at DATETIME,
             lead_stage TEXT DEFAULT 'Intake',
             first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
             last_interaction DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -188,6 +235,9 @@ def setup_database(conn: sqlite3.Connection, logger=None):
     # NOTE: SQLite forbids ALTER TABLE ADD COLUMN with non-constant defaults (e.g. CURRENT_TIMESTAMP),
     # so we use a plain DATETIME (NULL default) here for migration compatibility.
     _ensure_column(cursor, "users", "last_synced_at", "last_synced_at DATETIME")
+    _ensure_column(cursor, "users", "program_code", "program_code TEXT")
+    _ensure_column(cursor, "users", "classification_proof", "classification_proof TEXT")
+    _ensure_column(cursor, "users", "classification_verified_at", "classification_verified_at DATETIME")
     _ensure_column(cursor, "users", "temperature", "temperature TEXT DEFAULT 'warm'")
     _ensure_column(cursor, "users", "last_warmup_at", "last_warmup_at DATETIME")
     _ensure_column(cursor, "users", "warmup_count", "warmup_count INTEGER DEFAULT 0")
@@ -373,6 +423,16 @@ def setup_database(conn: sqlite3.Connection, logger=None):
         CREATE INDEX IF NOT EXISTS idx_action_queue_fifo
         ON action_queue(queue_type, status, id)
     ''')
+    # A target must never have two live (non-terminal) proposals of the same
+    # kind, e.g. two 'reply_message' proposals for one thread. COALESCE(...,'')
+    # collapses NULL payload.type to '' so reply_message rows (which have no
+    # 'type') collide correctly instead of SQLite treating NULLs as distinct.
+    _dedupe_active_action_queue(cursor)
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_action_queue_one_active_per_target
+        ON action_queue(target_id, queue_type, COALESCE(json_extract(payload_json, '$.type'), ''))
+        WHERE status NOT IN ('executed', 'rejected', 'failed')
+    ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS telegram_offset (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -486,6 +546,13 @@ def setup_comment_database(conn: sqlite3.Connection):
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_action_queue_fifo ON action_queue(queue_type, status, id)')
+    # See matching comment in setup_database(): one live proposal per target+kind.
+    _dedupe_active_action_queue(cursor)
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_action_queue_one_active_per_target
+        ON action_queue(target_id, queue_type, COALESCE(json_extract(payload_json, '$.type'), ''))
+        WHERE status NOT IN ('executed', 'rejected', 'failed')
+    ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS telegram_offset (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -525,6 +592,8 @@ def get_db_connection(memory_dir: str = None, logger=None) -> sqlite3.Connection
     db_path = os.path.join(memory_dir, "frankensqlite.db")
     conn = sqlite3.connect(db_path)
     conn.execute('PRAGMA journal_mode=WAL;')
+    # code:inbox-parallel-fetch-001:db-busy-timeout
+    conn.execute('PRAGMA busy_timeout=30000;')
     conn.row_factory = sqlite3.Row
     setup_database(conn, logger=logger)
     return conn
@@ -537,9 +606,38 @@ def get_comment_db_connection(memory_dir: str = None) -> sqlite3.Connection:
     db_path = os.path.join(memory_dir, "frankensqlite.db")
     conn = sqlite3.connect(db_path)
     conn.execute('PRAGMA journal_mode=WAL;')
+    # code:inbox-parallel-fetch-001:db-busy-timeout
+    conn.execute('PRAGMA busy_timeout=30000;')
     conn.row_factory = sqlite3.Row
     setup_comment_database(conn)
     return conn
+
+
+# code:inbox-parallel-fetch-001:psid-hint
+def resolve_psid_hint(conn: sqlite3.Connection, page_id: str, thread_name: str) -> str:
+    """Resolve a cached PSID hint for a thread name, unique to the page.
+
+    Returns the ``users.fb_url`` value only when exactly one distinct,
+    non-empty, numeric ``fb_url`` matches ``(thread_name, page_id)`` -- an
+    ambiguous (same-name) or missing match returns "".
+    """
+    if not thread_name:
+        return ""
+    rows = conn.execute(
+        "SELECT fb_url FROM users WHERE thread_name = ? AND thread_id LIKE ?",
+        (thread_name, f"{page_id}_%"),
+    ).fetchall()
+
+    distinct_urls = set()
+    for row in rows:
+        fb_url = row["fb_url"] if isinstance(row, sqlite3.Row) else row[0]
+        fb_url = (fb_url or "").strip()
+        if fb_url and fb_url.isdigit():
+            distinct_urls.add(fb_url)
+
+    if len(distinct_urls) == 1:
+        return next(iter(distinct_urls))
+    return ""
 
 
 def log_mas_decision(

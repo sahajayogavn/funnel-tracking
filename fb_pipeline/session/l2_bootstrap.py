@@ -1,4 +1,5 @@
 import json
+import threading
 from urllib.parse import parse_qs, urlparse
 
 from fb_pipeline.contracts.l1_session import (
@@ -8,7 +9,15 @@ from fb_pipeline.contracts.l1_session import (
     FACEBOOK_DOMAINS,
     FacebookAuthorizationError,
     PageAccessError,
+    WORKER_TAB_ROLE_PREFIX,
 )
+
+# code:inbox-parallel-fetch-001:worker-session
+# Tab lookup/creation enumerates and evaluates on every page in the CDP
+# context, which races when several worker threads attach concurrently.
+# Serialize the whole attach path (not just the tab-role scan) under one
+# module-level lock.
+_ATTACH_LOCK = threading.Lock()
 
 
 def connect_to_cdp_browser(playwright, cdp_url: str = CDP_URL):
@@ -34,48 +43,124 @@ def attach_to_authorized_session(playwright, page_id: str, inbox_url: str,
     ``scan_comments``, and any number of ``outbound:<worker-id>`` tabs.
     The marker lives in the page DOM and therefore survives scheduler cycles
     while the browser remains open.
+
+    The whole attach path is serialized under a module-level lock
+    (``_ATTACH_LOCK``): it enumerates and evaluates on every page in the CDP
+    context, which races when several worker threads attach concurrently
+    (`docs/architect/inbox-fetch-pipeline.md` §6).
     """
-    browser = connect_to_cdp_browser(playwright, cdp_url)
-    context = browser.contexts[0]
+    with _ATTACH_LOCK:
+        browser = connect_to_cdp_browser(playwright, cdp_url)
+        context = browser.contexts[0]
 
-    page = None
-    if tab_role:
-        for candidate in context.pages:
-            try:
-                if candidate.evaluate("document.documentElement.dataset.masTabRole") == tab_role:
-                    page = candidate
-                    break
-            except Exception:
-                continue
-    if page:
-        selected_existing_tab, created_tab = True, False
-    elif prefer_new_tab:
-        page = context.new_page()
-        selected_existing_tab, created_tab = False, True
-    else:
-        page = context.pages[0] if context.pages else context.new_page()
-        selected_existing_tab, created_tab = bool(context.pages), not bool(context.pages)
+        page = None
+        if tab_role:
+            for candidate in context.pages:
+                try:
+                    if candidate.evaluate("document.documentElement.dataset.masTabRole") == tab_role:
+                        page = candidate
+                        break
+                except Exception:
+                    continue
+        if page:
+            selected_existing_tab, created_tab = True, False
+        elif prefer_new_tab:
+            page = context.new_page()
+            selected_existing_tab, created_tab = False, True
+        else:
+            # Reuse the already loaded inbox for the requested Page when possible.
+            # This avoids a second Meta navigation during CDP recovery, which can
+            # otherwise time out even though a healthy authenticated inbox tab is
+            # still open.
+            # Retrospective [2026-09-16]: role tabs (scan_inbox_worker:<i>,
+            # outbound:<id>, ...) share the same inbox URL. Picking one here
+            # made the fetch orchestrator and a Stage 2 worker drive the same
+            # tab; the worker's direct-URL goto then destroyed the
+            # orchestrator's Stage 1 execution context (live 90d run).
+            unroled = [candidate for candidate in context.pages if not _tab_role_of(candidate)]
+            page = next((candidate for candidate in unroled if inbox_url in (candidate.url or "")), None)
+            page = page or (unroled[0] if unroled else None)
+            if page is None:
+                page = context.new_page()
+                selected_existing_tab, created_tab = False, True
+            else:
+                selected_existing_tab, created_tab = True, False
 
-    page.goto(inbox_url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(3000)
+        if created_tab or inbox_url not in (page.url or ""):
+            # Meta frequently delays DOMContentLoaded long after the inbox shell is
+            # usable. Commit-level navigation lets the caller's DOM readiness check
+            # decide when scraping can safely begin.
+            page.goto(inbox_url, wait_until="commit", timeout=30000)
+            page.wait_for_timeout(3000)
 
-    if tab_role:
-        page.evaluate("role => { document.documentElement.dataset.masTabRole = role; document.title = `[MAS:${role}] ${document.title}`; }", tab_role)
+        if tab_role:
+            page.evaluate("role => { document.documentElement.dataset.masTabRole = role; document.title = `[MAS:${role}] ${document.title}`; }", tab_role)
 
-    ensure_facebook_authorized(page)
-    ensure_page_access(page, page_id)
+        ensure_facebook_authorized(page)
+        ensure_page_access(page, page_id)
 
-    return AuthorizedSession(
-        browser=browser,
-        context=context,
-        page=page,
+        return AuthorizedSession(
+            browser=browser,
+            context=context,
+            page=page,
+            cdp_url=cdp_url,
+            page_id=page_id,
+            inbox_url=inbox_url,
+            selected_existing_tab=selected_existing_tab,
+            created_tab=created_tab,
+            tab_role=tab_role,
+        )
+
+
+# code:inbox-parallel-fetch-001:worker-session
+def stamp_tab_role(page, tab_role: str | None) -> None:
+    """Re-apply the DOM role marker on *page*.
+
+    Retrospective [2026-09-16]: the marker lives in ``document.documentElement``
+    and is wiped by every full navigation (``page.goto``). The direct-URL locate
+    (L0) navigates the worker tab, so without re-stamping each run would fail
+    to find its role tabs and create new ones (observed: +2 tabs per run).
+    """
+    if not tab_role:
+        return
+    try:
+        page.evaluate(
+            "role => { document.documentElement.dataset.masTabRole = role;"
+            " if (!document.title.startsWith('[MAS:')) document.title = `[MAS:${role}] ${document.title}`; }",
+            tab_role,
+        )
+    except Exception:
+        pass
+
+
+# code:inbox-parallel-fetch-001:worker-session
+def attach_worker_session(playwright, page_id: str, inbox_url: str, worker_index: int,
+                           cdp_url: str = CDP_URL) -> AuthorizedSession:
+    """Attach a parallel-fetch Stage 2 worker to its own long-lived role tab.
+
+    Thin wrapper over ``attach_to_authorized_session`` with
+    ``prefer_new_tab=True`` and ``tab_role="scan_inbox_worker:<worker_index>"``.
+    The attach itself is serialized by the shared ``_ATTACH_LOCK`` inside
+    ``attach_to_authorized_session``.
+    """
+    tab_role = f"{WORKER_TAB_ROLE_PREFIX}{worker_index}"
+    return attach_to_authorized_session(
+        playwright,
+        page_id,
+        inbox_url,
         cdp_url=cdp_url,
-        page_id=page_id,
-        inbox_url=inbox_url,
-        selected_existing_tab=selected_existing_tab,
-        created_tab=created_tab,
+        prefer_new_tab=True,
         tab_role=tab_role,
     )
+
+
+def _tab_role_of(page) -> str:
+    """Return the DOM role marker of *page* ("" when unmarked or unreadable)."""
+    try:
+        role = page.evaluate("document.documentElement.dataset.masTabRole || ''")
+    except Exception:
+        return ""
+    return role if isinstance(role, str) else ""
 
 
 def ensure_facebook_authorized(page):
