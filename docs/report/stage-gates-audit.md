@@ -1,5 +1,7 @@
 # Stage Gates Audit
 
+**Universal ID:** `doc:stage-gates-audit-001`
+
 ## Scope
 
 Audit of whether the stage-transition QA gates described in `memory/mas_strategy.md` are implemented in code/tests, with cross-checks against `docs/ARCHITECTURE.md` and `docs/architecture-decisions.md`.

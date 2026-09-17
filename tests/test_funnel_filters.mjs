@@ -30,7 +30,7 @@ console.log('✓ FUNNEL_STORAGE_KEY is exported as sahaja_funnel_filters');
 
 // Check DEFAULT_FUNNEL_FILTERS
 assert(
-  funnelFiltersContent.includes("export const DEFAULT_FUNNEL_FILTERS: FunnelFilters = { city: 'all', dateRange: 'all' }"),
+  funnelFiltersContent.includes("export const DEFAULT_FUNNEL_FILTERS: FunnelFilters = { city: 'all', programCode: 'all', dateRange: 'all' }"),
   'DEFAULT_FUNNEL_FILTERS must default to city: all, dateRange: all'
 );
 console.log('✓ DEFAULT_FUNNEL_FILTERS is city: all, dateRange: all');

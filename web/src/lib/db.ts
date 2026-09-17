@@ -27,7 +27,11 @@ export function getDb(): Database.Database {
   }
 
   if (!globalThis.__db) {
-    globalThis.__db = new Database(DB_PATH, { fileMustExist: true });
+    // The Python worker and the Next.js process share this WAL database. Give
+    // short worker transactions time to finish instead of surfacing SQLITE_BUSY
+    // to the MAS controls after better-sqlite3's 5-second default timeout.
+    globalThis.__db = new Database(DB_PATH, { fileMustExist: true, timeout: 30_000 });
+    globalThis.__db.pragma('busy_timeout = 30000');
     globalThis.__db.pragma('journal_mode = WAL');
   }
   

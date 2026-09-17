@@ -46,6 +46,10 @@ export default function RootLayout({
               <span className="nav-icon">✅</span>
               Approval Queues
             </Link>
+            <Link href="/llm" className="nav-link">
+              <span className="nav-icon">🔬</span>
+              LLM Observability
+            </Link>
           </nav>
         </aside>
         <main className="main-content">

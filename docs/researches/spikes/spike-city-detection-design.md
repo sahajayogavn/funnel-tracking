@@ -1,6 +1,6 @@
 # Spike: City Detection for Individual Seekers
 
-> **ID**: `doc:spike-city-detect-001`
+**Universal ID:** `doc:spike-city-detect-001`
 > **Date**: 2026-03-21
 > **Status**: Research Complete — Ready for Review
 > **Goal**: Redesign how city is assigned to each individual seeker who contacts the Facebook page, replacing the current ad-level keyword-matching approach with per-user, context-aware detection.

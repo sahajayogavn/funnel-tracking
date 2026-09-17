@@ -150,7 +150,7 @@ class TestL3PipelineEnrichment(unittest.TestCase):
         )
 
         # Verify enriched record
-        self.assertEqual(enriched.city, "Hà Nội")
+        self.assertIsNone(enriched.city)
         self.assertEqual(enriched.user_info["phone"], "0901234567")
         self.assertEqual(enriched.fb_url, "100001005716854")
         self.assertEqual(enriched.ad_ids, ["6930299765389"])
@@ -160,7 +160,7 @@ class TestL3PipelineEnrichment(unittest.TestCase):
         self.assertIsNotNone(handoff)
         self.assertEqual(handoff.thread_name, "Hung Bui")
         self.assertEqual(handoff.seeker.name, "Hung Bui")
-        self.assertEqual(handoff.seeker.city, "Hà Nội")
+        self.assertIsNone(handoff.seeker.city)
         self.assertEqual(handoff.seeker.phone, "0901234567")
         self.assertEqual(len(handoff.messages), 8)
 
@@ -232,7 +232,7 @@ class TestL4PersistenceAndReadback(unittest.TestCase):
 
         # Check persist result
         self.assertEqual(self.persist_result["messages_added"], 8)
-        self.assertEqual(self.persist_result["city"], "Hà Nội")
+        self.assertIsNone(self.persist_result["city"])
         self.assertEqual(self.persist_result["ad_ids_count"], 1)
 
     def test_persist_and_lookup_seeker(self):
@@ -256,7 +256,7 @@ class TestL4PersistenceAndReadback(unittest.TestCase):
             self.assertEqual(result["status"], "found")
             self.assertEqual(result["name"], "Hung Bui")
             self.assertEqual(result["phone"], "0901234567")
-            self.assertEqual(result["city"], "Hà Nội")
+            self.assertIsNone(result["city"])
         finally:
             store_mod.get_db_connection = original_get_db
 
@@ -336,29 +336,27 @@ class TestL4PersistenceAndReadback(unittest.TestCase):
             importlib.reload(st_mod)
             importlib.reload(ft_mod)
 
-            # First verify it's unreplied
+            # 1. First verify it's unreplied
             result = st_mod.find_unreplied_threads("1548373332058326")
             self.assertGreater(result["count"], 0)
 
-            # Find the latest customer message timestamp for this thread
+            # 2. Find the latest customer message seq for this thread
             row = self.conn.execute(
-                "SELECT MAX(message_timestamp) AS ts FROM messages "
+                "SELECT MAX(seq) AS max_seq FROM messages "
                 "WHERE thread_id = ? AND sender = 'Customer'",
                 (self.thread_id,)
             ).fetchone()
-            latest_customer_ts = row["ts"]
+            latest_customer_seq = row["max_seq"]
 
-            # Log auto-reply with customer_message_timestamp for acknowledgement
-            log_result = ft_mod.log_auto_reply(
-                self.thread_id,
-                "Chào bạn! Cảm ơn bạn đã quan tâm.",
-                agent_name="responder",
-                dry_run=False,
-                customer_message_timestamp=latest_customer_ts,
+            # 3. Enqueue action to mark it replied
+            import json
+            self.conn.execute(
+                "INSERT INTO telegram_hitl_queue (route, thread_id, telegram_message_id, payload_json, status) VALUES (?, ?, ?, ?, 'pending')",
+                ("inbox", self.thread_id, "msg_123", json.dumps({"last_message_seq": latest_customer_seq}))
             )
-            self.assertEqual(log_result["status"], "logged")
+            self.conn.commit()
 
-            # Now it should no longer be unreplied
+            # 4. Now it should no longer be unreplied
             result2 = st_mod.find_unreplied_threads("1548373332058326")
             thread_ids = [t["thread_id"] for t in result2.get("threads", [])]
             self.assertNotIn(self.thread_id, thread_ids)

@@ -42,7 +42,7 @@ def send_proposal_to_telegram(route: str, thread_id: str, proposed_text: str, pa
         resp = requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
             json={"chat_id": chat_id, "text": f"[{route.upper()}] Proposal:\n{proposed_text}"},
-            timeout=10
+            timeout=30
         )
         resp.raise_for_status()
         data = resp.json()
@@ -78,7 +78,7 @@ def send_telegram_reaction(message_id: str, emoji: str = "💯") -> bool:
                 "message_id": int(message_id),
                 "reaction": [{"type": "emoji", "emoji": emoji}]
             },
-            timeout=10
+            timeout=30
         )
         resp.raise_for_status()
         return True
@@ -129,7 +129,7 @@ def poll_telegram_updates():
         resp = requests.get(
             f"https://api.telegram.org/bot{bot_token}/getUpdates",
             params={"offset": offset, "timeout": 5, "allowed_updates": '["message","message_reaction"]'},
-            timeout=10
+            timeout=30
         )
         if not resp.ok:
             logger.warning(f"Telegram getUpdates failed: {resp.text}")

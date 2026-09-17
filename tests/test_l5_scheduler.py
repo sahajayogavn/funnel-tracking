@@ -173,6 +173,55 @@ class TestSetupSchedule:
         assert "10min" in types
 
 
+class TestWarmupObservability:
+    def test_warmup_not_in_all_routes(self):
+        from tools.l5_scheduler import ALL_ROUTES
+        assert "warmup" not in ALL_ROUTES
+        assert "event" in ALL_ROUTES
+
+    def test_run_scheduler_loop_startup_behavior(self, monkeypatch):
+        import tools.l5_scheduler as sched_mod
+        
+        # We want to mock schedule and track which jobs were run
+        class MockJob:
+            def __init__(self, unit):
+                self.unit = unit
+                self.run_called = False
+                
+            def run(self):
+                self.run_called = True
+                
+        job_min = MockJob('minutes')
+        job_sec = MockJob('seconds')
+        job_day = MockJob('day')
+        
+        class MockSchedule:
+            jobs = [job_min, job_sec, job_day]
+            @staticmethod
+            def run_pending():
+                pass
+
+        monkeypatch.setattr(sched_mod, "schedule", MockSchedule)
+        
+        # We need to exit the loop immediately
+        monkeypatch.setattr(sched_mod, "_shutdown_requested", True)
+        
+        # Actually it's a global in the module, better way to stop it:
+        # Before we run, set the global _shutdown_requested = False
+        # Then inside schedule.run_pending() we can set it to True
+        def mock_run_pending():
+            sched_mod._shutdown_requested = True
+            
+        MockSchedule.run_pending = staticmethod(mock_run_pending)
+        sched_mod._shutdown_requested = False
+        
+        sched_mod.run_scheduler_loop()
+        
+        assert job_min.run_called is True
+        assert job_sec.run_called is True
+        assert job_day.run_called is False
+
+
 class TestReactionHeuristic:
     def test_grateful_message_returns_love(self):
         from tools.l5_scheduler_routes import _select_reaction_heuristic

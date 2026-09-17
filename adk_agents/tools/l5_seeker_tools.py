@@ -110,41 +110,22 @@ def find_unreplied_threads(page_id: str, limit: int = 10) -> dict:
         conn = get_db_connection()
 
         rows = conn.execute('''
-            WITH thread_latest_seq AS (
-                SELECT thread_id, MAX(seq) as max_seq
-                FROM messages
-                GROUP BY thread_id
+            WITH last AS (
+                SELECT thread_id, MAX(seq) AS max_seq FROM messages GROUP BY thread_id
             ),
-            latest_message_details AS (
-                SELECT
-                    m.thread_id,
-                    m.sender,
-                    m.message_timestamp,
-                    m.timestamp AS recorded_at
-                FROM messages m
-                JOIN thread_latest_seq tls ON m.thread_id = tls.thread_id AND m.seq = tls.max_seq
+            lm AS (
+                SELECT m.thread_id, m.sender, m.seq, m.message_timestamp, m.timestamp AS recorded_at 
+                FROM messages m JOIN last ON last.thread_id=m.thread_id AND last.max_seq=m.seq
             ),
-            latest_acknowledgements AS (
-                SELECT
-                    ar.thread_id,
-                    MAX(ar.customer_message_timestamp) AS latest_acknowledged_customer_message_timestamp
-                FROM auto_replies ar
-                WHERE ar.customer_message_timestamp IS NOT NULL
-                GROUP BY ar.thread_id
+            proposed AS (
+                SELECT thread_id, MAX(CAST(json_extract(payload_json,'$.last_message_seq') AS INTEGER)) AS seq
+                FROM telegram_hitl_queue WHERE route='inbox' GROUP BY thread_id
             )
-            SELECT
-                t.id,
-                t.thread_name
-            FROM threads t
-            JOIN latest_message_details lmd ON lmd.thread_id = t.id
-            LEFT JOIN latest_acknowledgements la ON la.thread_id = t.id
-            WHERE t.page_id = ?
-              AND lmd.sender NOT IN ('Page')
-              AND (\n                    la.latest_acknowledged_customer_message_timestamp IS NULL
-                    OR lmd.message_timestamp != la.latest_acknowledged_customer_message_timestamp
-              )
-            ORDER BY lmd.recorded_at DESC
-            LIMIT ?
+            SELECT t.id, t.thread_name
+            FROM lm JOIN threads t ON t.id=lm.thread_id
+            LEFT JOIN proposed p ON p.thread_id=lm.thread_id
+            WHERE t.page_id=? AND lm.sender='Customer' AND (p.seq IS NULL OR p.seq < lm.seq)
+            ORDER BY t.inbox_sort_index LIMIT ?;
         ''', (page_id, limit)).fetchall()
         conn.close()
 

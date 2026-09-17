@@ -1,5 +1,7 @@
 # Audit Test Plan — MAS Strategy vs Architecture Alignment
 
+**Universal ID:** `doc:mas-strategy-test-plan-001`
+
 Source set:
 - `/Users/steve/sahajayogavn/funnel-tracking/docs/architecture-decisions.md`
 - `/Users/steve/sahajayogavn/funnel-tracking/docs/ARCHITECTURE.md`

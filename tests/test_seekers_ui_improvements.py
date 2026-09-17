@@ -31,14 +31,15 @@ def test_seekers_table_last_message_datetime_sorting():
     assert "useState<SortField>('lastMessageDate')" in content or "useState('lastMessageDate')" in content
 
 def test_seekers_table_recent_messages_bounded_scrollable():
-    table_file = ROOT_DIR / "web" / "src" / "components" / "seekers-table.tsx"
-    content = table_file.read_text(encoding="utf-8")
+    sidebar_file = ROOT_DIR / "web" / "src" / "components" / "seeker-sidebar.tsx"
+    content = sidebar_file.read_text(encoding="utf-8")
 
     # Bounded scrollable area for Recent Messages
-    assert "sidebar-recent-messages" in content or "maxHeight" in content
-    assert "overflowY: 'auto'" in content or 'overflowY: "auto"' in content
+    assert "sidebar-recent-messages" in content
+    styles = (ROOT_DIR / "web" / "src" / "app" / "globals.css").read_text(encoding="utf-8")
+    assert "overflow-y: auto" in styles
     # Ensures max-height constraint is present on recent messages container
-    assert re.search(r"maxHeight:\s*'2[0-9]{2}px'", content) is not None, "Recent messages must have bounded maxHeight"
+    assert re.search(r"\.sidebar-recent-messages\s*\{[^}]*max-height:\s*2[0-9]{2}px", styles, re.S) is not None, "Recent messages must have bounded max-height"
 
 def test_seekers_table_removes_duplicated_summary_info():
     table_file = ROOT_DIR / "web" / "src" / "components" / "seekers-table.tsx"
@@ -51,8 +52,8 @@ def test_seekers_table_removes_duplicated_summary_info():
     assert "First / Last Msg" not in content, "Duplicated First / Last Msg must not exist in short preview"
 
 def test_short_preview_uses_compact_journey_treatment():
-    table_file = ROOT_DIR / "web" / "src" / "components" / "seekers-table.tsx"
-    content = table_file.read_text(encoding="utf-8")
+    sidebar_file = ROOT_DIR / "web" / "src" / "components" / "seeker-sidebar.tsx"
+    content = sidebar_file.read_text(encoding="utf-8")
 
     # Sidebar must pass compact={true} to SeekerJourneyTimeline
     assert "<SeekerJourneyTimeline" in content
@@ -94,3 +95,25 @@ def test_funnel_filters_exports_parse_real_date():
 
     assert "export function parseRealDate" in content
     assert "isDateInRange" in content
+
+def test_seekers_table_icons_before_name_single_line():
+    table_file = ROOT_DIR / "web" / "src" / "components" / "seekers-table.tsx"
+    assert table_file.exists(), "seekers-table.tsx must exist"
+    content = table_file.read_text(encoding="utf-8")
+
+    # 1. Icons are wrapped in seeker-name-cell container
+    assert "seeker-name-cell" in content
+
+    # 2. Both profileUrl and inboxUrl icons appear before seeker-name-link in DOM order
+    profile_icon_pos = content.index('className="seeker-profile-icon"')
+    inbox_icon_pos = content.index('className="seeker-profile-icon seeker-inbox-icon"')
+    name_link_pos = content.index('className="seeker-name-link"')
+    assert profile_icon_pos < name_link_pos, "FB profile icon must be placed before name link"
+    assert inbox_icon_pos < name_link_pos, "FB message icon must be placed before name link"
+
+    # 3. CSS ensures icons and name stay on the same line without breaking
+    css_file = ROOT_DIR / "web" / "src" / "app" / "globals.css"
+    css_content = css_file.read_text(encoding="utf-8")
+    assert ".seeker-name-cell" in css_content
+    assert "white-space: nowrap" in css_content
+

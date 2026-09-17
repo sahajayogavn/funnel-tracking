@@ -132,7 +132,7 @@ class TestFetchMessagesHeadless(unittest.TestCase):
 
     def _setup_mock_playwright(self, mock_sync_playwright, mock_exists,
                                thread_text="Test User\nThis is a preview.",
-                               js_messages=None, ad_context=""):
+                               js_messages=None, ad_context="", visible_threads=None):
         mock_exists.return_value = True
         mock_p = MagicMock()
         mock_sync_playwright.return_value.__enter__.return_value = mock_p
@@ -154,22 +154,29 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         mock_thread_locator.nth.return_value = mock_thread
         mock_page.locator.return_value = mock_thread_locator
 
+        if visible_threads is None:
+            visible_threads = [{"name": "User A", "text": "Preview", "id": "selected123"}]
+
         if js_messages is None:
             js_messages = [
                 {"sender": "Customer", "text": "Lớp học có mất phí không?", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Sat 7:19 PM"},
                 {"sender": "Page", "text": "Dạ hoàn toàn miễn phí ạ", "htmlStr": "<div>...</div>", "bg": "rgb(0, 132, 255)", "timestamp": "Sat 7:19 PM"},
             ]
 
+        t_name = visible_threads[0].get("name", thread_text.split('\n')[0].strip()) if visible_threads else thread_text.split('\n')[0].strip()
+        t_text = visible_threads[0].get("text", thread_text) if visible_threads else thread_text
+        t_id = visible_threads[0].get("id", "9876") if visible_threads else "9876"
+
         mock_thread_data = [{
             "domIndex": 0,
-            "name": thread_text.split('\n')[0].strip(),
-            "text": thread_text,
-            "lines": [l.strip() for l in thread_text.split('\n') if l.strip()] + ["Today"],
+            "name": t_name,
+            "text": t_text,
+            "lines": [l.strip() for l in t_text.split('\n') if l.strip()] + ["Today"],
             "previewText": "This is a preview.",
             "sidebarTimeText": "Today",
             "sidebarTimeKind": "today",
             "sidebarIdentityKey": "thread-1",
-            "selectedItemId": "9876",
+            "selectedItemId": t_id,
         }]
 
         mock_mouse = MagicMock()
@@ -181,15 +188,16 @@ class TestFetchMessagesHeadless(unittest.TestCase):
             if "scrollIntoView" in script and "c.click()" in script:
                 return True
             if isinstance(args, dict) and args.get("threadSelector"):
-                if "pickTimeToken" in script:
+                if "candidates.length > 0" in script:
                     call_count["collect"] += 1
                     if call_count["collect"] <= 1:
                         return mock_thread_data
                     return []
-                call_count["sidebar_snapshot"] += 1
-                if call_count["sidebar_snapshot"] == 1:
-                    return {"count": 1, "loadingCount": 1, "fingerprint": "fp-a"}
-                return {"count": 1, "loadingCount": 0, "fingerprint": "fp-a"}
+                if "allLoadingNodes" in script:
+                    call_count["sidebar_snapshot"] += 1
+                    if call_count["sidebar_snapshot"] == 1:
+                        return {"count": 1, "loadingCount": 1, "fingerprint": "fp-a"}
+                    return {"count": 1, "loadingCount": 0, "fingerprint": "fp-a"}
             if isinstance(args, dict) and "name" in args:
                 return True
             if isinstance(args, str):

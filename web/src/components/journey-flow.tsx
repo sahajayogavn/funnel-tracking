@@ -71,7 +71,7 @@ interface JourneyFlowProps {
 }
 
 export function JourneyFlow({ seekerCountByStage, initialSeekers }: JourneyFlowProps) {
-  const [filterState, setFilterState] = useState<FilterState>({ city: 'all', dateRange: 'all' });
+  const [filterState, setFilterState] = useState<FilterState>({ city: 'all', programCode: 'all', dateRange: 'all' });
 
   const filteredSeekers = useMemo(() => {
     if (!initialSeekers) return [];

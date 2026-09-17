@@ -55,6 +55,7 @@ def test_globals_css_contract():
     assert "@media (max-width: 860px)" in content
     assert "@media (max-width: 520px)" in content
     assert ".funnel-range-pills {" in content
+    assert ".queue-grid--with-sidebar {\n  grid-template-columns: 1fr;\n}" in content
 
 def test_network_graph_contract():
     graph_file = ROOT_DIR / "web" / "src" / "components" / "network-graph.tsx"
@@ -63,3 +64,27 @@ def test_network_graph_contract():
     assert "<FunnelFilterBar" in content
     assert "<input" not in content
     assert "containerRef" in content
+
+def test_action_queues_seeker_sidebar_contract():
+    action_queues_file = ROOT_DIR / "web" / "src" / "components" / "action-queues.tsx"
+    content = action_queues_file.read_text(encoding="utf-8")
+
+    # Verify interactive username and sidebar components
+    assert "queue-item-username" in content
+    assert "queue-seeker-sidebar" in content
+    assert "Lý do trong hàng đợi (MAS Proof)" in content
+    assert "getMasReasonDetails" in content
+    assert "handleTogglePin" in content
+    assert "handleMouseEnter" in content
+    assert "handleMouseLeave" in content
+    assert "SeekerJourneyTimeline" in content
+
+def test_queries_payload_and_seeker_lookup_contract():
+    queries_file = ROOT_DIR / "web" / "src" / "lib" / "queries.ts"
+    content = queries_file.read_text(encoding="utf-8")
+
+    assert "payloadJson" in content
+    assert "payload_json AS payloadJson" in content
+    assert "u.thread_id = ?" in content
+    assert "u.thread_name = ?" in content
+

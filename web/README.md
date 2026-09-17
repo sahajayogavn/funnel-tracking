@@ -138,6 +138,27 @@ The old command surface stays stable even though the canonical wrapper implement
 - Keep canonical L5 `tools/` and `adk_agents/` pointed at `fb_pipeline` boundaries instead of importing sideways through wrapper shims.
 - Keep legacy unprefixed files as compatibility shims only.
 - Keep `web/` focused on presentation, reporting, and CRM interactions over persisted data.
+
+### Compact relative-date display convention
+
+The system uses an ultra-compact elapsed-time convention across `/seekers`, seeker detail sidebars, and the 7-stage journey timeline (`formatRelativeElapsed` in `web/src/lib/types.ts`). This maximizes information density and situational awareness without cluttering tables:
+
+| Elapsed Threshold | Syntax | Examples | Meaning |
+| :--- | :--- | :--- | :--- |
+| **< 1 hour** | `[diffMin]m` | `1m`, `25m`, `59m` | Elapsed minutes |
+| **< 24 hours** | `[diffHour]h` | `1h`, `5h`, `23h` | Elapsed hours |
+| **< 30 days** | `[diffDays]d` | `1d`, `3d`, `29d` | Elapsed days |
+| **< 365 days** | `[months]m[remDays]d` | `1m3d`, `5m12d` | Elapsed months and remaining days |
+| *(exact months)* | `[months]m` | `1m`, `2m`, `6m` | When remainder days is 0 |
+| **>= 365 days** | `[years]y[remMonths]m` | `1y3m`, `2y6m` | Elapsed years and remaining months |
+| *(exact years)* | `[years]y` | `1y`, `2y` | When remainder months is 0 |
+| **Invalid / Null** | `—` | `—` | Missing, empty, or unparseable timestamp |
+
+**Convention Rules:**
+- **No spaces**: Tokens are joined without whitespace (e.g., `1h`, `1m3d`, `1y3m`).
+- **Data preservation**: Raw database timestamps remain unchanged in memory/SQLite and are embedded in HTML `dateTime` and `title` attributes for full fidelity on hover.
+- **Cross-browser parsing**: String dates are normalized with `T` separator to ensure consistent parsing across Safari, Chrome, and Node.js.
+
 - If you need current schema details, inspect `fb_pipeline/persistence/l4_sqlite_store.py` and the comment-table setup used by `tools/l5_fetch_comments.py`.
 
 ## Local development
@@ -148,4 +169,10 @@ Run the development server from `web/`:
 npm run dev
 ```
 
-Then open `http://localhost:3000` in your browser.
+Then open `http://localhost:9995` in your browser.
+
+The server defaults to canonical port `9995` to avoid collisions with other local services. You can override the port using the `PORT` environment variable:
+
+```bash
+PORT=9996 npm run dev
+```

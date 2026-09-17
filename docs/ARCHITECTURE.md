@@ -268,6 +268,32 @@ The WebUI and Telegram are equivalent approval surfaces: a WebUI click or a
 queue, which preserves FIFO ordering and prevents a newer approved proposal
 from overtaking an older undecided proposal.
 
+**One active proposal per target+kind.** A given `target_id` must never have
+more than one *live* (non-terminal, i.e. not `executed`/`rejected`/`failed`)
+proposal in the same `queue_type` (and, for `proactive_message`, the same
+`payload.type` — `warmup` vs `event` are distinct kinds and may coexist).
+Approving a proposal does not make room for a new one of the same kind — it
+stays live until an executor marks it `executed`/`failed`. This is enforced
+at three layers:
+1. `tools/l5_action_queue.has_active_proposal()` is the single dedup check —
+   every caller that enqueues a MAS proposal (`tools/l5_mas_recommend.py`,
+   `tools/l5_inbox_mas_runner.py`) must call it first and skip if it returns
+   `True`.
+2. The DB itself enforces it with the partial unique index
+   `idx_action_queue_one_active_per_target` on
+   `action_queue(target_id, queue_type, COALESCE(json_extract(payload_json,'$.type'), ''))
+   WHERE status NOT IN ('executed','rejected','failed')`, created in both
+   `setup_database()` and `setup_comment_database()`
+   (`fb_pipeline/persistence/l4_sqlite_store.py`).
+3. `_dedupe_active_action_queue()` runs once before that index is created on
+   any pre-existing DB, superseding (rejecting) older duplicate rows so the
+   migration never fails on data written before this invariant existed.
+
+A prior bug (`code:bug-action-queue-duplicate-proposal-001`) let a seeker end
+up with two live `reply_message` proposals: the old guard only excluded
+`status = 'pending'`, so once one proposal was `approved`, a second click of
+"⚡ Chạy đề xuất MAS" created a fresh `pending` duplicate for the same seeker.
+
 | Queue key | Operator label | Target action |
 | --- | --- | --- |
 | `reply_message` | Reply tin nhắn | reply to an inbound DM; reactions on a DM are also presented here |
@@ -406,6 +432,7 @@ L2 CDP9222 / browser handle
 3. `fb_pipeline.browser.l3_inbox.scrape_inbox_ui(...)` executes a resilient Two-Stage Fetching Strategy:
    - **Stage 1 (Discovery)**: Temporarily disables message extraction to iteratively scroll the inbox sidebar backward in time, accumulating a list of target threads strictly bounded by `timerange` and `maxThreads`.
    - **Stage 2 (Extraction)**: Resets the viewport to the top and sequentially navigates through *only* the discovered thread list from Stage 1 to safely extract deep message payloads without breaking DOM virtualization.
+   - **Target — `--workers N`** (`prd:inbox-parallel-fetch-001`): Stage 1 streams discovered threads into a queue while `N-1` worker tabs run Stage 2 concurrently. See [`architect/inbox-fetch-pipeline.md`](architect/inbox-fetch-pipeline.md) (`doc:inbox-fetch-pipeline-001`) for the design and implementation plan.
 4. `fb_pipeline.inbox.l3_pipeline.build_thread_record(...)` normalizes thread metadata
 5. `fb_pipeline.inbox.l3_pipeline.enrich_thread_record(...)` derives contact info, city, ad IDs, and builds a `MasHandoff`
 6. `fb_pipeline.inbox.l3_pipeline.persist_thread_record(...)` writes `threads`, `messages`, `users`, `user_ad_ids`, and `ad_posts`

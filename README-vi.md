@@ -109,6 +109,8 @@ Journey engine phía web định nghĩa runtime keys, còn MAS strategy chuẩn 
 ## 📖 Tài liệu
 
 - [English (README.md)](README.md) | [Tiếng Việt (README-vi.md)](README-vi.md)
+- [Use case theo góc nhìn người dùng](docs/usecases/seeker-care-operations.md)
+- [Sổ đăng ký Universal ID](docs/universal-id-registry.md)
 
 ---
 

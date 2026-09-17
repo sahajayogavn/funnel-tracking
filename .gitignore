@@ -18,8 +18,9 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
+!web/src/lib/
 parts/
 sdist/
 var/
@@ -72,3 +73,6 @@ memory/agent_memory/frankensqlite.db
 memory/agent_memory/frankensqlite.db-shm
 memory/agent_memory/frankensqlite.db-wal
 tmp/
+data/
+.DS_Store
+*.DS_Store

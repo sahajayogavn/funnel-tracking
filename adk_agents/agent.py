@@ -22,15 +22,27 @@ import os
 from google.adk.agents import LlmAgent, SequentialAgent
 
 from .tools.seeker_tools import lookup_seeker, get_thread_messages
+from fb_pipeline.persistence.l4_llm_trace import traced
 
 # --- Model Configuration ---
 # ADK uses LiteLLM under the hood. For OpenAI-compatible endpoints,
 # prefix the model name with "openai/" and set env vars.
 MODEL_NAME = os.environ.get("ADK_MODEL", "openai/gpt-5.4")
 
+# code:agent-mas-001:llm-user-agent
+# Some OpenAI-compatible gateways (e.g. apikey.click behind Cloudflare WAF) return
+# 403 "Your request was blocked." for the default "OpenAI/Python" User-Agent.
+# LiteLLM merges these headers into every provider request.
+try:
+    import litellm
+
+    litellm.headers = {**(litellm.headers or {}), "User-Agent": os.environ.get("LLM_USER_AGENT", "sahajayoga-mas/1.0")}
+except ImportError:  # pragma: no cover - litellm is a hard dependency of the ADK model
+    pass
+
 # --- Sub-Agent: Classifier ---
 # code:agent-mas-001:classifier
-classifier = LlmAgent(
+classifier = traced(LlmAgent(
     name="MessageClassifier",
     model=MODEL_NAME,
     instruction="""You are a message classifier for a Sahaja Yoga meditation center's Facebook inbox.
@@ -54,11 +66,11 @@ Sentiment: <sentiment>
 Urgency: <urgency>
 Summary: <one-line summary of what the seeker wants>""",
     output_key="classification",
-)
+))
 
 # --- Sub-Agent: Responder ---
 # code:agent-mas-001:responder
-responder = LlmAgent(
+responder = traced(LlmAgent(
     name="Responder",
     model=MODEL_NAME,
     instruction="""OUTPUT RULE (highest priority): Write ONLY the final exact reply message you will send to the user.
@@ -101,11 +113,11 @@ You reply to Facebook inbox messages on behalf of the center.
 9. If the question is advanced or not covered, say a CLB member will follow up
 10. If uncertain, politely ask for clarification""",
     output_key="reply_text",
-)
+))
 
 # --- Sub-Agent: Reactor ---
 # code:agent-mas-001:reactor
-reactor = LlmAgent(
+reactor = traced(LlmAgent(
     name="Reactor",
     model=MODEL_NAME,
     instruction="""You decide which Facebook reaction to apply to a message or comment.
@@ -135,11 +147,11 @@ reactor = LlmAgent(
 ## Output
 Respond with ONLY the reaction name (one word): like, love, care, haha, wow, or sad.""",
     output_key="reaction_type",
-)
+))
 
 # --- Sub-Agent: WarmUpComposer ---
 # code:agent-mas-001:warmup-composer
-warmup_composer = LlmAgent(
+warmup_composer = traced(LlmAgent(
     name="WarmUpComposer",
     model=MODEL_NAME,
     instruction="""You compose warm, nurturing outreach messages for dormant seekers
@@ -161,11 +173,11 @@ at a Sahaja Yoga meditation center in Vietnam.
 Write ONLY the message text. No metadata, no labels, no JSON.
 Just the natural message you would send to this person.""",
     output_key="warmup_message",
-)
+))
 
 # --- Sub-Agent: EventAdvertiser ---
 # code:agent-mas-001:event-advertiser
-event_advertiser = LlmAgent(
+event_advertiser = traced(LlmAgent(
     name="EventAdvertiser",
     model=MODEL_NAME,
     instruction="""You compose personalized event notification messages for seekers
@@ -190,10 +202,10 @@ at a Sahaja Yoga meditation center in Vietnam.
 Write ONLY the message text. No metadata, no labels, no JSON.
 Just the natural notification you would send to this person.""",
     output_key="event_message",
-)
+))
 # --- Sub-Agent: BatchInboxAgent ---
 # code:agent-mas-001:batch-inbox-agent
-batch_inbox_agent = LlmAgent(
+batch_inbox_agent = traced(LlmAgent(
     name="BatchInboxAgent",
     model=MODEL_NAME,
     instruction="""## OUTPUT RULE (HIGHEST PRIORITY — STRICTLY ENFORCED)
@@ -281,7 +293,7 @@ Output exactly one JSON object per thread. Keys:
 
 REMEMBER: Start with '[', end with ']'. No other text.""",
     output_key="batch_results",
-)
+))
 
 
 # --- Pipelines ---

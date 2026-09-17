@@ -8,7 +8,7 @@ import { isDateInRange, parseRealDate } from '@/lib/funnel-filters';
 import { InteractionHistogram } from './interaction-histogram';
 import { FunnelFilterBar, type FilterState } from './funnel-filter-bar';
 import { SevenStarProgress } from './seven-star-progress';
-import { SeekerJourneyTimeline } from './seeker-journey-timeline';
+import { SeekerSidebar } from './seeker-sidebar';
 import { MasProgress, type MasJob, type MasRunType } from './mas-progress';
 import { PROGRAMS } from '@/lib/programs';
 
@@ -73,7 +73,16 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const journeyStage = searchParams.get('journeyStage') || '';
-  const [seekers] = useState(initialSeekers);
+  const seekers = initialSeekers;
+
+  useEffect(() => {
+    const hasPending = seekers.some(s => s.classificationStatus === 'pending');
+    if (!hasPending) return;
+    const interval = setInterval(() => {
+      router.refresh();
+    }, 2500);
+    return () => clearInterval(interval);
+  }, [seekers, router]);
   const [sortField, setSortField] = useState<SortField>('lastMessageDate');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [search, setSearch] = useState('');
@@ -377,44 +386,50 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                       >
                       <td style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600 }}>{idx + 1}</td>
                       <td style={{ fontWeight: 600 }}>
-                        <button
-                          type="button"
-                          className="seeker-name-link"
-                          onClick={(e) => { e.stopPropagation(); router.push(seekerDetailUrl(seeker)); }}
-                        >
-                          {seeker.name || '—'}
-                        </button>
-                        {profileUrl && (
-                          <a
-                            href={profileUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="seeker-profile-icon"
-                            aria-label={`Mở Facebook profile của ${seeker.name || 'seeker'} trong tab mới`}
-                            title={`Mở trang cá nhân Facebook: ${seeker.name || ''}`}
-                            onClick={e => e.stopPropagation()}
+                        <div className="seeker-name-cell">
+                          {profileUrl && (
+                            <a
+                              href={profileUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="seeker-profile-icon"
+                              aria-label={`Mở Facebook profile của ${seeker.name || 'seeker'} trong tab mới`}
+                              title={`Mở trang cá nhân Facebook: ${seeker.name || ''}`}
+                              onClick={e => e.stopPropagation()}
+                            >
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                              </svg>
+                            </a>
+                          )}
+                          {inboxUrl && (
+                            <a
+                              href={inboxUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="seeker-profile-icon seeker-inbox-icon"
+                              aria-label={`Mở Facebook Message Inbox của ${seeker.name || 'seeker'} trong tab mới`}
+                              title={`Mở Facebook Message Inbox: ${seeker.name || ''}`}
+                              onClick={e => e.stopPropagation()}
+                            >
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                <path d="M21 11.5a8.38 8.38 0 0 1-1.88 5.32A8.5 8.5 0 0 1 12.5 20a8.38 8.38 0 0 1-4.3-1.18L3 20l1.18-4.3A8.38 8.38 0 0 1 3 11.5 8.5 8.5 0 0 1 11.5 3 8.5 8.5 0 0 1 21 11.5Z" />
+                                <path d="m8.5 12 2.2 2 4.8-5" />
+                              </svg>
+                            </a>
+                          )}
+                          <button
+                            type="button"
+                            className="seeker-name-link"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleRowClick(seeker, idx, event.shiftKey);
+                            }}
+                            title={`Xem nhanh ${seeker.name || 'seeker'} ở khung bên phải`}
                           >
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                              <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
-                            </svg>
-                          </a>
-                        )}
-                        {inboxUrl && (
-                          <a
-                            href={inboxUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="seeker-profile-icon seeker-inbox-icon"
-                            aria-label={`Mở Facebook Message Inbox của ${seeker.name || 'seeker'} trong tab mới`}
-                            title={`Mở Facebook Message Inbox: ${seeker.name || ''}`}
-                            onClick={e => e.stopPropagation()}
-                          >
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <path d="M21 11.5a8.38 8.38 0 0 1-1.88 5.32A8.5 8.5 0 0 1 12.5 20a8.38 8.38 0 0 1-4.3-1.18L3 20l1.18-4.3A8.38 8.38 0 0 1 3 11.5 8.5 8.5 0 0 1 11.5 3 8.5 8.5 0 0 1 21 11.5Z" />
-                              <path d="m8.5 12 2.2 2 4.8-5" />
-                            </svg>
-                          </a>
-                        )}
+                            {seeker.name || '—'}
+                          </button>
+                        </div>
                       </td>
 
                       <td>{seeker.phone || '—'}</td>
@@ -432,7 +447,20 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                         </div>
                       </td>
                       <td>
-                        <span className="badge" style={{ background: cityStyle.bg, color: cityStyle.text }}>{seeker.city}</span>
+                        {seeker.classificationStatus === 'unknown' ? (
+                          <span className="badge" style={{ background: 'rgba(107, 114, 128, 0.12)', color: '#9ca3af' }}>—</span>
+                        ) : (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                            {(seeker.classificationStatus !== 'pending' || seeker.city !== 'Unknown') && (
+                              <span className="badge" style={{ background: cityStyle.bg, color: cityStyle.text }}>
+                                {seeker.city}
+                              </span>
+                            )}
+                            {seeker.classificationStatus === 'pending' && (
+                              <span className="spinner" style={{ width: '14px', height: '14px', borderWidth: '2px', flexShrink: 0 }} aria-label="Đang suy luận" title="Đang bóc tách & suy luận city/program…"></span>
+                            )}
+                          </span>
+                        )}
                         {seeker.programCode && (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', marginTop: '6px', fontSize: '10px', lineHeight: 1.3 }}>
                           {PROGRAMS.filter(program => program.code === seeker.programCode).map(program => (
@@ -459,215 +487,24 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
 
       {/* ── Right Sidebar ── */}
       {selectedSeeker && (
-        <div style={{
-          width: '380px', minWidth: '380px', maxHeight: 'calc(100vh - 160px)', overflowY: 'auto',
-          background: 'var(--bg-secondary)', border: '1px solid var(--border-glow)', borderRadius: '14px',
-          padding: '20px', marginLeft: '16px', boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
-          animation: 'slideIn 0.2s ease-out',
-        }}>
-          {/* Header + icon-only quick links */}
-          <div className="seeker-sidebar-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
-            <div className="seeker-sidebar-heading">
-              <div className="seeker-sidebar-name" style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)' }}>{selectedSeeker.name}</div>
-              <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                {selectedSeeker.source === 'dm' ? '💬 DM' : '💬 Comment'} · {selectedSeeker.city}
-              </div>
-            </div>
-            <div className="seeker-sidebar-quick-links" aria-label="Seeker links">
-              <a href={seekerDetailUrl(selectedSeeker)} className="seeker-sidebar-link seeker-sidebar-link--details"
-                aria-label="Mở Full Details" title="Full Details" onClick={e => e.stopPropagation()}>
-                <span aria-hidden="true">📋</span>
-              </a>
-              {facebookProfileUrl(selectedSeeker.fbProfileUrl) && (
-                <a href={facebookProfileUrl(selectedSeeker.fbProfileUrl)!} target="_blank" rel="noopener noreferrer"
-                  className="seeker-sidebar-link seeker-sidebar-link--profile"
-                  aria-label={`Mở Facebook profile của ${selectedSeeker.name || 'seeker'} trong tab mới`}
-                  title="Facebook Profile" onClick={e => e.stopPropagation()}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                    <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
-                  </svg>
-                </a>
-              )}
-              {selectedSeeker.source === 'dm' && facebookProfileUrl(selectedSeeker.fbProfileUrl) && (
-                <a href={`https://business.facebook.com/latest/inbox/all?asset_id=${PAGE_ID}&selected_item_id=${facebookProfileUrl(selectedSeeker.fbProfileUrl)!.split('/').pop()?.split('?')[0]}&thread_type=FB_MESSAGE`}
-                  target="_blank" rel="noopener noreferrer" className="seeker-sidebar-link seeker-sidebar-link--inbox"
-                  aria-label={`Mở Facebook Message Inbox của ${selectedSeeker.name || 'seeker'} trong tab mới`}
-                  title="Facebook Inbox" onClick={e => e.stopPropagation()}>
-                  <span aria-hidden="true">💬</span>
-                </a>
-              )}
-            </div>
-            <button onClick={() => { setSelectedSeeker(null); setSidebarData(null); }}
-              style={{ background: 'rgba(255,255,255,0.06)', border: 'none', borderRadius: '6px', color: 'var(--text-muted)', fontSize: '14px', cursor: 'pointer', width: '28px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              ✕
-            </button>
-          </div>
-
-          {/* ── Compact Journey Timeline ── */}
-          <div style={{ marginBottom: '16px', padding: '12px', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-subtle)', borderRadius: '10px' }}>
-            <SeekerJourneyTimeline
-              seeker={selectedSeeker}
-              compact={true}
-              showQueue={false}
-              onRefreshSeeker={() => {
-                const seekerId = selectedSeeker.source === 'dm' ? String(selectedSeeker.id) : `comment-${selectedSeeker.id}`;
-                fetch(`/api/seekers/${encodeURIComponent(seekerId)}`)
-                  .then(res => res.json())
-                  .then(data => setSidebarData(data))
-                  .catch(() => {});
-              }}
-            />
-          </div>
-
-          {/* Loading */}
-          {sidebarLoading && (
-            <div style={{ textAlign: 'center', padding: '20px', color: 'var(--text-muted)', fontSize: '12px' }}>Loading...</div>
-          )}
-
-          {/* Sidebar content */}
-          {sidebarData && !sidebarLoading && (
-            <>
-              {/* Compact general stats */}
-              <div className="sidebar-general-stats" aria-label="General stats">
-                <span className="sidebar-general-stats-label">General stats</span>
-                <span className="sidebar-stat-badge sidebar-stat-badge--messages" title={`${sidebarData.messageCount ?? 0} messages`}>
-                  <span aria-hidden="true">💬</span>
-                  <strong>{sidebarData.messageCount ?? 0}</strong>
-                  <span>Msgs</span>
-                </span>
-                <span className="sidebar-stat-badge sidebar-stat-badge--comments" title={`${sidebarData.commentCount ?? 0} comments`}>
-                  <span aria-hidden="true">💭</span>
-                  <strong>{sidebarData.commentCount ?? 0}</strong>
-                  <span>Cmts</span>
-                </span>
-                {sidebarData.adSource && (
-                  <span
-                    className="sidebar-ad-badge"
-                    title={sidebarData.adSource.matchedPostId
-                      ? `Facebook Ad post · ad_id: ${sidebarData.adSource.matchedPostId}`
-                      : sidebarData.adSource.matchedPostName || 'Facebook Ad post'}
-                    aria-label={sidebarData.adSource.matchedPostId
-                      ? `Facebook Ad post, ad_id ${sidebarData.adSource.matchedPostId}`
-                      : 'Facebook Ad post'}
-                  >
-                    <span aria-hidden="true">📢</span>
-                    <span className="sr-only">Facebook Ad post</span>
-                  </span>
-                )}
-              </div>
-
-              {/* Recent messages */}
-              {sidebarData.messages?.length > 0 && (
-                <div style={{ marginBottom: '12px' }}>
-                  <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>Recent Messages</div>
-                  <div
-                    className="sidebar-recent-messages"
-                    style={{
-                      maxHeight: '260px',
-                      overflowY: 'auto',
-                      paddingRight: '6px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '4px',
-                    }}
-                  >
-                    {(() => {
-                      const filtered = sidebarData.messages
-                        .filter((m: { content?: string }) => !m.content?.includes('[AD SOURCE]'))
-                        .slice(-20);
-
-                      // Date parsing helper
-                      const parseDate = (ts: string): string | null => {
-                        const longMatch = ts.match(/([A-Z][a-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
-                        const shortMatch = ts.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
-                        if (longMatch) {
-                          const months: Record<string, string> = { Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12' };
-                          return `${longMatch[3]}.${months[longMatch[1]]||'01'}.${longMatch[2].padStart(2,'0')}`;
-                        } else if (shortMatch) {
-                          const yr = shortMatch[3].length === 2 ? `20${shortMatch[3]}` : shortMatch[3];
-                          return `${yr}.${shortMatch[1].padStart(2,'0')}.${shortMatch[2].padStart(2,'0')}`;
-                        }
-                        return null;
-                      };
-
-                      return filtered.map((msg: { sender: string; content: string; messageTimestamp?: string }, i: number) => {
-                        const msgDate = parseDate(msg.messageTimestamp || '');
-                        const prevDate = i > 0 ? parseDate(filtered[i - 1].messageTimestamp || '') : null;
-                        const showDateSep = msgDate && msgDate !== prevDate;
-                        return (
-                          <div key={i}>
-                            {showDateSep && (
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '6px 0 4px' }}>
-                                <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.06)' }} />
-                                <div style={{ fontSize: '9px', fontWeight: 700, color: 'var(--text-muted)', padding: '2px 8px', borderRadius: '8px', background: 'rgba(255,255,255,0.04)', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>
-                                  {msgDate}
-                                </div>
-                                <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.06)' }} />
-                              </div>
-                            )}
-                            <div style={{
-                              padding: '8px 10px', marginBottom: '4px',
-                              borderRadius: msg.sender === 'Page' ? '8px 8px 2px 8px' : '8px 8px 8px 2px',
-                              background: msg.sender === 'Page' ? 'rgba(99,102,241,0.08)' : 'rgba(255,255,255,0.04)',
-                              borderLeft: msg.sender !== 'Page' ? '2px solid #f59e0b' : 'none',
-                            }}>
-                              <div style={{ fontSize: '9px', fontWeight: 700, color: msg.sender === 'Page' ? '#818cf8' : '#f59e0b' }}>
-                                {msg.sender === 'Page' ? 'Page' : selectedSeeker.name}
-                              </div>
-                              <div style={{ fontSize: '12px', color: 'var(--text-primary)', lineHeight: 1.4, marginTop: '2px',
-                                overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as const }}>
-                                {msg.content || '(empty)'}
-                              </div>
-                              {msg.messageTimestamp && <div style={{ fontSize: '9px', color: 'var(--text-muted)', marginTop: '2px' }}>{msg.messageTimestamp}</div>}
-                            </div>
-                          </div>
-                        );
-                      });
-                    })()}
-                  </div>
-                </div>
-              )}
-
-              {/* Comments */}
-              {sidebarData.comments?.length > 0 && (
-                <div>
-                  <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>Comments</div>
-                  {sidebarData.comments.slice(0, 3).map((cmt: { commentText?: string; postUrl?: string }, i: number) => (
-                    <div key={i} style={{ padding: '8px 10px', marginBottom: '4px', background: 'rgba(245,158,11,0.04)', border: '1px solid rgba(245,158,11,0.1)', borderRadius: '8px' }}>
-                      <div style={{ fontSize: '12px', color: 'var(--text-primary)', lineHeight: 1.4,
-                        overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as const }}>
-                        {cmt.commentText || '(empty)'}
-                      </div>
-                      {cmt.postUrl && (
-                        <a href={`https://www.facebook.com/${PAGE_ID}/posts/${cmt.postUrl}`} target="_blank" rel="noopener noreferrer"
-                          style={{ fontSize: '10px', color: '#60a5fa', textDecoration: 'none', marginTop: '4px', display: 'inline-block' }}>
-                          View Post ↗
-                        </a>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-
-          {/* MAS approvals stay below the conversation context. */}
-          <SeekerJourneyTimeline
-            seeker={selectedSeeker}
-            compact={true}
-            showTimeline={false}
-            onRefreshSeeker={() => {
-              const seekerId = selectedSeeker.source === 'dm' ? String(selectedSeeker.id) : `comment-${selectedSeeker.id}`;
-              fetch(`/api/seekers/${encodeURIComponent(seekerId)}`)
-                .then(res => res.json())
-                .then(data => setSidebarData(data))
-                .catch(() => {});
-            }}
-          />
-        </div>
+        <SeekerSidebar
+          seeker={selectedSeeker}
+          detail={sidebarData}
+          loading={sidebarLoading}
+          showQueue={true}
+          detailHref={seekerDetailUrl(selectedSeeker)}
+          onClose={() => { setSelectedSeeker(null); setSidebarData(null); }}
+          onRefresh={() => {
+            const seekerId = selectedSeeker.source === 'dm' ? String(selectedSeeker.id) : `comment-${selectedSeeker.id}`;
+            fetch(`/api/seekers/${encodeURIComponent(seekerId)}`)
+              .then(res => res.json())
+              .then(data => setSidebarData(data))
+              .catch(() => {});
+          }}
+          style={{ marginLeft: '16px' }}
+        />
       )}
       </div>
-
       {/* ── Batch Recommendations Modal ── */}
       {batchModalOpen && (
         <div

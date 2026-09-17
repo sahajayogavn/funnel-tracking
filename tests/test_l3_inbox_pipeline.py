@@ -443,11 +443,11 @@ class TestInboxContracts(unittest.TestCase):
             ad_ids=["ad_1"],
         )
         self.assertEqual(enriched.user_info["phone"], "0912345678")
-        self.assertEqual(enriched.city, "Hà Nội")
+        self.assertIsNone(enriched.city)
         self.assertEqual(len(enriched.messages), 2)
         self.assertEqual(enriched.messages[0].seq, 0)
         self.assertEqual(enriched.mas_handoff.fb_url, "selected123")
-        self.assertEqual(enriched.mas_handoff.seeker.city, "Hà Nội")
+        self.assertIsNone(enriched.mas_handoff.seeker.city)
         self.assertEqual(enriched.mas_handoff.ad_ids, ["ad_1"])
 
     # Gate 3: code:test-validation-001:l1-to-l4
@@ -496,7 +496,7 @@ class TestInboxContracts(unittest.TestCase):
         result = persist_thread_record(self.conn, thread_record, detect_city)
         self.assertEqual(result["messages_added"], 2)
         self.assertEqual(result["ad_ids_count"], 1)
-        self.assertEqual(result["city"], "Hà Nội")
+        self.assertIsNone(result["city"])
 
         thread = self.conn.execute("SELECT * FROM threads WHERE id = ?", (thread_record.thread_id,)).fetchone()
         self.assertEqual(thread["page_id"], "page1")
@@ -504,7 +504,7 @@ class TestInboxContracts(unittest.TestCase):
 
         user = self.conn.execute("SELECT * FROM users WHERE thread_id = ?", (thread_record.thread_id,)).fetchone()
         self.assertEqual(user["fb_url"], "selected456")
-        self.assertEqual(user["city"], "Hà Nội")
+        self.assertIsNone(user["city"])
         self.assertIsNotNone(user["last_synced_at"])
 
         ad = self.conn.execute("SELECT * FROM ad_posts WHERE ad_id = '6930299765389'").fetchone()

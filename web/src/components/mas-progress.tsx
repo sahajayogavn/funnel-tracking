@@ -45,6 +45,36 @@ const PHASE_INDEX: Record<string, number> = {
   failed: 4,
 };
 
+const PHASE_LABEL: Record<string, string> = {
+  queued: 'Đang chờ trong hàng đợi…',
+  preparing_context: 'Đang nạp dữ liệu…',
+  waiting_for_llm: 'Đang chờ LLM soạn nội dung…',
+  saving_recommendations: 'Đang ghi vào hàng đợi…',
+  creating_safe_fallback: 'Đang ghi vào hàng đợi…',
+};
+
+// Single-line status used inline where multi-step MasProgress is too tall
+// (e.g. replacing the approve/reject row of a queue item while its MAS
+// job is in flight).
+export function MasInlineStatus({ job }: { job: MasJob }) {
+  const done = job.status === 'completed';
+  const failed = job.status === 'failed';
+  const label = failed
+    ? (job.error || 'Không thể hoàn tất')
+    : done
+      ? 'Đã hoàn tất — đề xuất đã sẵn trong hàng đợi'
+      : (PHASE_LABEL[job.phase] || 'Đang xử lý…');
+  const color = failed ? '#fb7185' : done ? '#34d399' : '#a5b4fc';
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 600, color, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+      {!done && !failed && <span className="mas-spinner" />}
+      <span>{failed ? '⚠️' : done ? '✅' : '🤖'}</span>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
+    </span>
+  );
+}
+
 export function MasProgress({ job }: { job: MasJob }) {
   const type = job.type;
   const seekerCount = job.threadIds.length;

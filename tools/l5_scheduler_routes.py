@@ -92,20 +92,38 @@ def _select_reaction_heuristic(item: dict) -> str:
     return "like"
 
 
+_propose_lock = __import__("threading").Lock()
+
 # code:tool-scheduler-001:reply
-@_browser_job("[REPLY]")
-def run_reply_cycle(page_id: str, dry_run: bool = True, max_threads: int = 5):
-    """Inbox Reply: existing MAS reply flow (Classifier → Responder)."""
-    logger.info(f"[REPLY] {'[DRY-RUN]' if dry_run else '[LIVE]'} Starting reply cycle...")
-    try:
-        from tools.l5_inbox_mas_runner import run_inbox_cycle
-        result = run_inbox_cycle(page_id, dry_run=dry_run, max_threads=max_threads)
-        logger.info(f"[REPLY] Result: {result.get('status', 'unknown')}, "
-                     f"processed: {result.get('processed', 0)}")
-        return result
-    except Exception as e:
-        logger.error(f"[REPLY] Failed: {e}")
-        return {"status": "error", "error": str(e)}
+def run_propose_cycle(page_id: str, dry_run: bool = True, max_threads: int = 5, background: bool = True):
+    """Inbox Reply Propose: decoupled MAS reply flow."""
+    if not _propose_lock.acquire(blocking=False):
+        logger.info("[PROPOSE] Previous propose pass still running; skipping this tick.")
+        return {"status": "skipped", "reason": "propose_in_progress"}
+
+    def _run() -> dict:
+        logger.info(f"[PROPOSE] {'[DRY-RUN]' if dry_run else '[LIVE]'} Starting propose cycle...")
+        try:
+            from tools.l5_inbox_mas_runner import run_inbox_cycle
+            from fb_pipeline.persistence.l4_llm_trace import span
+            
+            with span(trigger="scheduler", route="propose", page_id=page_id, dry_run=dry_run):
+                result = run_inbox_cycle(page_id, dry_run=dry_run, max_threads=max_threads)
+            logger.info(f"[PROPOSE] Result: {result.get('status', 'unknown')}, processed: {result.get('processed', 0)}")
+            return result
+        except Exception as e:
+            logger.error(f"[PROPOSE] Failed: {e}")
+            return {"status": "error", "error": str(e)}
+        finally:
+            _propose_lock.release()
+
+    if not background:
+        return _run()
+    import threading
+    threading.Thread(target=_run, name="mas-propose", daemon=True).start()
+    return {"status": "started"}
+
+run_reply_cycle = run_propose_cycle
 
 
 # code:tool-scheduler-001:cool-sequence

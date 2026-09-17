@@ -16,6 +16,7 @@ import os
 import time
 import requests
 from fb_pipeline.contracts.l1_program_catalog import PROGRAM_CODES
+from fb_pipeline.persistence.l4_llm_trace import start_call, end_call, span_attempt
 
 logger = logging.getLogger("city_llm")
 
@@ -36,7 +37,8 @@ def _call_llm_with_retry(fn, label: str, max_retries: int = LLM_MAX_RETRIES,
     last_exc: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
-            return fn()
+            with span_attempt(attempt):
+                return fn()
         except Exception as exc:  # network, HTTP, JSON parse, malformed payload
             last_exc = exc
             if attempt >= max_retries:
@@ -62,7 +64,6 @@ def _batch_output_budget(n_seekers: int) -> int:
 # code:tool-citydetect-001:llm-stream
 LLM_STREAM = os.environ.get("CITY_LLM_STREAM", "1") != "0"
 
-
 def chat_completion_text(url: str, payload: dict, headers: dict, timeout: int) -> str:
     """POST an OpenAI-compatible chat completion and return the assistant text.
 
@@ -72,10 +73,33 @@ def chat_completion_text(url: str, payload: dict, headers: dict, timeout: int) -
     model starts emitting, so the connection never idles long enough to be cut.
     ``CITY_LLM_STREAM=0`` restores the plain request/response path.
     """
+    messages_json = json.dumps(payload.get("messages", []), ensure_ascii=False)
+    system_prompt = ""
+    for m in payload.get("messages", []):
+        if m.get("role") == "system":
+            system_prompt = m.get("content", "")
+            break
+            
+    call_id = start_call(
+        agent_name="city_llm",
+        model=payload.get("model", "unknown"),
+        system_prompt=system_prompt,
+        messages_json=messages_json,
+        state_json="{}"
+    )
+
     if not LLM_STREAM:
-        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"]["content"]
+            if call_id:
+                end_call(call_id, response_text=text)
+            return text
+        except Exception as e:
+            if call_id:
+                end_call(call_id, error=str(e))
+            raise
 
     stream_payload = dict(payload, stream=True)
     stream_headers = dict(headers, Accept="text/event-stream")
@@ -112,7 +136,13 @@ def chat_completion_text(url: str, payload: dict, headers: dict, timeout: int) -
         text = "".join(parts)
         if not text:
             raise ValueError("LLM stream returned no content")
+        if call_id:
+            end_call(call_id, response_text=text)
         return text
+    except Exception as e:
+        if call_id:
+            end_call(call_id, error=str(e))
+        raise
     finally:
         try:
             resp.close()

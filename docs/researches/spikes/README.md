@@ -1,5 +1,7 @@
 # Research spikes
 
+**Universal ID:** `doc:readme-research-spikes-001`
+
 - [City detection design](spike-city-detection-design.md)
 - [Google ADK MAS for Facebook Inbox](spike-google-adk-mas-facebook-inbox.md)
 

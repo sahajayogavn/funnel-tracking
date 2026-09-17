@@ -1,0 +1,13 @@
+{
+  "rollout_id": "rl-2026-09-15-001",
+  "prd_beads_id": "local-seeker-mas-selection",
+  "contract_version": "none (existing Next.js screens)",
+  "build_sequence": [
+    { "step": 1, "component": "seeker table range selection", "type": "interaction", "tokens_first": true },
+    { "step": 2, "component": "approval queue range selection", "type": "interaction" },
+    { "step": 3, "component": "proposal message preview", "type": "data-display" }
+  ],
+  "states_to_implement": ["default", "loading", "empty", "error", "selected", "disabled"],
+  "risks": ["Selection must follow the currently filtered/sorted order", "A selected proposal must never bypass HITL approval"],
+  "tool_budget_estimate": 6
+}

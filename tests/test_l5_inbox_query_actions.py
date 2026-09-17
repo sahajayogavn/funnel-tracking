@@ -51,10 +51,12 @@ class TestFindUnrepliedThreads(unittest.TestCase):
             (thread_id, content, message_timestamp, seq, recorded_at),
         )
 
-    def _insert_auto_reply_ack(self, thread_id: str, customer_message_timestamp: str | None, dry_run: bool = True):
+    def _insert_auto_reply_ack(self, thread_id: str, seq: int | None, dry_run: bool = True):
+        import json
+        payload = {"last_message_seq": seq} if seq is not None else {}
         self.conn.execute(
-            "INSERT INTO auto_replies (thread_id, reply_text, dry_run, customer_message_timestamp) VALUES (?, ?, ?, ?)",
-            (thread_id, "Drafted reply", dry_run, customer_message_timestamp),
+            "INSERT INTO telegram_hitl_queue (route, thread_id, telegram_message_id, payload_json, status, created_at, updated_at) VALUES (?, ?, 'msg1', ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            ("inbox", thread_id, json.dumps(payload)),
         )
 
     def test_selects_thread_when_latest_customer_message_has_no_acknowledgement(self):
@@ -83,7 +85,7 @@ class TestFindUnrepliedThreads(unittest.TestCase):
             "2026-03-25T10:00:00",
             1,
         )
-        self._insert_auto_reply_ack("thread-1", "2026-03-25T10:00:00", dry_run=True)
+        self._insert_auto_reply_ack("thread-1", 1, dry_run=True)
         self.conn.commit()
 
         result = find_unreplied_threads("page1")
@@ -101,7 +103,7 @@ class TestFindUnrepliedThreads(unittest.TestCase):
             "2026-03-25T10:00:00",
             1,
         )
-        self._insert_auto_reply_ack("thread-1", "2026-03-25T10:00:00")
+        self._insert_auto_reply_ack("thread-1", 1)
         self._insert_customer_message(
             "thread-1",
             "Following up",
@@ -133,7 +135,7 @@ class TestFindUnrepliedThreads(unittest.TestCase):
             "2026-03-25T12:00:00",
             2,
         )
-        self._insert_auto_reply_ack("thread-1", "2026-03-25T09:00:00")
+        self._insert_auto_reply_ack("thread-1", 1)
         self.conn.commit()
 
         result = find_unreplied_threads("page1")

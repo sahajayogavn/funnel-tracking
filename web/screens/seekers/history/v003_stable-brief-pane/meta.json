@@ -1,0 +1,11 @@
+{
+  "id": "CHG-007",
+  "screen": "seekers",
+  "element": ".seeker-sidebar, .seeker-name-link",
+  "property": "flex basis, maximum width, click behavior",
+  "before_value": "sidebar width depended only on stylesheet output; seeker name navigated to full details",
+  "after_value": "sidebar is explicitly a 380px non-growing flex pane; seeker name opens the brief",
+  "token_ref": "--bg-secondary, --border-glow",
+  "reason": "Keep the seeker table usable while making the brief view a dependable one-click action.",
+  "status": "PENDING"
+}

@@ -11,6 +11,7 @@ import {
   type DateRange,
   type FunnelFilters,
 } from '@/lib/funnel-filters';
+import { normalizeProgramCity } from '@/lib/programs';
 
 export type FilterState = FunnelFilters;
 
@@ -32,6 +33,7 @@ const DEFAULT_CITIES = [
 interface FunnelFilterBarProps {
   onFilterChange: (filters: FilterState) => void;
   availableCities?: string[];
+  availablePrograms?: { code: string; city: string }[];
   totalCount?: number;
   filteredCount?: number;
   unitLabel?: string;
@@ -41,6 +43,7 @@ interface FunnelFilterBarProps {
 export function FunnelFilterBar({
   onFilterChange,
   availableCities = DEFAULT_CITIES,
+  availablePrograms = [],
   totalCount,
   filteredCount,
   unitLabel = 'mục',
@@ -115,7 +118,8 @@ export function FunnelFilterBar({
     }
   };
 
-  const isFiltered = filters.city !== 'all' || filters.dateRange !== 'all';
+  const visiblePrograms = availablePrograms.filter(program => filters.city === 'all' || program.city === normalizeProgramCity(filters.city));
+  const isFiltered = filters.city !== 'all' || filters.programCode !== 'all' || filters.dateRange !== 'all';
 
   if (!isLoaded) {
     return (
@@ -123,7 +127,7 @@ export function FunnelFilterBar({
         <div className="funnel-filter-controls">
           <span className="funnel-filter-label">📍 Thành phố:</span>
           <div style={{ height: '34px', width: '130px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} />
-          <span className="funnel-filter-label">📅 Khoảng thời gian:</span>
+          <span className="funnel-filter-label">📚 Chương trình:</span>
           <div style={{ height: '34px', width: '280px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} />
         </div>
       </div>
@@ -143,6 +147,19 @@ export function FunnelFilterBar({
           <option value="all">Tất cả thành phố</option>
           {cities.filter(city => city !== 'all').map(city => <option key={city} value={city}>{city}</option>)}
         </select>
+
+        {availablePrograms.length > 0 && <>
+          <label className="funnel-filter-label" htmlFor="filter-program">📚 Chương trình:</label>
+          <select
+            id="filter-program"
+            value={filters.programCode}
+            onChange={event => updateFilters({ ...filters, programCode: event.target.value })}
+            className="funnel-filter-select"
+          >
+            <option value="all">Tất cả chương trình</option>
+            {visiblePrograms.map(program => <option key={program.code} value={program.code}>{program.code}</option>)}
+          </select>
+        </>}
 
         <div className="funnel-range-group" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
           <label className="funnel-filter-label" htmlFor="filter-date-range">📅 Khoảng thời gian:</label>
@@ -194,5 +211,3 @@ export function FunnelFilterBar({
     </div>
   );
 }
-
-

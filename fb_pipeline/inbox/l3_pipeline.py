@@ -111,14 +111,14 @@ def build_thread_record(page_id: str, visible_thread: dict) -> ThreadRecord:
 
 
 def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract_user_info,
-                         detect_city, ad_context: str = "", fb_url: str = "",
+                         detect_city=None, ad_context: str = "", fb_url: str = "",
                          ad_ids: list | None = None) -> EnrichedThreadRecord:
     db_msgs = [{"sender": m.get("sender"), "content": m.get("text", "")} for m in js_messages]
     user_info = extract_user_info(db_msgs, thread_record.thread_name, ad_context)
     # Classification is intentionally deferred to one batch + independent
     # verification pass after crawling. This local fallback must never make a
     # per-thread LLM request or invent a programme choice.
-    city = detect_city(ad_context, db_msgs)
+    city = None
     program_code = None
     normalized_messages = []
     for idx, msg in enumerate(js_messages):
@@ -178,7 +178,7 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
 
 
 # code:bug-inbox-thread-name-001:persist-valid-fb-name
-def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city) -> dict:
+def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city=None) -> dict:
     # The display name can change between crawls.  A valid name read from the
     # live conversation must replace a previously persisted navigation label
     # such as "All messages" for the same stable Facebook identity.
@@ -327,13 +327,13 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             VALUES (?, ?)
         ''', (thread_record.thread_id, aid))
         if ad_context:
-            ad_city = detect_city(ad_context, [])
+            ad_city = detect_city(ad_context, []) if detect_city else None
             cursor.execute('''
                 INSERT INTO ad_posts (ad_id, ad_content, city, resolved_at)
                 VALUES (?, ?, ?, datetime('now'))
                 ON CONFLICT(ad_id) DO UPDATE SET
                     ad_content = CASE WHEN excluded.ad_content != '' THEN excluded.ad_content ELSE ad_posts.ad_content END,
-                    city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE ad_posts.city END,
+                    city = CASE WHEN excluded.city IS NOT NULL THEN excluded.city ELSE ad_posts.city END,
                     resolved_at = datetime('now')
             ''', (aid, ad_context, ad_city))
 
@@ -374,14 +374,12 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     if new_customer_message_added:
         cursor.execute(f'''
             INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, program_code, last_interaction, last_synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, {{interaction_time}}, datetime('now'))
+            VALUES (?, ?, ?, ?, ?, NULL, NULL, {{interaction_time}}, datetime('now'))
             ON CONFLICT(thread_id) DO UPDATE SET
                 thread_name=excluded.thread_name,
                 phone = COALESCE(excluded.phone, users.phone),
                 email = COALESCE(excluded.email, users.email),
                 fb_url = COALESCE(excluded.fb_url, users.fb_url),
-                city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE users.city END,
-                program_code = COALESCE(excluded.program_code, users.program_code),
                 last_interaction = {{interaction_time}},
                 last_synced_at = datetime('now')
         '''.replace('{interaction_time}', interaction_time_sql), (
@@ -390,21 +388,17 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             user_info.get("phone"),
             user_info.get("email"),
             thread_record.fb_url,
-            thread_record.city,
-            thread_record.program_code,
 
         ))
     else:
         cursor.execute('''
             INSERT INTO users (thread_id, thread_name, phone, email, fb_url, city, program_code, last_synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            VALUES (?, ?, ?, ?, ?, NULL, NULL, datetime('now'))
             ON CONFLICT(thread_id) DO UPDATE SET
                 thread_name=excluded.thread_name,
                 phone = COALESCE(excluded.phone, users.phone),
                 email = COALESCE(excluded.email, users.email),
                 fb_url = COALESCE(excluded.fb_url, users.fb_url),
-                city = CASE WHEN excluded.city != 'Unknown' THEN excluded.city ELSE users.city END,
-                program_code = COALESCE(excluded.program_code, users.program_code),
                 last_synced_at = datetime('now')
         ''', (
             thread_record.thread_id,
@@ -412,8 +406,6 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             user_info.get("phone"),
             user_info.get("email"),
             thread_record.fb_url,
-            thread_record.city,
-            thread_record.program_code,
         ))
 
     conn.commit()
@@ -428,7 +420,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
 
 
 def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, logger,
-                 record_fetch, extract_ad_id_labels, extract_user_info, detect_city,
+                 record_fetch, extract_ad_id_labels, extract_user_info, detect_city=None,
                  skip_navigation: bool = False, force_refresh: bool = False) -> dict:
     from fb_pipeline.browser.l3_inbox import scrape_inbox_ui
 
@@ -442,7 +434,7 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
         record_fetch,
         extract_ad_id_labels,
         extract_user_info,
-        detect_city,
+        detect_city=detect_city,
         skip_navigation=skip_navigation,
         force_refresh=force_refresh,
     )

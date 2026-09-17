@@ -1,5 +1,7 @@
 # QA Audit Report — 2026-03-25
 
+**Universal ID:** `doc:qa-audit-001`
+
 ## Summary
 - Audit scope: stage gates, scheduler architecture, inbox route, warmup route, event route, overall alignment
 - Result: 3 PASS / 3 FAIL

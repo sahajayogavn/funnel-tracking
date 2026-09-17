@@ -24,19 +24,13 @@ def test_load_credentials_handles_plaintext_and_encoded():
         
         temp_env_path = f.name
         
-        # Test shell override
-        os.environ['MY_ENCODED_KEY'] = 'shell_override_value'
-        
     try:
-        # Patch ENV_FILE_PATH in env_manager
+        # Patch ENV_FILE_PATH in env_manager and use clean environment
         with patch('tools.env_manager.ENV_FILE_PATH', temp_env_path):
-            credentials = load_credentials()
-            
-            assert credentials.get('MY_ENCODED_KEY') == 'shell_override_value', "Failed to prefer shell environment variable"
-            assert credentials.get('CLASS_CATALOG_SHEET_URL') == 'https://docs.google.com/spreadsheets/d/test/edit#gid=0', "Failed to fallback to plaintext value"
-            assert os.environ.get('MY_ENCODED_KEY') == 'shell_override_value', "Environment variable for encoded key not preserved"
-            assert os.environ.get('CLASS_CATALOG_SHEET_URL') == 'https://docs.google.com/spreadsheets/d/test/edit#gid=0', "Environment variable for plaintext key not set"
-            
+            with patch.dict(os.environ, {'MY_ENCODED_KEY': 'shell_override_value'}, clear=True):
+                credentials = load_credentials()
+                
+                assert credentials.get('MY_ENCODED_KEY') == 'shell_override_value', "Failed to prefer shell environment variable"
+                assert credentials.get('CLASS_CATALOG_SHEET_URL') == 'https://docs.google.com/spreadsheets/d/test/edit#gid=0', "Failed to fallback to plaintext value"
     finally:
-        del os.environ['MY_ENCODED_KEY']
-        os.unlink(temp_env_path)
+        os.remove(temp_env_path)

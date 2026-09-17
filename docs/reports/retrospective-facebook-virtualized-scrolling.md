@@ -6,6 +6,8 @@ date: 2026-04-06
 
 # Retrospective: Eliminating "Stupid Scrolling" in Facebook Automation
 
+**Universal ID:** `doc:facebook-virtualized-scrolling-retrospective-001`
+
 ## Overview
 
 The Facebook Inbox pipeline (`l5_fetch_fb_messages.py` -> `l3_inbox.py`) exhibited extremely brittle behavior labeled by developers as "stupid scrolling," where the Playwright agent would enter an endless loop of blind `page.mouse.wheel(0, 300)` down strokes (sometimes looping 150 times over several minutes) failing to target and click incoming unread threads.

@@ -1,34 +1,19 @@
 // code:web-component-008:action-queues
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import type { ActionQueueItem } from '@/lib/queries';
 import type { Seeker, SeekerDetail } from '@/lib/types';
-import { SeekerJourneyTimeline } from './seeker-journey-timeline';
+import { SeekerSidebar, SeekerSidebarEmptyState } from './seeker-sidebar';
 import { MasProgress, type MasJob } from './mas-progress';
 
-const PAGE_ID = '1548373332058326';
+// SeekerSidebar composes SeekerJourneyTimeline for this queue view.
 
 function seekerDetailUrl(seeker?: Seeker | null, fallbackId?: string | null) {
   if (seeker?.id) {
     return seeker.source === 'dm' ? `/seekers/${seeker.id}` : `/seekers/comment-${seeker.id}`;
   }
   return `/seekers/${encodeURIComponent(fallbackId || '')}`;
-}
-
-function facebookProfileUrl(value?: string | null) {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (/^\d+$/.test(trimmed)) {
-    return `https://www.facebook.com/${trimmed}`;
-  }
-  const candidate = trimmed.startsWith('http') ? trimmed : `https://${trimmed}`;
-  try {
-    const url = new URL(candidate);
-    return /(^|\.)facebook\.com$/i.test(url.hostname) && url.pathname.length > 1 ? url.toString() : null;
-  } catch {
-    return null;
-  }
 }
 
 interface ParsedPayload {
@@ -52,6 +37,23 @@ function parsePayload(jsonStr?: string | null): ParsedPayload {
   } catch {
     return {};
   }
+}
+
+function seekerFromQueueItem(item: ActionQueueItem): Seeker {
+  return {
+    id: item.targetType === 'thread' ? Number(item.targetId?.replace(/\D/g, '') || 0) : 0,
+    threadId: item.targetId || undefined,
+    name: item.targetName || item.targetType,
+    city: 'Unknown',
+    phone: null,
+    email: null,
+    fbProfileUrl: null,
+    fbUserId: null,
+    leadStage: 'Intake',
+    firstSeen: item.createdAt,
+    lastInteraction: item.createdAt,
+    source: item.targetType === 'comment' ? 'comment' : 'dm',
+  };
 }
 
 function getMasReasonDetails(item: ActionQueueItem, payload: ParsedPayload, seekerDetail?: SeekerDetail | null) {
@@ -112,6 +114,10 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
   const [success, setSuccess] = useState('');
   const [loadingContext, setLoadingContext] = useState<string | null>(null);
   const [recommendationJob, setRecommendationJob] = useState<MasJob | null>(null);
+  // Keeps the per-item inline MAS status visible for a short flash after the
+  // job reaches a terminal state, before the item's row reverts to its
+  // normal approve/reject buttons.
+  const [flashJobId, setFlashJobId] = useState<number | null>(null);
   const [selectedQueueItemIds, setSelectedQueueItemIds] = useState<Set<number>>(new Set());
   const selectionAnchorByQueueRef = useRef<Record<string, number>>({});
 
@@ -135,7 +141,17 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
     }
   };
 
-  const handleRunRecommendations = async (context: string, targetIds: string[]) => {
+  // Approved/executing items move forward only when the worker daemon
+  // (tools/l5_scheduler.py hitl_execution_job) claims them; poll so the
+  // inline status reflects that without a manual page refresh.
+  const hasInFlightItems = items.some(item => item.status === 'approved' || item.status === 'executing');
+  useEffect(() => {
+    if (!hasInFlightItems) return;
+    const interval = window.setInterval(() => { void fetchItems(); }, 6000);
+    return () => window.clearInterval(interval);
+  }, [hasInFlightItems]);
+
+  const handleRunRecommendations = async (context: string, targetIds: string[], regenerate = false) => {
     if (!targetIds.length) return;
     setError('');
     setSuccess('');
@@ -145,7 +161,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
       const res = await fetch('/api/action-queue/recommendations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: context, threadIds: targetIds, limit: targetIds.length }),
+        body: JSON.stringify({ type: context, threadIds: targetIds, limit: targetIds.length, regenerate }),
       });
       const data = await res.json();
       if (!res.ok || !data.job) {
@@ -158,8 +174,14 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
           if (!statusRes.ok || !statusData.job) throw new Error(statusData.error || 'Không đọc được trạng thái MAS job');
           const job = statusData.job as MasJob;
           setRecommendationJob(job);
+          if (job.status === 'completed' || job.status === 'failed') {
+            setFlashJobId(job.id);
+            window.setTimeout(() => setFlashJobId(current => current === job.id ? null : current), 4000);
+          }
           if (job.status === 'completed') {
             setSuccess(job.result?.message || `Đã tạo ${job.result?.count ?? 0} đề xuất mới (pending).`);
+            // Superseded drafts leave the list on refresh; drop their stale selection.
+            if (regenerate) setSelectedQueueItemIds(new Set());
             await fetchItems();
             setLoadingContext(null);
             return;
@@ -194,12 +216,15 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
     setSelectedQueueItemIds(new Set(ids));
   };
 
+  // Items selected inside a queue card already have a live draft, so the
+  // queue-card button runs MAS in regenerate mode: the new draft replaces the
+  // selected pending/approved one (executing items are left to the worker).
   const runSelectedQueue = (queueType: string, queueItems: ActionQueueItem[]) => {
     const targetIds = queueItems
       .filter(item => selectedQueueItemIds.has(item.id) && item.targetType === 'thread' && item.targetId)
       .map(item => item.targetId as string);
     const context = queueType === 'reply_message' ? 'reply' : queueType === 'reply_comment' ? 'comment' : queueType === 'proactive_message' ? 'warmup' : 'comment';
-    handleRunRecommendations(context, [...new Set(targetIds)]);
+    handleRunRecommendations(context, [...new Set(targetIds)], true);
   };
 
   const selectedThreadIds = items
@@ -238,20 +263,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
       } else {
         // Fallback seeker info
         setSidebarData({
-          seeker: {
-            id: item.targetType === 'thread' ? Number(item.targetId?.replace(/\D/g, '') || 0) : 0,
-            threadId: item.targetId || undefined,
-            name: item.targetName || item.targetType,
-            city: 'Unknown',
-            phone: null,
-            email: null,
-            fbProfileUrl: null,
-            fbUserId: null,
-            leadStage: 'Intake',
-            firstSeen: item.createdAt,
-            lastInteraction: item.createdAt,
-            source: item.targetType === 'comment' ? 'comment' : 'dm',
-          },
+          seeker: seekerFromQueueItem(item),
           messages: [],
           comments: [],
           adSource: null,
@@ -332,6 +344,12 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
   }, []);
 
   return <>
+    {/* Spinner keyframes are needed by inline status badges (approved/executing
+        rows) even when no MasProgress panel is mounted to define them. */}
+    <style>{`
+      @keyframes masSpin { to { transform: rotate(360deg); } }
+      .mas-spinner { display:inline-block; width:12px; height:12px; border:2px solid rgba(129,140,248,0.3); border-top-color:#818cf8; border-radius:50%; animation: masSpin 0.8s linear infinite; }
+    `}</style>
     {/* Safe Run Recommendations Control Panel */}
     <div style={{
       background: 'rgba(30, 27, 75, 0.4)',
@@ -421,7 +439,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
     {error && <div className="queue-error">{error}</div>}
     <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start', position: 'relative' }}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div className={`queue-grid ${selectedItem ? 'queue-grid--with-sidebar' : ''}`}>
+        <div className="queue-grid">
           {QUEUES.map(([key, title, icon]) => {
             const queueItems = items.filter(item => item.queueType === key);
             const selectedInQueue = queueItems.filter(item => selectedQueueItemIds.has(item.id));
@@ -437,7 +455,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
                   className="recommendation-action recommendation-action--reply queue-heading__action"
                   disabled={loadingContext !== null || selectableInQueue.length === 0}
                   onClick={() => runSelectedQueue(key, queueItems)}
-                  title={selectableInQueue.length ? `Chạy MAS cho ${selectableInQueue.length} seeker đã chọn` : 'Chọn ít nhất một seeker DM trong queue này'}
+                  title={selectableInQueue.length ? `Chạy lại MAS cho ${selectableInQueue.length} seeker đã chọn — đề xuất mới sẽ thay thế đề xuất hiện tại` : 'Chọn ít nhất một seeker DM trong queue này'}
                 >
                   {loadingContext === key ? '⏳ Đang chạy MAS...' : `⚡ Chạy đề xuất MAS${selectableInQueue.length ? ` (${selectableInQueue.length})` : ''}`}
                 </button>
@@ -446,6 +464,15 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
                 const isSelected = selectedItem?.id === item.id;
                 const isRangeSelected = selectedQueueItemIds.has(item.id);
                 const isPinned = pinnedItemId === item.id;
+                const jobTargetsItem = !!recommendationJob && !!item.targetId && recommendationJob.threadIds.includes(item.targetId);
+                const showJobInline = jobTargetsItem && recommendationJob && (
+                  recommendationJob.status === 'queued'
+                  || recommendationJob.status === 'running'
+                  || flashJobId === recommendationJob.id
+                );
+                // A batch job has one shared step state. Mount the full trace
+                // once, inside the first matching queue item.
+                const showJobSteps = showJobInline && recommendationJob && recommendationJob.threadIds[0] === item.targetId;
                 return (
                   <article
                     className={`queue-item ${isSelected ? 'queue-item--selected' : ''}`}
@@ -467,7 +494,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
                       <span>#{item.id} · vị trí {index + 1}</span>
                       <span className={`queue-status ${item.status}`}>{item.status}</span>
                     </div>
-                    <div>
+                    <div className="queue-item-title-row">
                       <strong
                         className="queue-item-username"
                         onClick={(e) => { e.stopPropagation(); handleTogglePin(item); }}
@@ -489,13 +516,56 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
                         <span style={{ fontSize: '11px', opacity: 0.75 }}>ℹ️</span>
                         {isPinned && <span style={{ fontSize: '11px', color: '#818cf8' }} title="Đã ghim">📌</span>}
                       </strong>
+                      {(() => {
+                        if (item.status !== 'pending' && item.status !== 'approved' && item.status !== 'executing') {
+                          return null;
+                        }
+                        if (item.status === 'approved') {
+                          return (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 600, color: '#fbbf24', whiteSpace: 'nowrap' }}>
+                              <span>⏳</span><span>Đã duyệt — chờ worker thực thi</span>
+                            </span>
+                          );
+                        }
+                        if (item.status === 'executing') {
+                          return (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 600, color: '#818cf8', whiteSpace: 'nowrap' }}>
+                              <span className="mas-spinner" />
+                              <span>⚙️ Đang thực thi…</span>
+                            </span>
+                          );
+                        }
+                        return (
+                          <div className="queue-actions queue-actions--inline">
+                            <button
+                              onClick={(event) => { event.stopPropagation(); void decide(item.id, 'approve'); }}
+                            >
+                              Duyệt & xếp thực thi
+                            </button>
+                            <button
+                              className="reject"
+                              onClick={(event) => { event.stopPropagation(); void decide(item.id, 'reject'); }}
+                            >
+                              Từ chối
+                            </button>
+                          </div>
+                        );
+                      })()}
                     </div>
+                    {showJobSteps && recommendationJob && (
+                      <div
+                        className="queue-item-mas-progress"
+                        onClick={(event) => event.stopPropagation()}
+                        aria-label={`Tiến trình MAS cho job ${recommendationJob.id}`}
+                      >
+                        <MasProgress job={recommendationJob} />
+                      </div>
+                    )}
                     <div style={{ marginTop: '8px', padding: '10px 12px', borderRadius: '8px', background: 'rgba(15, 23, 42, 0.62)', border: '1px solid rgba(129, 140, 248, 0.18)' }}>
                       <div style={{ fontSize: '9px', color: '#a5b4fc', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '5px' }}>Nội dung đề xuất</div>
                       <div style={{ whiteSpace: 'pre-wrap', fontSize: '13px', lineHeight: 1.55, color: 'var(--text-primary)' }}>{item.reactionType ? `React: ${item.reactionType}` : item.actionText}</div>
                     </div>
                     {item.errorText && <p className="queue-failure">Lỗi: {item.errorText}</p>}
-                    {item.status === 'pending' && <div className="queue-actions"><button onClick={() => decide(item.id, 'approve')}>Duyệt & xếp thực thi</button><button className="reject" onClick={() => decide(item.id, 'reject')}>Từ chối</button></div>}
                     {item.status === 'approved' && <small>Đã duyệt qua {item.approvalSource}; chờ worker ở đầu queue.</small>}
                   </article>
                 );
@@ -505,425 +575,127 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
         </div>
       </div>
 
-      {/* ── Right Sidebar (Reserved space by default to avoid layout shift) ── */}
-      <aside
-        className="queue-seeker-sidebar"
+      {/* ── Right Sidebar (shared with /seekers) ── */}
+      <SeekerSidebar
+        seeker={sidebarData?.seeker || (selectedItem ? seekerFromQueueItem(selectedItem) : null)}
+        detail={sidebarData}
+        loading={sidebarLoading}
+        detailHref={seekerDetailUrl(sidebarData?.seeker, selectedItem?.targetId || selectedItem?.targetName)}
+        onClose={handleCloseSidebar}
+        onRefresh={() => {
+          if (selectedItem) void loadSeekerData(selectedItem);
+        }}
         onMouseEnter={handleSidebarMouseEnter}
         onMouseLeave={handleSidebarMouseLeave}
+        headerBadge={selectedItem ? (
+          <span style={{
+            display: 'inline-block',
+            marginTop: '5px',
+            padding: '1px 6px',
+            border: pinnedItemId === selectedItem.id ? '1px solid rgba(99, 102, 241, 0.4)' : '1px solid transparent',
+            borderRadius: '10px',
+            background: pinnedItemId === selectedItem.id ? 'rgba(99, 102, 241, 0.2)' : 'transparent',
+            color: pinnedItemId === selectedItem.id ? '#a5b4fc' : 'var(--text-muted)',
+            fontSize: '10px',
+            fontWeight: pinnedItemId === selectedItem.id ? 600 : 400,
+          }}>
+            {pinnedItemId === selectedItem.id ? '📌 Đã ghim' : 'Xem nhanh (hover)'}
+          </span>
+        ) : null}
+        beforeJourney={selectedItem ? (() => {
+          const payload = parsePayload(selectedItem.payloadJson);
+          const masReason = getMasReasonDetails(selectedItem, payload, sidebarData);
+          return (
+            <div style={{
+              padding: '12px 14px',
+              marginBottom: '14px',
+              border: '1px solid rgba(99, 102, 241, 0.35)',
+              borderRadius: '10px',
+              background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.14), rgba(168, 85, 247, 0.09))',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#a5b4fc', fontSize: '11px', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                  <span>🤖</span>
+                  <span>Lý do trong hàng đợi (MAS Proof)</span>
+                </div>
+                <span style={{ flexShrink: 0, padding: '2px 7px', borderRadius: '8px', background: 'rgba(99, 102, 241, 0.25)', color: '#c7d2fe', fontSize: '10px', fontWeight: 600 }}>
+                  {masReason.source}
+                </span>
+              </div>
+              <div style={{ marginBottom: '4px', color: '#38bdf8', fontSize: '12px', fontWeight: 600 }}>
+                {masReason.triggerLabel}
+              </div>
+              <div style={{ marginBottom: '6px', color: 'var(--text-secondary)', fontSize: '12px', lineHeight: 1.45 }}>
+                {masReason.triggerDesc}
+              </div>
+              {masReason.classification && (
+                <div style={{ marginBottom: '6px', color: '#fbbf24', fontSize: '11px' }}>
+                  🏷️ Phân loại ý định: <strong>{masReason.classification}</strong>
+                </div>
+              )}
+              <div style={{
+                padding: '8px 10px',
+                marginTop: '8px',
+                borderLeft: '3px solid #818cf8',
+                borderRadius: '6px',
+                background: 'rgba(0,0,0,0.25)',
+                fontSize: '11px',
+              }}>
+                <div style={{ marginBottom: '2px', color: '#818cf8', fontWeight: 700 }}>Nội dung đề xuất do MAS soạn thảo:</div>
+                <div style={{ color: 'var(--text-primary)', fontStyle: 'italic', lineHeight: 1.35 }}>
+                  &ldquo;{selectedItem.actionText || (selectedItem.reactionType ? `Reaction: ${selectedItem.reactionType}` : '')}&rdquo;
+                </div>
+              </div>
+              {selectedItem.status === 'pending' && (
+                <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                  <button
+                    onClick={() => void decide(selectedItem.id, 'approve')}
+                    style={{
+                      flex: 1,
+                      padding: '6px 10px',
+                      border: 'none',
+                      borderRadius: '6px',
+                      background: 'var(--accent-emerald)',
+                      color: '#052e24',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ✓ Duyệt đề xuất này
+                  </button>
+                  <button
+                    onClick={() => void decide(selectedItem.id, 'reject')}
+                    className="reject"
+                    style={{
+                      padding: '6px 10px',
+                      border: '1px solid rgba(244,63,94,.45)',
+                      borderRadius: '6px',
+                      background: 'transparent',
+                      color: 'var(--accent-rose)',
+                      fontSize: '11px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Từ chối
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })() : null}
+        emptyState={<SeekerSidebarEmptyState />}
+        className="queue-seeker-sidebar"
         style={{
-          width: '380px',
-          minWidth: '380px',
           maxHeight: 'calc(100vh - 140px)',
-          overflowY: 'auto',
           position: 'sticky',
           top: '20px',
-          background: 'var(--bg-secondary)',
           border: selectedItem ? '1px solid var(--border-glow)' : '1px dashed var(--border-subtle)',
-          borderRadius: '14px',
-          padding: '20px',
           boxShadow: selectedItem ? '0 8px 32px rgba(0,0,0,0.4)' : 'none',
           transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
           zIndex: 40,
         }}
-      >
-        {selectedItem ? (
-          <>
-            {/* Header */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)' }}>
-                  {sidebarData?.seeker?.name || selectedItem.targetName || selectedItem.targetType}
-                </span>
-                {pinnedItemId === selectedItem.id ? (
-                  <span style={{ fontSize: '10px', background: 'rgba(99, 102, 241, 0.2)', color: '#a5b4fc', border: '1px solid rgba(99, 102, 241, 0.4)', padding: '1px 6px', borderRadius: '10px', fontWeight: 600 }}>
-                    📌 Đã ghim
-                  </span>
-                ) : (
-                  <span style={{ fontSize: '10px', background: 'rgba(255, 255, 255, 0.06)', color: 'var(--text-muted)', padding: '1px 6px', borderRadius: '10px' }}>
-                    Xem nhanh (hover)
-                  </span>
-                )}
-              </div>
-              <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '3px' }}>
-                {sidebarData?.seeker?.source === 'dm' || selectedItem.targetType === 'thread' ? '💬 DM' : '💬 Comment'} · {sidebarData?.seeker?.city || 'Unknown'} · {sidebarData?.seeker?.leadStage || 'Intake'}
-              </div>
-            </div>
-            <button
-              onClick={handleCloseSidebar}
-              style={{
-                background: 'rgba(255,255,255,0.06)',
-                border: 'none',
-                borderRadius: '6px',
-                color: 'var(--text-muted)',
-                fontSize: '14px',
-                cursor: 'pointer',
-                width: '28px',
-                height: '28px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center'
-              }}
-              title="Đóng sidebar"
-            >
-              ✕
-            </button>
-          </div>
-
-          {/* Quick links */}
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '14px' }}>
-            <a
-              href={seekerDetailUrl(sidebarData?.seeker, selectedItem.targetId || selectedItem.targetName)}
-              style={{ padding: '6px 12px', background: 'rgba(99,102,241,0.12)', borderRadius: '6px', fontSize: '11px', fontWeight: 600, color: '#818cf8', textDecoration: 'none' }}
-            >
-              📋 Full Details →
-            </a>
-            {facebookProfileUrl(sidebarData?.seeker?.fbProfileUrl) && (
-              <a
-                href={facebookProfileUrl(sidebarData?.seeker?.fbProfileUrl)!}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ padding: '6px 12px', background: 'rgba(59,130,246,0.12)', borderRadius: '6px', fontSize: '11px', fontWeight: 600, color: '#60a5fa', textDecoration: 'none' }}
-              >
-                👤 FB Profile ↗
-              </a>
-            )}
-            {(sidebarData?.seeker?.source === 'dm' || selectedItem.targetType === 'thread') && facebookProfileUrl(sidebarData?.seeker?.fbProfileUrl) && (
-              <a
-                href={`https://business.facebook.com/latest/inbox/all?asset_id=${PAGE_ID}&selected_item_id=${facebookProfileUrl(sidebarData?.seeker?.fbProfileUrl)!.split('/').pop()?.split('?')[0]}&thread_type=FB_MESSAGE`}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ padding: '6px 12px', background: 'rgba(99,102,241,0.12)', borderRadius: '6px', fontSize: '11px', fontWeight: 600, color: '#818cf8', textDecoration: 'none' }}
-              >
-                💬 FB Inbox ↗
-              </a>
-            )}
-          </div>
-
-          {/* ── MAS Queue Reason & Proof Box ── */}
-          {(() => {
-            const payload = parsePayload(selectedItem.payloadJson);
-            const masReason = getMasReasonDetails(selectedItem, payload, sidebarData);
-            return (
-              <div style={{
-                padding: '12px 14px',
-                background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.14), rgba(168, 85, 247, 0.09))',
-                border: '1px solid rgba(99, 102, 241, 0.35)',
-                borderRadius: '10px',
-                marginBottom: '14px',
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#a5b4fc', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span>🤖</span>
-                    <span>Lý do trong hàng đợi (MAS Proof)</span>
-                  </div>
-                  <span style={{ fontSize: '10px', padding: '2px 7px', borderRadius: '8px', background: 'rgba(99, 102, 241, 0.25)', color: '#c7d2fe', fontWeight: 600 }}>
-                    {masReason.source}
-                  </span>
-                </div>
-
-                <div style={{ fontSize: '12px', fontWeight: 600, color: '#38bdf8', marginBottom: '4px' }}>
-                  {masReason.triggerLabel}
-                </div>
-                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.45, marginBottom: '6px' }}>
-                  {masReason.triggerDesc}
-                </div>
-
-                {masReason.classification && (
-                  <div style={{ fontSize: '11px', color: '#fbbf24', marginBottom: '6px' }}>
-                    🏷️ Phân loại ý định: <strong>{masReason.classification}</strong>
-                  </div>
-                )}
-
-                <div style={{
-                  padding: '8px 10px',
-                  borderRadius: '6px',
-                  background: 'rgba(0,0,0,0.25)',
-                  borderLeft: '3px solid #818cf8',
-                  fontSize: '11px',
-                  marginTop: '8px',
-                }}>
-                  <div style={{ fontWeight: 700, color: '#818cf8', marginBottom: '2px' }}>Nội dung đề xuất do MAS soạn thảo:</div>
-                  <div style={{ color: 'var(--text-primary)', fontStyle: 'italic', lineHeight: 1.35 }}>
-                    &ldquo;{selectedItem.actionText || (selectedItem.reactionType ? `Reaction: ${selectedItem.reactionType}` : '')}&rdquo;
-                  </div>
-                </div>
-
-                {selectedItem.status === 'pending' && (
-                  <div style={{ marginTop: '10px', display: 'flex', gap: '8px' }}>
-                    <button
-                      onClick={() => decide(selectedItem.id, 'approve')}
-                      style={{
-                        flex: 1,
-                        padding: '6px 10px',
-                        background: 'var(--accent-emerald)',
-                        color: '#052e24',
-                        border: 'none',
-                        borderRadius: '6px',
-                        fontSize: '11px',
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      ✓ Duyệt đề xuất này
-                    </button>
-                    <button
-                      onClick={() => decide(selectedItem.id, 'reject')}
-                      className="reject"
-                      style={{
-                        padding: '6px 10px',
-                        background: 'transparent',
-                        color: 'var(--accent-rose)',
-                        border: '1px solid rgba(244,63,94,.45)',
-                        borderRadius: '6px',
-                        fontSize: '11px',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      Từ chối
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
-          {/* Compact Journey Timeline */}
-          {sidebarData?.seeker && (
-            <div style={{ marginBottom: '14px', padding: '12px', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-subtle)', borderRadius: '10px' }}>
-              <SeekerJourneyTimeline
-                seeker={sidebarData.seeker}
-                compact={true}
-                onRefreshSeeker={() => loadSeekerData(selectedItem)}
-              />
-            </div>
-          )}
-
-          {sidebarLoading && (
-            <div style={{ textAlign: 'center', padding: '20px', color: 'var(--text-muted)', fontSize: '12px' }}>
-              ⏳ Đang tải thông tin Seeker...
-            </div>
-          )}
-
-          {/* Stats, Recent messages, Comments */}
-          {sidebarData && !sidebarLoading && (
-            <>
-              {/* Stats */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '14px' }}>
-                <div style={{ textAlign: 'center', padding: '10px 4px', background: 'rgba(99,102,241,0.06)', borderRadius: '8px' }}>
-                  <div style={{ fontSize: '20px', fontWeight: 800, color: '#818cf8' }}>{sidebarData.messageCount ?? 0}</div>
-                  <div style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>Msgs</div>
-                </div>
-                <div style={{ textAlign: 'center', padding: '10px 4px', background: 'rgba(245,158,11,0.06)', borderRadius: '8px' }}>
-                  <div style={{ fontSize: '20px', fontWeight: 800, color: '#f59e0b' }}>{sidebarData.commentCount ?? 0}</div>
-                  <div style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>Cmts</div>
-                </div>
-                <div style={{ textAlign: 'center', padding: '10px 4px', background: sidebarData.adSource ? 'rgba(236,72,153,0.06)' : 'rgba(107,114,128,0.06)', borderRadius: '8px' }}>
-                  <div style={{ fontSize: '20px', fontWeight: 800, color: sidebarData.adSource ? '#ec4899' : 'var(--text-muted)' }}>{sidebarData.adSource ? '✓' : '✗'}</div>
-                  <div style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>Ad</div>
-                </div>
-              </div>
-
-              {/* Ad source */}
-              {sidebarData.adSource && (
-                <div style={{ padding: '10px 12px', background: 'rgba(236,72,153,0.06)', border: '1px solid rgba(236,72,153,0.15)', borderRadius: '8px', marginBottom: '12px' }}>
-                  <div style={{ fontSize: '10px', fontWeight: 700, color: '#ec4899', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '4px' }}>📢 Ad Source</div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
-                    {sidebarData.adSource.matchedPostName?.slice(0, 100) || 'Replied to ad post'}
-                  </div>
-                </div>
-              )}
-
-              {/* Recent messages */}
-              {sidebarData.messages?.length > 0 && (
-                <div style={{ marginBottom: '12px' }}>
-                  <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>
-                    Recent Messages ({sidebarData.messages.length})
-                  </div>
-                  <div
-                    className="sidebar-recent-messages"
-                    style={{
-                      maxHeight: '260px',
-                      overflowY: 'auto',
-                      paddingRight: '6px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '4px',
-                    }}
-                  >
-                    {sidebarData.messages
-                      .filter(m => !m.content?.includes('[AD SOURCE]'))
-                      .slice(-12)
-                      .map((msg, i) => (
-                        <div
-                          key={i}
-                          style={{
-                            padding: '8px 10px',
-                            marginBottom: '4px',
-                            borderRadius: msg.sender === 'Page' ? '8px 8px 2px 8px' : '8px 8px 8px 2px',
-                            background: msg.sender === 'Page' ? 'rgba(99,102,241,0.08)' : 'rgba(255,255,255,0.04)',
-                            borderLeft: msg.sender !== 'Page' ? '2px solid #f59e0b' : 'none',
-                          }}
-                        >
-                          <div style={{ fontSize: '9px', fontWeight: 700, color: msg.sender === 'Page' ? '#818cf8' : '#f59e0b' }}>
-                            {msg.sender === 'Page' ? 'Page' : (sidebarData.seeker?.name || selectedItem.targetName || 'Seeker')}
-                          </div>
-                          <div style={{
-                            fontSize: '12px',
-                            color: 'var(--text-primary)',
-                            lineHeight: 1.4,
-                            marginTop: '2px',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            display: '-webkit-box',
-                            WebkitLineClamp: 2,
-                            WebkitBoxOrient: 'vertical' as const,
-                          }}>
-                            {msg.content || '(empty)'}
-                          </div>
-                          {msg.messageTimestamp && (
-                            <div style={{ fontSize: '9px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                              {msg.messageTimestamp}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Comments */}
-              {sidebarData.comments?.length > 0 && (
-                <div>
-                  <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '8px' }}>
-                    Comments ({sidebarData.comments.length})
-                  </div>
-                  {sidebarData.comments.slice(0, 3).map((cmt, i) => (
-                    <div key={i} style={{ padding: '8px 10px', marginBottom: '4px', background: 'rgba(245,158,11,0.04)', border: '1px solid rgba(245,158,11,0.1)', borderRadius: '8px' }}>
-                      <div style={{
-                        fontSize: '12px',
-                        color: 'var(--text-primary)',
-                        lineHeight: 1.4,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        display: '-webkit-box',
-                        WebkitLineClamp: 2,
-                        WebkitBoxOrient: 'vertical' as const,
-                      }}>
-                        {cmt.commentText || '(empty)'}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </>
-      ) : (
-        /* Empty State Placeholder (spares space by default to avoid layout resize) */
-        <div style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          textAlign: 'center',
-          minHeight: '340px',
-          padding: '28px 16px',
-        }}>
-          <div style={{
-            width: '56px',
-            height: '56px',
-            borderRadius: '50%',
-            background: 'rgba(99, 102, 241, 0.08)',
-            border: '1px solid rgba(99, 102, 241, 0.25)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: '26px',
-            marginBottom: '16px',
-          }}>
-            👤
-          </div>
-          <div style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '6px' }}>
-            Thông tin Seeker & Lý do MAS
-          </div>
-          <p style={{ fontSize: '12px', lineHeight: 1.5, color: 'var(--text-secondary)', maxWidth: '290px', margin: '0 0 22px' }}>
-            Bấm hoặc di chuột vào tên Seeker trong hàng đợi bên trái để xem hồ sơ, hội thoại và bằng chứng phân tích từ MAS.
-          </p>
-
-          <div style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '10px',
-            width: '100%',
-            textAlign: 'left',
-          }}>
-            <div style={{
-              padding: '10px 12px',
-              borderRadius: '8px',
-              background: 'rgba(255, 255, 255, 0.02)',
-              border: '1px solid rgba(255, 255, 255, 0.05)',
-              fontSize: '11px',
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: '10px',
-            }}>
-              <span style={{ fontSize: '15px' }}>🤖</span>
-              <div>
-                <strong style={{ color: '#818cf8', display: 'block' }}>Bằng chứng MAS Proof</strong>
-                <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>Hiển thị nguyên nhân kích hoạt và nội dung đề xuất của MAS.</span>
-              </div>
-            </div>
-
-            <div style={{
-              padding: '10px 12px',
-              borderRadius: '8px',
-              background: 'rgba(255, 255, 255, 0.02)',
-              border: '1px solid rgba(255, 255, 255, 0.05)',
-              fontSize: '11px',
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: '10px',
-            }}>
-              <span style={{ fontSize: '15px' }}>💬</span>
-              <div>
-                <strong style={{ color: '#fbbf24', display: 'block' }}>Hội thoại thực tế</strong>
-                <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>Xem các tin nhắn gần đây để nắm bắt ngữ cảnh trước khi duyệt.</span>
-              </div>
-            </div>
-
-            <div style={{
-              padding: '10px 12px',
-              borderRadius: '8px',
-              background: 'rgba(255, 255, 255, 0.02)',
-              border: '1px solid rgba(255, 255, 255, 0.05)',
-              fontSize: '11px',
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: '10px',
-            }}>
-              <span style={{ fontSize: '15px' }}>🛤️</span>
-              <div>
-                <strong style={{ color: '#34d399', display: 'block' }}>Hành trình & Liên kết</strong>
-                <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>Giai đoạn phễu Seeker, hồ sơ Facebook và hộp thư Meta Inbox.</span>
-              </div>
-            </div>
-          </div>
-
-          <div style={{
-            marginTop: '22px',
-            fontSize: '10px',
-            color: 'var(--text-muted)',
-            fontStyle: 'italic',
-            background: 'rgba(255, 255, 255, 0.02)',
-            padding: '6px 12px',
-            borderRadius: '6px',
-          }}>
-            💡 Khung này cố định sẵn để bố cục không bị co giãn khi bạn bấm xem chi tiết.
-          </div>
-        </div>
-      )}
-      </aside>
+      />
     </div>
   </>;
 }

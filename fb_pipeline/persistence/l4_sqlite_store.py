@@ -236,6 +236,8 @@ def setup_database(conn: sqlite3.Connection, logger=None):
     # so we use a plain DATETIME (NULL default) here for migration compatibility.
     _ensure_column(cursor, "users", "last_synced_at", "last_synced_at DATETIME")
     _ensure_column(cursor, "users", "program_code", "program_code TEXT")
+    _ensure_column(cursor, "fetch_log", "qa_status", "qa_status TEXT")
+    _ensure_column(cursor, "fetch_log", "qa_report_path", "qa_report_path TEXT")
     _ensure_column(cursor, "users", "classification_proof", "classification_proof TEXT")
     _ensure_column(cursor, "users", "classification_verified_at", "classification_verified_at DATETIME")
     _ensure_column(cursor, "users", "temperature", "temperature TEXT DEFAULT 'warm'")
@@ -439,6 +441,45 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             last_update_id INTEGER DEFAULT 0
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS llm_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            parent_call_id INTEGER,
+            seq_in_trace INTEGER NOT NULL,
+            attempt INTEGER DEFAULT 1,
+            started_at DATETIME NOT NULL,
+            finished_at DATETIME,
+            duration_ms INTEGER,
+            trigger TEXT NOT NULL,
+            route TEXT NOT NULL,
+            route_group TEXT NOT NULL,
+            agent_name TEXT,
+            model TEXT,
+            page_id TEXT,
+            subject_type TEXT,
+            subject_id TEXT,
+            subject_label TEXT,
+            dry_run BOOLEAN DEFAULT 1,
+            system_prompt TEXT,
+            messages_json TEXT,
+            state_json TEXT,
+            tools_json TEXT,
+            response_text TEXT,
+            response_json TEXT,
+            sanitized_text TEXT,
+            status TEXT NOT NULL,
+            error TEXT,
+            tokens_in INTEGER,
+            tokens_out INTEGER,
+            outcome_type TEXT,
+            outcome_ref TEXT
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_llm_calls_started ON llm_calls(started_at DESC, id DESC)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_llm_calls_trace ON llm_calls(trace_id, seq_in_trace)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_llm_calls_subject ON llm_calls(subject_type, subject_id, started_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_llm_calls_route ON llm_calls(route, started_at)')
     migrate_schema_v2(conn)
     conn.commit()
 

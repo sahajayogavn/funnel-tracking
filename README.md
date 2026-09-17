@@ -137,7 +137,7 @@ A Next.js 16 full-stack application that visualizes seeker data from FrankenSQLi
 
 ```bash
 cd web && npm install && npm run dev
-# Open http://localhost:9994
+# Open http://localhost:9995 (override with PORT=<port> npm run dev)
 ```
 
 ### Pages
@@ -187,6 +187,8 @@ The journey engine in `web/src/lib/journey-engine.ts` defines the canonical web 
 
 - [English (README.md)](README.md) | [Tiếng Việt (README-vi.md)](README-vi.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [User use cases (Vietnamese)](docs/usecases/seeker-care-operations.md)
+- [Universal ID registry](docs/universal-id-registry.md)
 
 ---
 

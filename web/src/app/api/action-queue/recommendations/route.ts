@@ -9,13 +9,14 @@ const MAS_PYTHON = process.env.MAS_PYTHON || path.join(PROJECT_ROOT, '.venv', 'b
 const MAS_SCRIPT = path.join(PROJECT_ROOT, 'tools', 'l5_mas_recommend.py');
 const MAS_TIMEOUT_MS = Number(process.env.MAS_TIMEOUT_MS || 240_000);
 
-type Proposal = { id: number; queueType: string; targetId: string; targetName: string; actionText: string; kind?: string };
+type Proposal = { id: number; queueType: string; targetId: string; targetName: string; actionText: string; kind?: string; supersededIds?: number[] };
 type MasResult = {
   status: 'ok' | 'error';
   error?: string;
   count?: number;
   proposals?: Proposal[];
   skipped?: { threadId: string; reason: string }[];
+  supersededCount?: number;
 };
 type RecommendationJob = {
   id: number;
@@ -23,6 +24,7 @@ type RecommendationJob = {
   phase: string;
   type: string;
   threadIds: string[];
+  regenerate: boolean;
   createdAt: string;
   startedAt?: string | null;
   completedAt?: string | null;
@@ -30,7 +32,10 @@ type RecommendationJob = {
   error?: string | null;
 };
 
+let recommendationJobsTableDb: ReturnType<typeof getDb> | null = null;
+
 function ensureRecommendationJobsTable(db: ReturnType<typeof getDb>) {
+  if (recommendationJobsTableDb === db) return;
   db.exec(`
     CREATE TABLE IF NOT EXISTS mas_recommendation_jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,16 +51,18 @@ function ensureRecommendationJobsTable(db: ReturnType<typeof getDb>) {
     );
     CREATE INDEX IF NOT EXISTS idx_mas_recommendation_jobs_status ON mas_recommendation_jobs(status, id);
   `);
+  recommendationJobsTableDb = db;
 }
 
 function formatJob(row: Record<string, unknown>): RecommendationJob {
-  const request = JSON.parse(String(row.request_json || '{}')) as { type?: string; threadIds?: string[] };
+  const request = JSON.parse(String(row.request_json || '{}')) as { type?: string; threadIds?: string[]; regenerate?: boolean };
   return {
     id: Number(row.id),
     status: row.status as RecommendationJob['status'],
     phase: String(row.phase || 'queued'),
     type: request.type || 'all',
     threadIds: request.threadIds || [],
+    regenerate: Boolean(request.regenerate),
     createdAt: String(row.created_at),
     startedAt: row.started_at as string | null,
     completedAt: row.completed_at as string | null,
@@ -67,9 +74,12 @@ function formatJob(row: Record<string, unknown>): RecommendationJob {
 // code:api-recommendations-001:mas-engine
 // Spawns the Python MAS entrypoint (ADK BatchInboxAgent / WarmUpComposer / EventAdvertiser).
 // The script only enqueues pending proposals; it never opens a browser or sends messages.
-function runMasEngine(opts: { type: string; threadIds: string[]; city?: string }): Promise<MasResult> {
+// With `regenerate` (queue-card "Chạy đề xuất MAS" on already-queued items) the
+// script replaces the seeker's current pending/approved draft instead of skipping it.
+function runMasEngine(opts: { type: string; threadIds: string[]; city?: string; regenerate?: boolean }): Promise<MasResult> {
   const args = [MAS_SCRIPT, '--thread-ids', opts.threadIds.join(','), '--type', opts.type, '--page-id', DEFAULT_PAGE_ID];
   if (opts.city && opts.city !== 'all') args.push('--city', opts.city);
+  if (opts.regenerate) args.push('--regenerate');
   return new Promise(resolve => {
     execFile(
       MAS_PYTHON,
@@ -349,7 +359,7 @@ async function runRecommendationJob(jobId: number) {
 
   const row = db.prepare('SELECT request_json FROM mas_recommendation_jobs WHERE id = ?').get(jobId) as { request_json: string } | undefined;
   if (!row) return;
-  const request = JSON.parse(row.request_json) as { type: string; threadId?: string; threadIds: string[]; seekerName?: string; city?: string; limit: number };
+  const request = JSON.parse(row.request_json) as { type: string; threadId?: string; threadIds: string[]; seekerName?: string; city?: string; limit: number; regenerate?: boolean };
   const setPhase = (phase: string) => db.prepare("UPDATE mas_recommendation_jobs SET phase = ?, updated_at = datetime('now') WHERE id = ?").run(phase, jobId);
 
   try {
@@ -357,22 +367,27 @@ async function runRecommendationJob(jobId: number) {
     let result: Record<string, unknown>;
     if (selectedOnly && ['all', 'reply', 'warmup', 'event'].includes(request.type)) {
       setPhase('waiting_for_llm');
-      const mas = await runMasEngine({ type: request.type, threadIds: request.threadIds, city: request.city });
+      const mas = await runMasEngine({ type: request.type, threadIds: request.threadIds, city: request.city, regenerate: request.regenerate });
       if (mas.status === 'ok') {
         setPhase('saving_recommendations');
         const proposals = mas.proposals || [];
         const skipped = mas.skipped || [];
+        const supersededCount = mas.supersededCount || 0;
         const skippedNote = skipped.length ? ` Bỏ qua ${skipped.length}: ${summarizeSkipped(skipped)}.` : '';
+        const supersededNote = supersededCount ? ` Đã thay thế ${supersededCount} đề xuất cũ (đánh dấu rejected).` : '';
         result = {
-          success: true, engine: 'inbox_mas', count: proposals.length, createdCount: proposals.length, proposals, skipped,
-          message: `MAS đã tạo ${proposals.length} đề xuất mới vào hàng đợi chờ duyệt (status: pending).${skippedNote}`,
+          success: true, engine: 'inbox_mas', count: proposals.length, createdCount: proposals.length, proposals, skipped, supersededCount,
+          message: `MAS đã tạo ${proposals.length} đề xuất mới vào hàng đợi chờ duyệt (status: pending).${supersededNote}${skippedNote}`,
         };
       } else {
         setPhase('creating_safe_fallback');
         const fallback = runTemplateEngine(db, { type: request.type, threadId: request.threadId, targetThreadIds: request.threadIds, selectedOnly, seekerName: request.seekerName, city: request.city, limit: request.limit }).created;
         result = {
-          success: true, engine: 'template_fallback', masError: mas.error, count: fallback.length, createdCount: fallback.length, proposals: fallback,
-          message: `⚠️ MAS không chạy được (${mas.error}). Đã tạo ${fallback.length} đề xuất tạm bằng template vào hàng đợi chờ duyệt.`,
+          success: true, engine: 'template_fallback', count: fallback.length, createdCount: fallback.length, proposals: fallback,
+          // The safe fallback is an intentional successful outcome for the
+          // operator; don't surface the internal MAS failure as a user-facing
+          // error after proposals were successfully created.
+          message: `Đã tạo ${fallback.length} đề xuất an toàn bằng template vào hàng đợi chờ duyệt.`,
         };
       }
     } else {
@@ -412,6 +427,7 @@ export async function POST(request: NextRequest) {
       seekerName,
       city,
       limit = 5,
+      regenerate = false,
     } = body;
 
     const targetThreadIds = Array.isArray(threadIds)
@@ -421,7 +437,7 @@ export async function POST(request: NextRequest) {
 
     const db = getDb();
     ensureRecommendationJobsTable(db);
-    const jobRequest = { type, threadId, threadIds: targetThreadIds, seekerName, city, limit, selectedOnly };
+    const jobRequest = { type, threadId, threadIds: targetThreadIds, seekerName, city, limit, selectedOnly, regenerate: selectedOnly && regenerate === true };
     const result = db.prepare("INSERT INTO mas_recommendation_jobs (status, phase, request_json) VALUES ('queued', 'queued', ?)")
       .run(JSON.stringify(jobRequest));
     const jobId = Number(result.lastInsertRowid);

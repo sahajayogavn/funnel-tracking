@@ -116,12 +116,11 @@ def process_thread_task(page, conn, task: ThreadTask, deps: ThreadWorkerDeps, lo
         thread_record,
         messages_list,
         extract_user_info=deps.extract_user_info,
-        detect_city=deps.detect_city,
         ad_context=ad_context,
         fb_url=fb_url,
         ad_ids=ad_ids,
     )
-    persist_result = persist_thread_record(conn, enriched_record, detect_city=deps.detect_city)
+    persist_result = persist_thread_record(conn, enriched_record)
     messages_added = persist_result.get("messages_added", 0) if isinstance(persist_result, dict) else 0
 
     return ThreadResult(

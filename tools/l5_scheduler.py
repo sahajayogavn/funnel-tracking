@@ -68,7 +68,7 @@ DEFAULT_FETCH_INTERVAL = 15   # minutes
 DEFAULT_WARMUP_TIME = "09:00"
 DEFAULT_EVENT_TIME = "10:00"
 DEFAULT_CLASSIFY_INTERVAL = 30  # minutes; LLM city/program pass, no browser
-ALL_ROUTES = {"react", "reply", "warmup", "event", "classify"}
+ALL_ROUTES = {"react", "reply", "event", "classify"}
 
 # --- Graceful shutdown ---
 _shutdown_requested = False
@@ -278,8 +278,10 @@ def setup_schedule(page_id: str, dry_run: bool, routes: set,
 
 def run_scheduler_loop():
     """Main scheduler event loop with graceful shutdown."""
-    logger.info("Scheduler loop started. Triggering immediate first run. Press Ctrl+C to stop.")
-    schedule.run_all()
+    logger.info("Scheduler loop started. Triggering immediate first run for minute/second jobs. Press Ctrl+C to stop.")
+    for job in schedule.jobs:
+        if job.unit in ('minutes', 'seconds'):
+            job.run()
     while not _shutdown_requested:
         schedule.run_pending()
         time.sleep(10)
@@ -301,9 +303,9 @@ def main():
         help="Send replies/reactions for real (default is dry-run)"
     )
     parser.add_argument(
-        "--routes", default="react,reply,warmup,event,classify",
+        "--routes", default="react,reply,event,classify",
         help="Comma-separated routes to enable (default: all). "
-             "Options: react, reply, warmup, event, classify"
+             "Options: react, reply, event, classify"
     )
     parser.add_argument(
         "--classify-interval", type=int, default=DEFAULT_CLASSIFY_INTERVAL,
@@ -333,10 +335,15 @@ def main():
     args = parser.parse_args()
     dry_run = not args.live
     page_id = parse_page_id(args.page_id)
-    routes = set(r.strip() for r in args.routes.split(",")) & ALL_ROUTES
+    
+    raw_routes = set(r.strip() for r in args.routes.split(","))
+    if "warmup" in raw_routes:
+        logger.warning("warmup is manual-only (use /queues)")
+    
+    routes = raw_routes & ALL_ROUTES
 
     if not routes:
-        logger.error("No valid routes specified. Use: react, reply, warmup, event, classify")
+        logger.error("No valid routes specified. Use: react, reply, event, classify")
         sys.exit(1)
 
     # Setup LLM env if any agent route is enabled

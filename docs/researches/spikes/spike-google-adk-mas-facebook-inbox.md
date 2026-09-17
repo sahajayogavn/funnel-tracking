@@ -1,6 +1,6 @@
 # Spike: Production-Grade MAS Chatbot for Facebook Inbox
 
-> **ID**: `doc:spike-adk-mas-001`
+**Universal ID:** `doc:spike-adk-mas-001`
 > **Date**: 2026-03-20 (updated)
 > **Status**: Architecture Defined — Ready for Implementation
 > **Goal**: Build a production-grade Google ADK Multi-Agent System (MAS) that handles Facebook inbox conversations using 4 specialized agents (Analyzer, Librarian, Validator, WarmUp), with SOPs, self-improvement cycles, and both reactive and proactive pipelines.

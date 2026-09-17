@@ -1,10 +1,14 @@
 // code:web-api-002:graph-api
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getGraphData } from '@/lib/queries';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const graphData = getGraphData();
+    const { searchParams } = new URL(request.url);
+    const city = searchParams.get('city') || undefined;
+    const startDate = searchParams.get('startDate') || undefined;
+    const endDate = searchParams.get('endDate') || undefined;
+    const graphData = getGraphData({ city, startDate, endDate });
     return NextResponse.json(graphData);
   } catch (error) {
     console.error('Graph API error:', error);

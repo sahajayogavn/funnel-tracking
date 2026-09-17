@@ -33,6 +33,7 @@ function tableExists(tableName: string): boolean {
 export type ActionQueueItem = {
   id: number; queueType: string; targetType: string; targetId: string | null;
   targetName: string | null; actionText: string | null; reactionType: string | null;
+  payloadJson?: string | null;
   status: string; approvalSource: string | null; errorText: string | null; createdAt: string;
 };
 
@@ -41,6 +42,7 @@ export function getActionQueueItems(): ActionQueueItem[] {
   return getDb().prepare(`
     SELECT id, queue_type AS queueType, target_type AS targetType, target_id AS targetId,
            target_name AS targetName, action_text AS actionText, reaction_type AS reactionType,
+           payload_json AS payloadJson,
            status, approval_source AS approvalSource, error_text AS errorText, created_at AS createdAt
     FROM action_queue
     WHERE status NOT IN ('executed', 'rejected')
@@ -55,6 +57,7 @@ export function getSeekerActionQueueItems(targetId?: string | null, targetName?:
   return db.prepare(`
     SELECT id, queue_type AS queueType, target_type AS targetType, target_id AS targetId,
            target_name AS targetName, action_text AS actionText, reaction_type AS reactionType,
+           payload_json AS payloadJson,
            status, approval_source AS approvalSource, error_text AS errorText, created_at AS createdAt
     FROM action_queue
     WHERE (target_id = ? OR (target_name IS NOT NULL AND target_name = ?))
@@ -93,12 +96,56 @@ function normalizeMessageSender(content: string | null, originalSender: string |
 
 export function getAllSeekers(): Seeker[] {
   const db = getDb();
+  const hasProgramCode = (db.prepare("PRAGMA table_info(users)").all() as { name: string }[])
+    .some((column: { name: string }) => column.name === 'program_code');
+  const programCodeSelect = hasProgramCode ? 'MAX(u.program_code) AS programCode' : 'NULL AS programCode';
+  // Existing installations gain this column on their next inbox sync. Keep
+  // the dashboard readable during that one-time migration.
+  const hasInboxSortIndex = (db.prepare("PRAGMA table_info(threads)")
+    .all() as { name: string }[])
+    .some((column: { name: string }) => column.name === 'inbox_sort_index');
+  const hasLastMessageAt = (db.prepare("PRAGMA table_info(threads)")
+    .all() as { name: string }[])
+    .some((column: { name: string }) => column.name === 'last_message_at');
+  const inboxSortIndexSelect = hasInboxSortIndex
+    ? 't.inbox_sort_index AS inboxSortIndex'
+    : 'NULL AS inboxSortIndex';
+  const lastMessageAtSelect = hasLastMessageAt
+    ? 't.last_message_at AS lastMessageAt'
+    : 'NULL AS lastMessageAt';
+
+  const hasClassificationVerifiedAt = (db.prepare("PRAGMA table_info(users)").all() as { name: string }[])
+    .some((column: { name: string }) => column.name === 'classification_verified_at');
+  
+  const classificationStatusSelect = hasClassificationVerifiedAt
+    ? `CASE
+         WHEN MAX(u.classification_verified_at) IS NULL
+           OR MAX(u.last_interaction) > MAX(u.classification_verified_at) THEN 'pending'
+         WHEN COALESCE(
+           MAX(CASE WHEN u.city != 'Unknown' AND u.city IS NOT NULL THEN u.city END),
+           MAX(CASE WHEN ap.city != 'Unknown' AND ap.city IS NOT NULL THEN ap.city END),
+           MAX(u.city),
+           'Unknown'
+         ) = 'Unknown' THEN 'unknown'
+         ELSE 'done'
+       END AS classificationStatus`
+    : `CASE
+         WHEN COALESCE(
+           MAX(CASE WHEN u.city != 'Unknown' AND u.city IS NOT NULL THEN u.city END),
+           MAX(CASE WHEN ap.city != 'Unknown' AND ap.city IS NOT NULL THEN ap.city END),
+           MAX(u.city),
+           'Unknown'
+         ) = 'Unknown' THEN 'unknown'
+         ELSE 'done'
+       END AS classificationStatus`;
 
   // DM users — use threads as base table and LEFT JOIN to users for contact info
   // This ensures ALL thread interactions are counted, not just those with extracted user info
   const dmUsers = db.prepare(`
     SELECT
       MIN(u.id) AS id, t.id AS threadId, t.thread_name AS name,
+      ${inboxSortIndexSelect},
+      ${lastMessageAtSelect},
       MAX(u.fb_url) AS fbProfileUrl,
       NULL AS fbUserId,
       MAX(u.phone) AS phone, MAX(u.email) AS email,
@@ -108,10 +155,28 @@ export function getAllSeekers(): Seeker[] {
         MAX(u.city),
         'Unknown'
       ) AS city,
+      ${programCodeSelect},
+      ${classificationStatusSelect},
       COALESCE(MAX(u.lead_stage), 'Intake') AS leadStage,
       MIN(COALESCE(u.first_seen, t.created_at)) AS firstSeen,
       MAX(COALESCE(u.last_interaction, t.last_synced_time)) AS lastInteraction,
-      (SELECT message_timestamp FROM messages m WHERE m.thread_id = t.id ORDER BY m.id DESC LIMIT 1) AS lastMessageTimestampText,
+      (
+        SELECT message_timestamp FROM messages m
+        WHERE m.thread_id = t.id
+          AND m.message_timestamp IS NOT NULL
+          AND m.message_timestamp != ''
+          AND (
+            m.message_timestamp LIKE '%:%' OR
+            m.message_timestamp LIKE '%/%' OR
+            m.message_timestamp LIKE '%20%' OR
+            m.message_timestamp LIKE '%Today%' OR
+            m.message_timestamp LIKE '%Yesterday%' OR
+            m.message_timestamp LIKE '%Hôm nay%' OR
+            m.message_timestamp LIKE '%Hôm qua%'
+          )
+        ORDER BY m.seq DESC, m.id DESC
+        LIMIT 1
+      ) AS lastMessageTimestampText,
       'dm' AS source
     FROM threads t
     LEFT JOIN users u ON u.thread_id = t.id
@@ -127,7 +192,10 @@ export function getAllSeekers(): Seeker[] {
     commentUsers = db.prepare(`
       SELECT
         cu.id, cu.commenter_name AS name, cu.fb_profile_url AS fbProfileUrl,
-        cu.fb_user_id AS fbUserId, cu.phone, cu.email, cu.city,
+        NULL AS inboxSortIndex,
+        MAX(c.comment_date) AS lastMessageAt,
+        cu.fb_user_id AS fbUserId, cu.phone, cu.email, cu.city, NULL AS programCode,
+        CASE WHEN cu.city IS NULL OR cu.city = 'Unknown' THEN 'unknown' ELSE 'done' END AS classificationStatus,
         cu.lead_stage AS leadStage,
         MIN(c.comment_date) AS firstSeen,
         MAX(c.comment_date) AS lastInteraction,
@@ -178,9 +246,24 @@ export function getAllSeekers(): Seeker[] {
       const existingScore = (existing.seeker.phone ? 1 : 0) + (existing.seeker.email ? 1 : 0);
       const newScore = (s.phone ? 1 : 0) + (s.email ? 1 : 0);
 
-      // Also prioritize newer interaction if it has same score
-      const newInteractionTime = s.lastMessageTimestampText ? new Date(s.lastMessageTimestampText).getTime() : 0;
-      const oldInteractionTime = existing.seeker.lastMessageTimestampText ? new Date(existing.seeker.lastMessageTimestampText).getTime() : 0;
+      // Meta's sidebar position is authoritative. A top Inbox thread must not
+      // be hidden by an older same-name record with stale local timestamps.
+      const existingRank = existing.seeker.source === 'dm' ? existing.seeker.inboxSortIndex : null;
+      const newRank = s.source === 'dm' ? s.inboxSortIndex : null;
+      if (newRank != null || existingRank != null) {
+        if (newRank != null && (existingRank == null || newRank < existingRank)) {
+          result[existing.idx] = s;
+          seen.set(key, { seeker: s, idx: existing.idx });
+        }
+        continue;
+      }
+
+      // `message_timestamp` is the text Facebook renders (for example, "8:03 AM").
+      // It has no date and must never decide which conversation is newer.  The
+      // inbox pipeline resolves that label against the sidebar and persists the
+      // resulting absolute time in `last_interaction`.
+      const newInteractionTime = parseRealDate(s.lastMessageAt) || parseRealDate(s.lastInteraction) || parseRealDate(s.firstSeen) || 0;
+      const oldInteractionTime = parseRealDate(existing.seeker.lastMessageAt) || parseRealDate(existing.seeker.lastInteraction) || parseRealDate(existing.seeker.firstSeen) || 0;
 
       if (newScore > existingScore || (newScore === existingScore && newInteractionTime > oldInteractionTime)) {
         result[existing.idx] = s;
@@ -189,8 +272,10 @@ export function getAllSeekers(): Seeker[] {
     }
   }
 
-  // Sanitize lastMessageTimestampText against scraped non-date texts (e.g. ad links)
-  // and compute actual datetime for accurate sorting and display
+  // Sanitize the display label against scraped non-date texts (e.g. ad links).
+  // `lastMessageTimestampText` is presentation-only: Facebook often emits a
+  // time without a date, which is ambiguous after a later scrape.  Sort using
+  // `lastMessageAt`, the absolute time recorded from the Inbox sidebar.
   for (const s of result) {
     if (s.lastMessageTimestampText && !parseRealDate(s.lastMessageTimestampText)) {
       s.lastMessageTimestampText = null;
@@ -199,15 +284,36 @@ export function getAllSeekers(): Seeker[] {
     if (!s.lastMessageTimestampText && s.lastInteraction) {
       s.lastMessageTimestampText = s.lastInteraction;
     }
-    const realTime = parseRealDate(s.lastMessageTimestampText) || parseRealDate(s.lastInteraction) || parseRealDate(s.firstSeen) || 0;
+    let realTime = parseRealDate(s.lastMessageAt) || parseRealDate(s.lastInteraction) || parseRealDate(s.firstSeen) || parseRealDate(s.lastMessageTimestampText) || 0;
+    // Guard against future dates from legacy end-of-day placeholders.
+    const nowMs = Date.now();
+    if (realTime > nowMs) {
+      const messageTime = parseRealDate(s.lastMessageAt) || parseRealDate(s.lastInteraction);
+      if (messageTime > 0 && messageTime <= nowMs) {
+        realTime = messageTime;
+      } else {
+        realTime = nowMs;
+      }
+    }
     s.lastMessageDate = realTime > 0 ? new Date(realTime).toISOString() : null;
   }
 
-  // Parse dates and sort chronologically, prioritizing actual datetime
+  // Sort by the actual last-message timestamp. Meta's sidebar position is a
+  // deterministic tie-breaker for messages in the same minute. Rows present
+  // in the latest sidebar snapshot always precede legacy rows that have not
+  // yet been refreshed, whose old timestamps may be unreliable.
   result.sort((a, b) => {
-    const timeA = (a.lastMessageDate ? new Date(a.lastMessageDate).getTime() : 0) || parseRealDate(a.lastMessageTimestampText) || parseRealDate(a.lastInteraction) || 0;
-    const timeB = (b.lastMessageDate ? new Date(b.lastMessageDate).getTime() : 0) || parseRealDate(b.lastMessageTimestampText) || parseRealDate(b.lastInteraction) || 0;
-    return timeB - timeA;
+    const rankA = a.source === 'dm' ? a.inboxSortIndex : null;
+    const rankB = b.source === 'dm' ? b.inboxSortIndex : null;
+    if (rankA != null || rankB != null) {
+      if (rankA == null) return 1;
+      if (rankB == null) return -1;
+    }
+    const timeA = (a.lastMessageDate ? new Date(a.lastMessageDate).getTime() : 0) || parseRealDate(a.lastMessageAt) || parseRealDate(a.lastInteraction) || parseRealDate(a.firstSeen) || 0;
+    const timeB = (b.lastMessageDate ? new Date(b.lastMessageDate).getTime() : 0) || parseRealDate(b.lastMessageAt) || parseRealDate(b.lastInteraction) || parseRealDate(b.firstSeen) || 0;
+    if (timeA !== timeB) return timeB - timeA;
+    if (rankA != null && rankB != null && rankA !== rankB) return rankA - rankB;
+    return 0;
   });
 
   return result;
@@ -277,7 +383,7 @@ export function getMessagesByThread(threadId: string): MessageRow[] {
   const rows = db.prepare(`
     SELECT id, thread_id AS threadId, sender, content,
            message_timestamp AS messageTimestamp, seq, timestamp
-    FROM messages WHERE thread_id = ? ORDER BY id ASC
+    FROM messages WHERE thread_id = ? ORDER BY seq ASC, id ASC
   `).all(threadId) as MessageRow[];
 
   return rows.map(r => ({
@@ -396,14 +502,30 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
     };
   }
 
-  // DM seeker — lookup by numeric users.id
-  const uRow = db.prepare(`
+  // DM seeker — lookup by numeric users.id, thread_id, or thread_name
+  let uRow = db.prepare(`
     SELECT u.id, u.thread_id AS threadId, u.thread_name AS name, u.fb_url AS fbProfileUrl,
            NULL AS fbUserId, u.phone, u.email, u.city,
            u.lead_stage AS leadStage, u.first_seen AS firstSeen,
            u.last_interaction AS lastInteraction, 'dm' AS source
-    FROM users u WHERE u.id = ?
-  `).get(seekerId) as Seeker | undefined;
+    FROM users u
+    WHERE (u.id = ? OR u.thread_id = ? OR u.thread_name = ?)
+    ORDER BY u.id DESC LIMIT 1
+  `).get(seekerId, seekerId, seekerId) as Seeker | undefined;
+
+  if (!uRow && tableExists('threads')) {
+    const tRow = db.prepare(`
+      SELECT NULL AS id, t.id AS threadId, t.thread_name AS name, NULL AS fbProfileUrl,
+             NULL AS fbUserId, NULL AS phone, NULL AS email, 'Unknown' AS city,
+             'Intake' AS leadStage, t.created_at AS firstSeen,
+             t.last_synced_time AS lastInteraction, 'dm' AS source
+      FROM threads t
+      WHERE t.id = ? OR t.thread_name = ?
+      ORDER BY t.id DESC LIMIT 1
+    `).get(seekerId, seekerId) as Seeker | undefined;
+    if (tRow) uRow = tRow;
+  }
+
   if (!uRow) return null;
 
   uRow.fbProfileUrl = normalizeFbUrl(uRow.fbProfileUrl);
@@ -413,7 +535,7 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
   let messages = db.prepare(`
     SELECT id, thread_id AS threadId, sender, content,
            message_timestamp AS messageTimestamp, seq, timestamp
-    FROM messages WHERE thread_id = ? ORDER BY id ASC
+    FROM messages WHERE thread_id = ? ORDER BY seq ASC, id ASC
   `).all(uRow.threadId) as MessageRow[];
   
   messages = messages.map(r => ({
@@ -455,9 +577,23 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
     `).all(uRow.name) as (CommentRow & { postName?: string; postUrl?: string })[];
   }
 
-  const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
-  uRow.lastMessageTimestampText = lastMsg?.messageTimestamp || null;
-  const dmRealTime = parseRealDate(lastMsg?.messageTimestamp) || parseRealDate(lastMsg?.timestamp) || parseRealDate(uRow.lastInteraction) || parseRealDate(uRow.firstSeen) || 0;
+  // Find the latest message that has a valid timestamp
+  let lastValidMsgTs: string | null = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const ts = messages[i]?.messageTimestamp;
+    if (ts && parseRealDate(ts) > 0) {
+      lastValidMsgTs = ts;
+      break;
+    }
+  }
+  uRow.lastMessageTimestampText = lastValidMsgTs || (messages.length > 0 ? messages[messages.length - 1]?.messageTimestamp : null);
+  // Keep the detail view consistent with the inbox list: Facebook's message
+  // label is display-only, while `last_interaction` is an absolute timestamp.
+  let dmRealTime = parseRealDate(uRow.lastInteraction) || parseRealDate(uRow.firstSeen) || parseRealDate(lastValidMsgTs) || 0;
+  if (dmRealTime > Date.now()) {
+    const interactionTime = parseRealDate(uRow.lastInteraction);
+    dmRealTime = (interactionTime > 0 && interactionTime <= Date.now()) ? interactionTime : Date.now();
+  }
   uRow.lastMessageDate = dmRealTime > 0 ? new Date(dmRealTime).toISOString() : null;
 
   return {

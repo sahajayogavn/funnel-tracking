@@ -5,17 +5,25 @@ export interface Seeker {
   id: number;
   name: string;
   threadId?: string;  // users.thread_id for DM seekers
+  // Zero-based position from the Meta inbox sidebar. Lower is newer.
+  inboxSortIndex?: number | null;
+  // Absolute timestamp of the latest Inbox message, regardless of sender.
+  lastMessageAt?: string | null;
   fbProfileUrl: string | null;
   fbUserId: string | null;
   phone: string | null;
   email: string | null;
   city: string;
+  // LLM-selected class code from the fixed programme catalogue. Empty means
+  // city is known but no specific class was stated in the conversation.
+  programCode?: string | null;
   leadStage: string;
   firstSeen: string;
   lastInteraction: string;
   source: 'dm' | 'comment';
   lastMessageTimestampText?: string | null;
   lastMessageDate?: string | null;
+  classificationStatus?: 'pending' | 'done' | 'unknown';
 }
 
 export interface Post {
@@ -53,6 +61,9 @@ export interface MessageRow {
   sender: string | null;
   content: string | null;
   messageTimestamp: string | null;
+  // Sequence captured from Facebook's message panel. It is only a tie-breaker
+  // after a Facebook timestamp has been interpreted chronologically.
+  seq?: number | null;
   timestamp: string;
 }
 
@@ -163,7 +174,15 @@ export function formatRelativeElapsed(sinceDate?: string | number | Date | null,
     dateObj = sinceDate;
   }
 
-  const diffMs = Math.max(0, toDate.getTime() - dateObj.getTime());
+  const rawDiffMs = toDate.getTime() - dateObj.getTime();
+  if (rawDiffMs < 0) {
+    // If date is slightly in the future due to clock drift (<= 60s), treat as 1m
+    if (Math.abs(rawDiffMs) <= 60000) return '1m';
+    // If significantly in the future, do not display a misleading '1m ago'
+    return 'now';
+  }
+
+  const diffMs = rawDiffMs;
   const diffMin = Math.floor(diffMs / 60000);
   const diffHour = Math.floor(diffMs / 3600000);
   const diffDays = Math.floor(diffMs / 86400000);
@@ -185,3 +204,36 @@ export function formatRelativeElapsed(sinceDate?: string | number | Date | null,
   return remMonths > 0 ? `${years}y${remMonths}m` : `${years}y`;
 }
 
+export interface LlmCall {
+  id: number;
+  trace_id: string;
+  parent_call_id: number | null;
+  seq_in_trace: number;
+  attempt: number;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  trigger: string;
+  route: string;
+  route_group: string;
+  agent_name: string | null;
+  model: string | null;
+  page_id: string | null;
+  subject_type: string | null;
+  subject_id: string | null;
+  subject_label: string | null;
+  dry_run: boolean;
+  system_prompt: string | null;
+  messages_json: string | null;
+  state_json: string | null;
+  tools_json: string | null;
+  response_text: string | null;
+  response_json: string | null;
+  sanitized_text: string | null;
+  status: string;
+  error: string | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  outcome_type: string | null;
+  outcome_ref: string | null;
+}

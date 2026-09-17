@@ -2,6 +2,7 @@
 'use client';
 
 import type { SeekerDetail } from '@/lib/types';
+import { sortFacebookMessages } from '@/lib/funnel-filters';
 import { SevenStarProgress } from './seven-star-progress';
 import { SeekerJourneyTimeline } from './seeker-journey-timeline';
 
@@ -33,6 +34,9 @@ function fbPostUrl(postUrl: string) {
 
 export function SeekerDetailView({ detail }: Props) {
   const { seeker, messages, comments, adSource } = detail;
+  const chronologicalMessages = sortFacebookMessages(
+    messages.filter(message => !message.content?.includes('[AD SOURCE]'))
+  );
   const cityStyle = CITY_COLORS[seeker.city] || CITY_COLORS['Unknown'];
 
 
@@ -42,11 +46,12 @@ export function SeekerDetailView({ detail }: Props) {
     : '';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div className="seeker-detail-layout">
 
       {/* ── Profile Card ── */}
-      <div className="card" style={{ padding: '24px' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+      <section className="card seeker-info-card" aria-labelledby="seeker-info-heading">
+        <div className="seeker-section-heading" id="seeker-info-heading">Seeker info</div>
+        <div className="seeker-info-grid">
           <div>
             <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', marginBottom: '4px' }}>Phone</div>
             <div style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)' }}>{seeker.phone || '—'}</div>
@@ -85,7 +90,7 @@ export function SeekerDetailView({ detail }: Props) {
         </div>
 
         {/* FB Links */}
-        <div style={{ marginTop: '16px', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+        <div className="seeker-info-links">
           {seeker.fbProfileUrl && (
             <a href={seeker.fbProfileUrl} target="_blank" rel="noopener noreferrer"
               className="fb-link" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '8px 14px', background: 'rgba(59, 130, 246, 0.1)', borderRadius: '8px', fontSize: '13px', fontWeight: 600, textDecoration: 'none', color: '#60a5fa' }}>
@@ -99,56 +104,59 @@ export function SeekerDetailView({ detail }: Props) {
             </a>
           )}
         </div>
-      </div>
 
-      {/* ── Journey Timeline & Actionable Queued Recommendations ── */}
-      <div className="card" style={{ padding: '20px' }}>
-        <SeekerJourneyTimeline seeker={seeker} />
-      </div>
+        <div className="seeker-info-divider" />
 
-      {/* Stats row */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
-        <div className="card" style={{ padding: '16px', textAlign: 'center' }}>
-          <div style={{ fontSize: '28px', fontWeight: 800, color: '#818cf8' }}>{detail.messageCount}</div>
-          <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>Messages</div>
-        </div>
-        <div className="card" style={{ padding: '16px', textAlign: 'center' }}>
-          <div style={{ fontSize: '28px', fontWeight: 800, color: '#f59e0b' }}>{detail.commentCount}</div>
-          <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>Comments</div>
-        </div>
-        <div className="card" style={{ padding: '16px', textAlign: 'center' }}>
-          <div style={{ fontSize: '28px', fontWeight: 800, color: adSource ? '#ec4899' : 'var(--text-muted)' }}>
-            {adSource ? '✓' : '✗'}
+        <section className="seeker-general-stats" aria-labelledby="general-stats-heading">
+          <div className="seeker-section-heading" id="general-stats-heading">General stats</div>
+          <div className="seeker-stats-grid">
+            <div className="seeker-stat-card">
+              <div className="seeker-stat-value seeker-stat-value--messages">{detail.messageCount}</div>
+              <div className="seeker-stat-label">Messages</div>
+            </div>
+            <div className="seeker-stat-card">
+              <div className="seeker-stat-value seeker-stat-value--comments">{detail.commentCount}</div>
+              <div className="seeker-stat-label">Comments</div>
+            </div>
+            <div className="seeker-stat-card">
+              <div className={`seeker-stat-value ${adSource ? 'seeker-stat-value--ad' : 'seeker-stat-value--muted'}`}>
+                {adSource ? '✓' : '✗'}
+              </div>
+              <div className="seeker-stat-label">Ad Source</div>
+            </div>
           </div>
-          <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>Ad Source</div>
-        </div>
-      </div>
 
-      {/* ── Ad Source Card ── */}
-      {adSource && (
-        <div className="card" style={{ padding: '20px', borderLeft: '3px solid #ec4899' }}>
-          <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: '#ec4899', fontWeight: 700, marginBottom: '8px' }}>
-            📢 Ad Source — This seeker messaged from an ad
-          </div>
-          {adSource.matchedPostName && (
-            <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px', lineHeight: 1.5 }}>
-              Matched Post: <strong style={{ color: 'var(--text-primary)' }}>{adSource.matchedPostName.slice(0, 120)}...</strong>
+          {adSource && (
+            <div className="seeker-ad-source" aria-label="Ad Source details">
+              <div className="seeker-ad-source-title">
+                📢 Ad Source — This seeker messaged from an ad
+              </div>
+              {adSource.matchedPostName && (
+                <div className="seeker-ad-source-post">
+                  Matched Post: <strong>{adSource.matchedPostName.slice(0, 120)}...</strong>
+                </div>
+              )}
+              {adSource.matchedPostId && (
+                <a
+                  href={`https://www.facebook.com/${adSource.matchedPostId.split('_')[1] ? adSource.matchedPostId.split('_')[0] + '/posts/' + (() => {
+                    // Use post_url from the posts table (which we stored in matchedPostId's associated row)
+                    return adSource.matchedPostName?.slice(0, 20) || '';
+                  })() : ''}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="seeker-ad-source-link"
+                >
+                  📄 View Ad Post on Facebook ↗
+                </a>
+              )}
             </div>
           )}
-          {adSource.matchedPostId && (
-            <a
-              href={`https://www.facebook.com/${adSource.matchedPostId.split('_')[1] ? adSource.matchedPostId.split('_')[0] + '/posts/' + (() => {
-                // Use post_url from the posts table (which we stored in matchedPostId's associated row)
-                return adSource.matchedPostName?.slice(0, 20) || '';
-              })() : ''}`}
-              target="_blank" rel="noopener noreferrer"
-              style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: 'rgba(236, 72, 153, 0.1)', borderRadius: '6px', fontSize: '12px', fontWeight: 600, textDecoration: 'none', color: '#f472b6' }}
-            >
-              📄 View Ad Post on Facebook ↗
-            </a>
-          )}
-        </div>
-      )}
+        </section>
+      </section>
+
+      {/* ── Journey Timeline & Actionable Queued Recommendations ── */}
+      <section className="card seeker-journey-card" aria-label="Seeker journey">
+        <SeekerJourneyTimeline seeker={seeker} />
+      </section>
 
       {/* ── DM Messages Timeline ── */}
       {messages.length > 0 && (
@@ -163,9 +171,7 @@ export function SeekerDetailView({ detail }: Props) {
             )}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '600px', overflowY: 'auto' }}>
-            {messages.map((msg, i) => {
-              // Skip ad source messages in the bubble view
-              if (msg.content?.includes('[AD SOURCE]')) return null;
+            {chronologicalMessages.map((msg, i) => {
               const isPage = msg.sender === 'Page' || msg.sender === 'Auto_Page';
 
               // ── Date separator logic ──

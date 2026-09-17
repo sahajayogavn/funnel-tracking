@@ -8,10 +8,11 @@ export type DateRange = (typeof DATE_RANGES)[number];
 
 export interface FunnelFilters {
   city: string;
+  programCode: string;
   dateRange: DateRange;
 }
 
-export const DEFAULT_FUNNEL_FILTERS: FunnelFilters = { city: 'all', dateRange: 'all' };
+export const DEFAULT_FUNNEL_FILTERS: FunnelFilters = { city: 'all', programCode: 'all', dateRange: 'all' };
 
 function localDateString(date: Date) {
   const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
@@ -111,6 +112,45 @@ export function parseRealDate(ts?: string | null): number {
   return 0;
 }
 
+export interface FacebookMessageLike {
+  messageTimestamp?: string | null;
+  content?: string | null;
+  seq?: number | null;
+}
+
+/**
+ * Sort message bubbles in Facebook timeline order.
+ *
+ * Facebook deliberately uses abbreviated labels in the inbox: a message from
+ * last Sunday is shown as `Sun 8:42 PM`, Monday as `Mon 6:57 AM`, etc. Those
+ * labels must be compared as dates, not as strings or database insertion IDs.
+ * The ad-reply system event is sometimes emitted after the bubble cluster even
+ * though it is the first event at that timestamp, so it gets a deterministic
+ * tie-breaker before the captured sequence.
+ */
+export function sortFacebookMessages<T extends FacebookMessageLike>(messages: readonly T[]): T[] {
+  return messages
+    .map((message, index) => ({
+      message,
+      index,
+      facebookTime: parseRealDate(message.messageTimestamp),
+      sequence: message.seq ?? index,
+      isAdReply: /replied to an ad\.?$/i.test((message.content || '').trim()),
+    }))
+    .sort((a, b) => {
+      if (a.facebookTime > 0 && b.facebookTime > 0 && a.facebookTime !== b.facebookTime) {
+        return a.facebookTime - b.facebookTime;
+      }
+
+      if (a.facebookTime === b.facebookTime && a.facebookTime > 0 && a.isAdReply !== b.isAdReply) {
+        return a.isAdReply ? -1 : 1;
+      }
+
+      return a.sequence - b.sequence || a.index - b.index;
+    })
+    .map(item => item.message);
+}
+
 export function isDateInRange(value: string | null | undefined, dateRange: DateRange) {
   if (dateRange === 'all') return true;
   if (!value) return false;
@@ -135,14 +175,14 @@ export function parseStoredFilters(value: string | null): FunnelFilters {
   try {
     const stored = JSON.parse(value) as Partial<FunnelFilters> & { startDate?: string; endDate?: string };
     if (stored.dateRange && DATE_RANGES.includes(stored.dateRange)) {
-      return { city: stored.city || 'all', dateRange: stored.dateRange };
+      return { city: stored.city || 'all', programCode: stored.programCode || 'all', dateRange: stored.dateRange };
     }
     // Gracefully migrate the previous date-input persistence shape.
     const duration = stored.startDate && stored.endDate
       ? Math.round((new Date(stored.endDate).getTime() - new Date(stored.startDate).getTime()) / 86_400_000)
       : NaN;
     const dateRange = DATE_RANGES.find(range => range !== 'all' && Number.parseInt(range, 10) === duration) || 'all';
-    return { city: stored.city || 'all', dateRange };
+    return { city: stored.city || 'all', programCode: stored.programCode || 'all', dateRange };
   } catch {
     return DEFAULT_FUNNEL_FILTERS;
   }
@@ -167,4 +207,3 @@ export function saveStoredFilters(filters: FunnelFilters): void {
     // ignore
   }
 }
-

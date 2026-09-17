@@ -1,5 +1,7 @@
 # Warm-up Route Audit
 
+**Universal ID:** `doc:warmup-route-audit-001`
+
 ## Scope
 
 Audited Route 2 warm-up behavior against `memory/mas_strategy.md`, `docs/ARCHITECTURE.md`, and the current implementation/tests.

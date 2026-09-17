@@ -1,5 +1,7 @@
 # Dev1 Stage Gate Audit
 
+**Universal ID:** `doc:dev1-stage-gate-audit-001`
+
 ## Scope
 
 Audit of stage-gate implementation versus strategy/docs, focused on:

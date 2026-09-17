@@ -232,4 +232,8 @@ def _evaluate_proactive_eligibility(page_id: str, route: str, thread_id: str) ->
     if route == "event" and temperature == "dormant" and _has_recent_live_event(thread_id, since_days=90):
         return False, "dormant_quarterly_limit", payload
 
+    from tools.l5_action_queue import has_active_proposal
+    if has_active_proposal(thread_id, "proactive_message"):
+        return False, "active_proposal_exists", payload
+
     return True, "eligible", payload

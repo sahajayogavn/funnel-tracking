@@ -64,6 +64,7 @@ Canonical L5 files include `tools/l5_fetch_fb_messages.py`, `l5_fetch_comments.p
 - L2 session bootstrap attaches to CDP at `http://127.0.0.1:9222`, verifies Facebook authorization and `asset_id` access, and yields an `AuthorizedSession`.
 - L2 browser actions contain `navigate_to_thread(...)`, draft typing, composer clearing, and—currently—an independently exported send-capable commit action.
 - L3 inbox scraping uses a two-stage strategy: discover target threads by scrolling the virtualized sidebar within `timerange` / `maxThreads`, reset to the top, then extract only that discovered set. L3 comments scraping parallels this for posts and comments.
+- **Target (`prd:inbox-parallel-fetch-001`)**: Stage 2 moves to an orchestrator/worker model — the discovery tab streams `ThreadTask`s into a queue and `--workers N-1` worker tabs extract in parallel. Ingestion internals, locate ladder, concurrency rules and the implementation plan live in [`inbox-fetch-pipeline.md`](inbox-fetch-pipeline.md) (`doc:inbox-fetch-pipeline-001`).
 - L3 inbox construction normalizes a `ThreadRecord`, enriches it with user, city, ad, and `MasHandoff` data, then persists `threads`, `messages`, `users`, `user_ad_ids`, and `ad_posts`. The comments path persists `posts`, `comments`, and `comment_users`.
 
 ### End-to-end flows

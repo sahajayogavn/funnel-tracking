@@ -30,9 +30,7 @@ export function SeekerJourneyTimeline({
   // Queued recommendations for this seeker
   const [queuedItems, setQueuedItems] = useState<ActionQueueItem[]>([]);
   const [loadingQueue, setLoadingQueue] = useState(false);
-  const [runningRec, setRunningRec] = useState(false);
   const [actionError, setActionError] = useState('');
-  const [successMsg, setSuccessMsg] = useState('');
 
   const fetchQueuedItems = useCallback(async () => {
     setLoadingQueue(true);
@@ -76,37 +74,6 @@ export function SeekerJourneyTimeline({
       if (onRefreshSeeker) onRefreshSeeker();
     } catch {
       setActionError('Lỗi mạng khi cập nhật.');
-    }
-  };
-
-  const handleRunRecommendations = async () => {
-    setRunningRec(true);
-    setActionError('');
-    setSuccessMsg('');
-    try {
-      const res = await fetch('/api/action-queue/recommendations', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          type: 'all',
-          threadId: seeker.threadId,
-          seekerName: seeker.name,
-          city: seeker.city,
-          limit: 3,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setSuccessMsg(data.message || 'Đã tạo đề xuất an toàn vào hàng đợi.');
-        await fetchQueuedItems();
-        if (onRefreshSeeker) onRefreshSeeker();
-      } else {
-        setActionError(data.error || 'Không thể tạo đề xuất.');
-      }
-    } catch {
-      setActionError('Lỗi khi gọi API tạo đề xuất.');
-    } finally {
-      setRunningRec(false);
     }
   };
 
@@ -256,34 +223,11 @@ export function SeekerJourneyTimeline({
           <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)' }}>
             ⚡ Đề xuất MAS chờ duyệt ({queuedItems.filter(i => i.status === 'pending').length})
           </div>
-          <button
-            type="button"
-            onClick={handleRunRecommendations}
-            disabled={runningRec}
-            style={{
-              padding: '4px 10px',
-              borderRadius: '6px',
-              background: 'rgba(99, 102, 241, 0.15)',
-              border: '1px solid rgba(99, 102, 241, 0.3)',
-              color: '#818cf8',
-              fontSize: '11px',
-              fontWeight: 600,
-              cursor: runningRec ? 'wait' : 'pointer',
-            }}
-          >
-            {runningRec ? 'Đang tạo...' : '⚡ Tạo đề xuất'}
-          </button>
         </div>
 
         {actionError && (
           <div style={{ fontSize: '11px', color: '#fb7185', background: 'rgba(244,63,94,0.1)', padding: '6px 10px', borderRadius: '6px', marginBottom: '8px' }}>
             {actionError}
-          </div>
-        )}
-
-        {successMsg && (
-          <div style={{ fontSize: '11px', color: '#34d399', background: 'rgba(16,185,129,0.1)', padding: '6px 10px', borderRadius: '6px', marginBottom: '8px' }}>
-            {successMsg}
           </div>
         )}
 
@@ -295,7 +239,7 @@ export function SeekerJourneyTimeline({
 
         {!loadingQueue && queuedItems.length === 0 && (
           <div style={{ fontSize: '11px', color: 'var(--text-muted)', padding: '10px 0', textAlign: 'center', background: 'rgba(255,255,255,0.02)', borderRadius: '8px' }}>
-            Chưa có đề xuất nào trong hàng đợi. Bấm <strong>⚡ Tạo đề xuất</strong> để AI phân tích.
+            Chưa có đề xuất nào trong hàng đợi. Chọn seeker trong bảng rồi bấm <strong>⚡ Chạy đề xuất MAS</strong> ở đầu trang.
           </div>
         )}
 
