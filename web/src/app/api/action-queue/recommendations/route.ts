@@ -72,12 +72,13 @@ function formatJob(row: Record<string, unknown>): RecommendationJob {
 }
 
 // code:api-recommendations-001:mas-engine
-// Spawns the Python MAS entrypoint (ADK BatchInboxAgent / WarmUpComposer / EventAdvertiser).
+// Spawns the Python MAS entrypoint (per-message Inbox MAS / WarmUpComposer / EventAdvertiser).
 // The script only enqueues pending proposals; it never opens a browser or sends messages.
 // With `regenerate` (queue-card "Chạy đề xuất MAS" on already-queued items) the
 // script replaces the seeker's current pending/approved draft instead of skipping it.
-function runMasEngine(opts: { type: string; threadIds: string[]; city?: string; regenerate?: boolean }): Promise<MasResult> {
+function runMasEngine(opts: { type: string; threadIds: string[]; city?: string; regenerate?: boolean; jobId?: number }): Promise<MasResult> {
   const args = [MAS_SCRIPT, '--thread-ids', opts.threadIds.join(','), '--type', opts.type, '--page-id', DEFAULT_PAGE_ID];
+  if (opts.jobId) args.push('--job-id', String(opts.jobId));
   if (opts.city && opts.city !== 'all') args.push('--city', opts.city);
   if (opts.regenerate) args.push('--regenerate');
   return new Promise(resolve => {
@@ -111,6 +112,58 @@ const WARMUP_TEMPLATES: Record<string, string> = {
   Seed: 'Chào bạn! Chúc mừng bạn đã hoàn thành khóa học căn bản. Bạn có muốn tham gia buổi thiền tập thể tuần này để củng cố thói quen thiền định không ạ? 🌿',
 };
 
+const REPLY_LATE_HOURS = 24;
+const REPLY_STALE_HOURS = 24 * 7;
+
+type FallbackReplyContext = {
+  content: string;
+  messageAt: string | null;
+  phone: string | null;
+  email: string | null;
+  city: string | null;
+};
+
+function hoursSinceVietnamTimestamp(timestamp: string | null): number | null {
+  if (!timestamp) return null;
+  // `message_at` is stored as an absolute Vietnam-local wall-clock time.
+  const instant = new Date(`${timestamp.replace(' ', 'T')}+07:00`).getTime();
+  if (Number.isNaN(instant)) return null;
+  return Math.max(0, (Date.now() - instant) / (60 * 60 * 1000));
+}
+
+function createFallbackReply(context: FallbackReplyContext): { text?: string; reason?: string } {
+  const ageHours = hoursSinceVietnamTimestamp(context.messageAt);
+  if (ageHours !== null && ageHours > REPLY_STALE_HOURS) {
+    return { reason: 'stale_customer_turn' };
+  }
+
+  const content = context.content.toLocaleLowerCase('vi-VN');
+  const asksOnlineClass = /(?:đăng\s*k[ýi]|tham\s*gia|học).{0,40}online|online.{0,40}(?:đăng\s*k[ýi]|tham\s*gia|học)/u.test(content);
+  const asksClass = asksOnlineClass || /lớp\s*thiền|lớp\s*học|đăng\s*k[ýi]|tham\s*gia/u.test(content);
+  const hasContact = Boolean((context.phone || '').trim() || (context.email || '').trim());
+  const latePrefix = ageHours !== null && ageHours > REPLY_LATE_HOURS
+    ? 'Dạ mình xin lỗi bạn vì phản hồi muộn nhé. '
+    : '';
+
+  if (asksOnlineClass) {
+    const nextStep = hasContact
+      ? 'Mình đã ghi nhận nhu cầu học online của bạn và sẽ nhờ anh/chị trong CLB gửi thông tin buổi gần nhất nhé ạ.'
+      : 'Bạn cho mình xin họ tên và số điện thoại/Zalo để CLB gửi thông tin buổi học online gần nhất nhé ạ.';
+    return { text: `${latePrefix}Lớp thiền online của CLB hoàn toàn miễn phí ạ. ${nextStep} 🙏` };
+  }
+
+  if (asksClass) {
+    const nextStep = hasContact
+      ? 'Mình đã ghi nhận nhu cầu của bạn và sẽ nhờ anh/chị trong CLB gửi thông tin phù hợp nhé ạ.'
+      : context.city && !['Unknown', 'Online'].includes(context.city)
+        ? 'Bạn cho mình xin họ tên và số điện thoại/Zalo để CLB gửi thông tin lớp phù hợp nhé ạ.'
+        : 'Bạn cho mình xin thành phố muốn tham gia, họ tên và số điện thoại/Zalo để CLB gửi thông tin lớp phù hợp nhé ạ.';
+    return { text: `${latePrefix}Các lớp thiền của CLB hoàn toàn miễn phí ạ. ${nextStep} 🙏` };
+  }
+
+  return { text: `${latePrefix}Cảm ơn bạn đã nhắn cho CLB. Mình có thể hỗ trợ bạn thông tin về lớp thiền miễn phí hoặc lịch sinh hoạt nhé ạ. 🙏` };
+}
+
 // code:api-recommendations-001:template-engine
 // Legacy rule-based engine (hard-coded templates). Used only as a fallback when
 // the MAS process cannot run, or for non-selected bulk/comment requests.
@@ -120,8 +173,9 @@ function runTemplateEngine(
     type: string; threadId?: string; targetThreadIds: string[]; selectedOnly: boolean;
     seekerName?: string; city?: string; limit: number;
   }
-): { created: Proposal[]; existing?: Proposal } {
+): { created: Proposal[]; existing?: Proposal; skipped: { threadId: string; reason: string }[] } {
     const created: Proposal[] = [];
+    const skipped: { threadId: string; reason: string }[] = [];
 
     // Helper to insert into action_queue safely as pending
     const insertProposal = (
@@ -158,11 +212,15 @@ function runTemplateEngine(
     // 1. Reply message recommendations
     if (type === 'all' || type === 'reply') {
       let query = `
-        SELECT t.id AS thread_id, t.thread_name, m.sender, m.content
+        SELECT t.id AS thread_id, t.thread_name, m.sender, m.content,
+               m.message_at AS message_at, u.phone AS phone, u.email AS email, u.city AS city
         FROM threads t
         JOIN messages m ON m.id = (
-          SELECT id FROM messages WHERE thread_id = t.id ORDER BY id DESC LIMIT 1
+          SELECT id FROM messages
+          WHERE thread_id = t.id AND kind = 'message'
+          ORDER BY seq DESC, id DESC LIMIT 1
         )
+        LEFT JOIN users u ON u.thread_id = t.id
         WHERE m.sender NOT IN ('Page', 'Auto_Page')
       `;
       const params: (string | number)[] = [];
@@ -176,14 +234,27 @@ function runTemplateEngine(
       query += ` ORDER BY t.last_synced_time DESC LIMIT ?`;
       params.push(Number(limit));
 
-      const unreplied = db.prepare(query).all(...params) as { thread_id: string; thread_name: string; content: string }[];
+      const unreplied = db.prepare(query).all(...params) as Array<{
+        thread_id: string; thread_name: string; content: string; message_at: string | null;
+        phone: string | null; email: string | null; city: string | null;
+      }>;
       for (const row of unreplied) {
         const name = row.thread_name || seekerName || 'Seeker';
-        const replyText = `Chào bạn ${name}! Cảm ơn bạn đã nhắn tin cho Thiền Sahaja Yoga Việt Nam. Tụi mình có các lớp thiền hoàn toàn miễn phí tại Hà Nội, TP.HCM, Đà Nẵng và Online qua Zoom. Bạn muốn tham gia lớp học trực tiếp hay online ạ? 🙏`;
+        const fallback = createFallbackReply({
+          content: row.content || '', messageAt: row.message_at,
+          phone: row.phone, email: row.email, city: row.city,
+        });
+        if (!fallback.text) {
+          skipped.push({ threadId: row.thread_id, reason: fallback.reason || 'no_safe_fallback' });
+          continue;
+        }
+        const replyText = fallback.text;
         const id = insertProposal('reply_message', 'thread', row.thread_id, name, replyText, {
           source: 'recommendation_engine',
           trigger: 'unreplied_message',
           last_content: row.content,
+          customer_message_at: row.message_at,
+          fallback_reason: 'llm_unavailable',
         });
         if (id) created.push({ id, queueType: 'reply_message', targetId: row.thread_id, targetName: name, actionText: replyText });
       }
@@ -306,7 +377,7 @@ function runTemplateEngine(
       `).get(threadId || '', seekerName || '') as { id: number; queueType: string; targetId: string; targetName: string; actionText: string } | undefined;
 
       if (existing) {
-        return { created, existing };
+        return { created, existing, skipped };
       }
 
       // Contextual recommendation generation based on user stage
@@ -337,7 +408,7 @@ function runTemplateEngine(
       }
     }
 
-    return { created };
+    return { created, skipped };
 }
 
 function summarizeSkipped(skipped: { threadId: string; reason: string }[]): string {
@@ -367,7 +438,7 @@ async function runRecommendationJob(jobId: number) {
     let result: Record<string, unknown>;
     if (selectedOnly && ['all', 'reply', 'warmup', 'event'].includes(request.type)) {
       setPhase('waiting_for_llm');
-      const mas = await runMasEngine({ type: request.type, threadIds: request.threadIds, city: request.city, regenerate: request.regenerate });
+      const mas = await runMasEngine({ type: request.type, threadIds: request.threadIds, city: request.city, regenerate: request.regenerate, jobId });
       if (mas.status === 'ok') {
         setPhase('saving_recommendations');
         const proposals = mas.proposals || [];
@@ -378,16 +449,25 @@ async function runRecommendationJob(jobId: number) {
         result = {
           success: true, engine: 'inbox_mas', count: proposals.length, createdCount: proposals.length, proposals, skipped, supersededCount,
           message: `MAS đã tạo ${proposals.length} đề xuất mới vào hàng đợi chờ duyệt (status: pending).${supersededNote}${skippedNote}`,
+          llmTraceUrl: `/llm?trace=${jobId}`,
         };
       } else {
         setPhase('creating_safe_fallback');
-        const fallback = runTemplateEngine(db, { type: request.type, threadId: request.threadId, targetThreadIds: request.threadIds, selectedOnly, seekerName: request.seekerName, city: request.city, limit: request.limit }).created;
+        const fallbackResult = runTemplateEngine(db, { type: request.type, threadId: request.threadId, targetThreadIds: request.threadIds, selectedOnly, seekerName: request.seekerName, city: request.city, limit: request.limit });
+        const fallback = fallbackResult.created;
+        const fallbackSkipped = fallbackResult.skipped;
+        const skippedNote = fallbackSkipped.length ? ` Bỏ qua ${fallbackSkipped.length}: ${summarizeSkipped(fallbackSkipped)}.` : '';
         result = {
           success: true, engine: 'template_fallback', count: fallback.length, createdCount: fallback.length, proposals: fallback,
+          // Preserve the MAS failure for operators and the quality-review
+          // runbook. A safe fallback draft is useful, but it is not proof that
+          // the LLM path completed successfully.
+          masError: mas.error || 'MAS returned an unspecified error',
           // The safe fallback is an intentional successful outcome for the
           // operator; don't surface the internal MAS failure as a user-facing
           // error after proposals were successfully created.
-          message: `Đã tạo ${fallback.length} đề xuất an toàn bằng template vào hàng đợi chờ duyệt.`,
+          skipped: fallbackSkipped,
+          message: `Đã tạo ${fallback.length} đề xuất an toàn bằng template vào hàng đợi chờ duyệt.${skippedNote}`,
         };
       }
     } else {
