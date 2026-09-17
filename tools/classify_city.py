@@ -96,10 +96,11 @@ def classify_user(conn, thread_id: str, llm_config: dict, dry_run: bool = True) 
     new_city = result["city"]
     updated = False
 
-    if not dry_run and new_city != "Unknown" and new_city != old_city:
+    new_program_code = result.get("program_code")
+    if not dry_run and ((new_city != "Unknown" and new_city != old_city) or new_program_code):
         cursor.execute(
-            "UPDATE users SET city = ? WHERE thread_id = ?",
-            (new_city, thread_id)
+            "UPDATE users SET city = CASE WHEN ? != 'Unknown' THEN ? ELSE city END, program_code = COALESCE(?, program_code) WHERE thread_id = ?",
+            (new_city, new_city, new_program_code, thread_id)
         )
         conn.commit()
         updated = True
@@ -110,6 +111,7 @@ def classify_user(conn, thread_id: str, llm_config: dict, dry_run: bool = True) 
         "thread_name": signals["thread_name"],
         "old_city": old_city,
         "new_city": new_city,
+        "program_code": new_program_code,
         "confidence": result["confidence"],
         "reasoning": result["reasoning"],
         "updated": updated,
@@ -215,11 +217,12 @@ def classify_all(conn, llm_config: dict, dry_run: bool = True,
                     continue
                     
                 new_city = res.get("city", "Unknown")
+                new_program_code = res.get("program_code")
                 updated = False
-                if not dry_run and new_city != "Unknown" and new_city != old_city:
+                if not dry_run and ((new_city != "Unknown" and new_city != old_city) or new_program_code):
                     cursor.execute(
-                        "UPDATE users SET city = ? WHERE thread_id = ?",
-                        (new_city, tid)
+                        "UPDATE users SET city = CASE WHEN ? != 'Unknown' THEN ? ELSE city END, program_code = COALESCE(?, program_code) WHERE thread_id = ?",
+                        (new_city, new_city, new_program_code, tid)
                     )
                     conn.commit()
                     updated = True
@@ -231,6 +234,7 @@ def classify_all(conn, llm_config: dict, dry_run: bool = True,
                     "thread_name": tname,
                     "old_city": old_city,
                     "new_city": new_city,
+                    "program_code": new_program_code,
                     "confidence": res.get("confidence", "low"),
                     "reasoning": res.get("reasoning", ""),
                     "updated": updated

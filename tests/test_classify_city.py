@@ -127,8 +127,10 @@ class TestDetectCityLlm(unittest.TestCase):
         self.assertEqual(result["confidence"], "high")
         mock_post.assert_called_once()
 
+    # code:tool-citydetect-001:llm-retry
+    @patch("fb_pipeline.contracts.l1_city_llm.time.sleep")
     @patch("fb_pipeline.contracts.l1_city_llm.requests.post")
-    def test_api_timeout(self, mock_post):
+    def test_api_timeout(self, mock_post, mock_sleep):
         import requests
         mock_post.side_effect = requests.exceptions.Timeout("timeout")
 
@@ -139,9 +141,14 @@ class TestDetectCityLlm(unittest.TestCase):
         )
         self.assertEqual(result["city"], "Unknown")
         self.assertIn("timeout", result["reasoning"].lower())
+        # 10 attempts, 9 sleeps doubling from 3s
+        self.assertEqual(mock_post.call_count, 10)
+        self.assertEqual([c.args[0] for c in mock_sleep.call_args_list],
+                         [3.0 * 2 ** i for i in range(9)])
 
+    @patch("fb_pipeline.contracts.l1_city_llm.time.sleep")
     @patch("fb_pipeline.contracts.l1_city_llm.requests.post")
-    def test_api_error(self, mock_post):
+    def test_api_error(self, mock_post, mock_sleep):
         import requests
         mock_post.side_effect = requests.exceptions.ConnectionError("refused")
 
@@ -151,6 +158,27 @@ class TestDetectCityLlm(unittest.TestCase):
             api_base="http://localhost", api_key="key", model="m",
         )
         self.assertEqual(result["city"], "Unknown")
+        self.assertEqual(mock_post.call_count, 10)
+
+    @patch("fb_pipeline.contracts.l1_city_llm.time.sleep")
+    @patch("fb_pipeline.contracts.l1_city_llm.requests.post")
+    def test_api_recovers_after_transient_failure(self, mock_post, mock_sleep):
+        import requests
+        ok = MagicMock()
+        ok.raise_for_status = MagicMock()
+        ok.json.return_value = {"choices": [{"message": {"content":
+            '{"city": "Hà Nội", "program_code": null, "confidence": "high", "reasoning": "x"}'}}]}
+        mock_post.side_effect = [requests.exceptions.ConnectionError("refused"),
+                                 requests.exceptions.Timeout("timeout"), ok]
+
+        result = detect_city_llm(
+            thread_name="Test",
+            customer_messages=[], page_messages=[], ad_content="",
+            api_base="http://localhost", api_key="key", model="m",
+        )
+        self.assertEqual(result["city"], "Hà Nội")
+        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual([c.args[0] for c in mock_sleep.call_args_list], [3.0, 6.0])
 
 
 class TestGatherSignals(unittest.TestCase):
@@ -233,6 +261,7 @@ class TestClassifyUser(unittest.TestCase):
                 thread_id TEXT PRIMARY KEY,
                 thread_name TEXT,
                 city TEXT DEFAULT 'Unknown',
+                program_code TEXT,
                 last_interaction TEXT DEFAULT '2026-03-20'
             )
         """)
@@ -250,7 +279,7 @@ class TestClassifyUser(unittest.TestCase):
         cursor.execute("""
             CREATE TABLE ad_posts (ad_id TEXT PRIMARY KEY, ad_content TEXT)
         """)
-        cursor.execute("INSERT INTO users VALUES ('t1', 'Test User', 'Unknown', '2026-03-20')")
+        cursor.execute("INSERT INTO users (thread_id, thread_name, city, last_interaction) VALUES ('t1', 'Test User', 'Unknown', '2026-03-20')")
         cursor.execute("INSERT INTO messages (thread_id, sender, content) VALUES ('t1', 'Customer', 'Em ở Đà Nẵng ạ')")
         self.conn.commit()
 

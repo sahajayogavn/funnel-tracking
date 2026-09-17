@@ -6,6 +6,23 @@ from tools.l5_scheduler_core import (
     _get_next_cool_step, _update_user_decision_state, _parse_db_time, COOL_SEQUENCE_TEMPLATES
 )
 from tools.l5_scheduler_adk import run_adk_reactor, run_adk_warmup_composer, run_adk_event_advertiser
+from fb_pipeline.session.l2_activity_lock import scheduler_browser_cycle
+import functools
+
+
+# code:inbox-activity-lock-001:scheduler-guard-decorator
+def _browser_job(tag: str):
+    """Skip the job while an interactive CLI fetch owns the shared Chrome; otherwise
+    hold ``scheduler_browser`` for the job's duration so the CLI waits for us."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(page_id: str, *args, **kwargs):
+            with scheduler_browser_cycle(tag, page_id, logger) as may_run:
+                if not may_run:
+                    return {"status": "skipped", "reason": "cli_fetch_active"}
+                return fn(page_id, *args, **kwargs)
+        return wrapper
+    return deco
 
 logger = logging.getLogger("scheduler_routes")
 
@@ -14,15 +31,19 @@ logger = logging.getLogger("scheduler_routes")
 
 def run_fetch_cycle(page_id: str, dry_run: bool = True):
     """Fetch new inbox messages and comments from Facebook via CDP."""
-    logger.info(f"[FETCH] Starting inbox+comment fetch for page {page_id}...")
-    try:
-        from tools.l5_inbox_mas_runner import run_inbox_cycle
-        result = run_inbox_cycle(page_id, dry_run=dry_run, max_threads=0)
-        logger.info(f"[FETCH] Scrape result: {result.get('status', 'unknown')}")
-        return result
-    except Exception as e:
-        logger.error(f"[FETCH] Failed: {e}")
-        return {"status": "error", "error": str(e)}
+    # code:inbox-activity-lock-001:scheduler-fetch
+    with scheduler_browser_cycle("[FETCH]", page_id, logger) as may_run:
+        if not may_run:
+            return {"status": "skipped", "reason": "cli_fetch_active"}
+        logger.info(f"[FETCH] Starting inbox+comment fetch for page {page_id}...")
+        try:
+            from tools.l5_inbox_mas_runner import run_inbox_cycle
+            result = run_inbox_cycle(page_id, dry_run=dry_run, max_threads=0)
+            logger.info(f"[FETCH] Scrape result: {result.get('status', 'unknown')}")
+            return result
+        except Exception as e:
+            logger.error(f"[FETCH] Failed: {e}")
+            return {"status": "error", "error": str(e)}
 
 
 def run_react_cycle(page_id: str, dry_run: bool = True):
@@ -72,6 +93,7 @@ def _select_reaction_heuristic(item: dict) -> str:
 
 
 # code:tool-scheduler-001:reply
+@_browser_job("[REPLY]")
 def run_reply_cycle(page_id: str, dry_run: bool = True, max_threads: int = 5):
     """Inbox Reply: existing MAS reply flow (Classifier → Responder)."""
     logger.info(f"[REPLY] {'[DRY-RUN]' if dry_run else '[LIVE]'} Starting reply cycle...")
@@ -88,6 +110,7 @@ def run_reply_cycle(page_id: str, dry_run: bool = True, max_threads: int = 5):
 
 # code:tool-scheduler-001:cool-sequence
 # code:tool-scheduler-001:warmup
+@_browser_job("[WARMUP]")
 def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
     """Route 2: Warm up dormant seekers."""
     logger.info(f"[WARMUP] {'[DRY-RUN]' if dry_run else '[LIVE]'} Starting warmup cycle...")
@@ -279,6 +302,7 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
 
 
 # code:tool-scheduler-001:event
+@_browser_job("[EVENT]")
 def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
     """Route 3: Advertise new events to matched seekers."""
     logger.info(f"[EVENT] {'[DRY-RUN]' if dry_run else '[LIVE]'} Starting event cycle...")
@@ -409,3 +433,60 @@ def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
     except Exception as e:
         logger.error(f"[EVENT] Failed: {e}")
         return {"status": "error", "error": str(e)}
+
+
+# --- Route: [CLASSIFY] LLM city/program enrichment (no browser) ---
+# code:tool-citydetect-001:scheduler-route
+_classify_lock = __import__("threading").Lock()
+
+
+def run_classify_cycle(page_id: str, dry_run: bool = True, max_users: int | None = None,
+                       background: bool = True):
+    """Incremental LLM city/program classification for users whose
+    classification is missing or older than their last customer message.
+
+    Decoupled from [FETCH] on purpose (retrospective 2026-09-17: the LLM pass
+    took longer than the crawl and blocked every browser route while Chrome
+    sat idle). It touches only SQLite + the LLM endpoint, so it neither takes
+    nor waits for ``scheduler_browser``/``inbox_fetch_cli``. It runs on a
+    daemon thread so the single-threaded ``schedule`` loop keeps serving
+    [REPLY]/[HITL] while batches are in flight; overlapping ticks are skipped.
+    ``dry_run`` is accepted for route-signature parity and ignored — writing
+    city/program to ``users`` is an enrichment, not an outbound action.
+    """
+    from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+    from tools.l5_fetch_fb_city_classify import _post_scrape_llm_city_classify, count_stale_users
+
+    if not _classify_lock.acquire(blocking=False):
+        logger.info("[CLASSIFY] Previous classification pass still running; skipping this tick.")
+        return {"status": "skipped", "reason": "classify_in_progress"}
+
+    def _run() -> dict:
+        conn = None
+        try:
+            conn = get_db_connection()
+            stale = count_stale_users(conn, page_id)
+            if stale == 0:
+                logger.info("[CLASSIFY] Nothing stale; skipping LLM pass.")
+                return {"status": "noop", "stale": 0}
+            logger.info(f"[CLASSIFY] {stale} users stale; running LLM city/program pass"
+                        f"{f' (max {max_users})' if max_users else ''}...")
+            result = _post_scrape_llm_city_classify(conn, page_id, only_stale=True, max_users=max_users)
+            logger.info(f"[CLASSIFY] Done: {result}")
+            return {"status": "complete", "stale_before": stale, **result}
+        except Exception as e:
+            logger.error(f"[CLASSIFY] Failed: {e}")
+            return {"status": "error", "error": str(e)}
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            _classify_lock.release()
+
+    if not background:
+        return _run()
+    import threading
+    threading.Thread(target=_run, name="mas-classify", daemon=True).start()
+    return {"status": "started"}

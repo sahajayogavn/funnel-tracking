@@ -44,7 +44,11 @@ except ImportError:
 
 from fb_pipeline.contracts.l1_inbox import parse_page_id
 
-from tools.l5_scheduler_routes import run_fetch_cycle, run_reply_cycle, run_react_cycle, run_warmup_cycle, run_event_cycle
+from fb_pipeline.session.l2_activity_lock import scheduler_browser_cycle
+from tools.l5_scheduler_routes import (
+    run_fetch_cycle, run_reply_cycle, run_react_cycle, run_warmup_cycle, run_event_cycle,
+    run_classify_cycle,
+)
 from tools.l5_scheduler_core import _update_user_decision_state
 from tools.l5_scheduler_adk import run_adk_warmup_composer, run_adk_event_advertiser
 # Setup logging
@@ -63,7 +67,8 @@ logger = logging.getLogger("scheduler")
 DEFAULT_FETCH_INTERVAL = 15   # minutes
 DEFAULT_WARMUP_TIME = "09:00"
 DEFAULT_EVENT_TIME = "10:00"
-ALL_ROUTES = {"react", "reply", "warmup", "event"}
+DEFAULT_CLASSIFY_INTERVAL = 30  # minutes; LLM city/program pass, no browser
+ALL_ROUTES = {"react", "reply", "warmup", "event", "classify"}
 
 # --- Graceful shutdown ---
 _shutdown_requested = False
@@ -93,22 +98,39 @@ def hitl_execution_job(page_id: str, dry_run: bool = True):
     Telegram's status table is retained for discussion/rewrite history, but it
     is never a delivery queue on its own.
     """
-    from tools.l5_action_queue import QUEUE_TYPES, claim_next_action, finish_action
+    from tools.l5_action_queue import QUEUE_TYPES, claim_next_action, finish_action, peek_next_approved
     from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
     from tools.l5_telegram_hitl import mark_hitl_executed, send_proposal_to_telegram
     import json
 
     for queue_type in QUEUE_TYPES:
-        item = claim_next_action(queue_type)
-        if not item:
+        if dry_run:
+            # Never claim or open a real CDP session in dry-run — only report
+            # what the live worker would pick up next.
+            preview = peek_next_approved(queue_type)
+            if preview:
+                logger.info(
+                    "[HITL][DRY-RUN] Would execute %s item #%s for '%s': %s",
+                    queue_type, preview["id"], preview.get("target_name"),
+                    (preview.get("action_text") or "")[:80],
+                )
             continue
-        try:
-            _execute_approved_action(item, page_id)
-        except Exception as exc:
-            logger.exception("Action queue item %s failed", item["id"])
-            finish_action(item["id"], str(exc))
-        else:
-            finish_action(item["id"])
+        # code:inbox-activity-lock-001:hitl-execute
+        # Check *before* claiming so a deferred item stays approved and is
+        # picked up on the next 30s tick once the CLI fetch releases Chrome.
+        with scheduler_browser_cycle("[HITL]", page_id, logger) as may_run:
+            if not may_run:
+                continue
+            item = claim_next_action(queue_type)
+            if not item:
+                continue
+            try:
+                _execute_approved_action(item, page_id, dry_run=dry_run)
+            except Exception as exc:
+                logger.exception("Action queue item %s failed", item["id"])
+                finish_action(item["id"], str(exc))
+            else:
+                finish_action(item["id"])
 
     conn = get_db_connection()
     try:
@@ -159,8 +181,14 @@ def hitl_execution_job(page_id: str, dry_run: bool = True):
         conn.close()
 
 
-def _execute_approved_action(item: dict, fallback_page_id: str) -> None:
-    """The sole CDP delivery boundary; approval is already persisted."""
+def _execute_approved_action(item: dict, fallback_page_id: str, dry_run: bool = False) -> None:
+    """The sole CDP delivery boundary; approval is already persisted.
+
+    `hitl_execution_job` never calls this in dry-run (it short-circuits before
+    claiming). `dry_run` is still honored here as defense in depth for any
+    other caller: it fills the composer to prove the selectors resolve, but
+    never presses send and never records the reply as delivered.
+    """
     if item.get("reaction_type"):
         raise RuntimeError("Live Facebook reaction executor is not configured")
     if item["queue_type"] in {"reply_comment", "proactive_comment"}:
@@ -177,8 +205,11 @@ def _execute_approved_action(item: dict, fallback_page_id: str) -> None:
         )
         if not navigate_to_thread(session.page, page_id, item.get("target_name") or "", item.get("target_id")):
             raise RuntimeError("Facebook inbox thread could not be opened")
-        if not send_reply_via_cdp(session.page, item.get("action_text") or "", dry_run=False):
+        if not send_reply_via_cdp(session.page, item.get("action_text") or "", dry_run=dry_run):
             raise RuntimeError("Facebook composer could not be filled")
+        if dry_run:
+            logger.info("[DRY-RUN] Skipping send for action queue item %s", item["id"])
+            return
         if not commit_reply_via_cdp(session.page):
             raise RuntimeError("Facebook message could not be sent")
         if item["queue_type"] == "reply_message":
@@ -194,9 +225,17 @@ def _execute_approved_action(item: dict, fallback_page_id: str) -> None:
 # code:tool-scheduler-001:setup
 
 def setup_schedule(page_id: str, dry_run: bool, routes: set,
-                   fetch_interval: int, warmup_time: str, event_time: str):
+                   fetch_interval: int, warmup_time: str, event_time: str,
+                   classify_interval: int = DEFAULT_CLASSIFY_INTERVAL):
     """Register scheduled jobs based on enabled routes."""
     registered = []
+
+    if "classify" in routes:
+        # code:tool-citydetect-001:scheduler-route
+        schedule.every(classify_interval).minutes.do(
+            run_classify_cycle, page_id=page_id, dry_run=dry_run
+        )
+        registered.append(f"classify every {classify_interval}min")
 
     if "react" in routes or "reply" in routes:
         schedule.every(fetch_interval).minutes.do(
@@ -262,9 +301,13 @@ def main():
         help="Send replies/reactions for real (default is dry-run)"
     )
     parser.add_argument(
-        "--routes", default="react,reply,warmup,event",
+        "--routes", default="react,reply,warmup,event,classify",
         help="Comma-separated routes to enable (default: all). "
-             "Options: react, reply, warmup, event"
+             "Options: react, reply, warmup, event, classify"
+    )
+    parser.add_argument(
+        "--classify-interval", type=int, default=DEFAULT_CLASSIFY_INTERVAL,
+        help=f"LLM city/program classification interval in minutes (default: {DEFAULT_CLASSIFY_INTERVAL})"
     )
     parser.add_argument(
         "--fetch-interval", type=int, default=DEFAULT_FETCH_INTERVAL,
@@ -293,11 +336,11 @@ def main():
     routes = set(r.strip() for r in args.routes.split(",")) & ALL_ROUTES
 
     if not routes:
-        logger.error("No valid routes specified. Use: react, reply, warmup, event")
+        logger.error("No valid routes specified. Use: react, reply, warmup, event, classify")
         sys.exit(1)
 
     # Setup LLM env if any agent route is enabled
-    if routes & {"reply", "react", "warmup", "event"}:
+    if routes & {"reply", "react", "warmup", "event", "classify"}:
         try:
             from tools.l5_inbox_mas_runner import setup_llm_env
             setup_llm_env()
@@ -323,13 +366,17 @@ def main():
             results["warmup"] = run_warmup_cycle(page_id, dry_run=dry_run, max_seekers=max_limit)
         if "event" in routes:
             results["event"] = run_event_cycle(page_id, dry_run=dry_run, max_seekers=max_limit)
+        if "classify" in routes:
+            results["classify"] = run_classify_cycle(page_id, dry_run=dry_run, max_users=max_limit,
+                                                     background=False)
         print(json.dumps(results, indent=2, ensure_ascii=False))
         return
 
     registered = setup_schedule(
         page_id=page_id, dry_run=dry_run, routes=routes,
         fetch_interval=args.fetch_interval,
-        warmup_time=args.warmup_time, event_time=args.event_time
+        warmup_time=args.warmup_time, event_time=args.event_time,
+        classify_interval=args.classify_interval,
     )
     logger.info(f"Registered jobs: {', '.join(registered)}")
 

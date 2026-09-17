@@ -29,6 +29,8 @@ from fb_pipeline.browser.l3_inbox import (
     extract_ad_id_labels as shared_extract_ad_id_labels,
     scrape_inbox_ui as shared_scrape_inbox,
 )
+from fb_pipeline.browser.inbox.thread_worker import ThreadWorkerDeps
+from fb_pipeline.inbox.l3_parallel_fetch import run_parallel_fetch
 from fb_pipeline.inbox.l3_pipeline import (
     build_thread_record as shared_build_thread_record,
     enrich_thread_record as shared_enrich_thread_record,
@@ -121,8 +123,15 @@ def extract_ad_id_labels(page) -> list:
 
 # code:tool-fbmessages-002:city-detect
 def detect_city(ad_context: str, page_messages: list) -> str:
-    """Detect city using LLM-first with rule-based fallback."""
-    return shared_detect_city_smart(ad_context, page_messages)
+    """Cheap keyword-only city guess used while scraping.
+
+    Retrospective [2026-09-17]: this used to be the LLM-first variant, so every
+    persisted thread made a synchronous LLM call inside the crawl. Scraping is
+    scraping; the LLM city/program pass is a separate job
+    (``--action classify_city_llm`` / scheduler ``[CLASSIFY]``) that runs
+    without the browser and without the ``inbox_fetch_cli`` lock.
+    """
+    return shared_detect_city(ad_context, page_messages)
 
 
 # --- DB Setup ---
@@ -182,6 +191,7 @@ def _to_shared_enriched_thread_record(thread_record):
                 phone=seeker.get("phone"),
                 email=seeker.get("email"),
                 city=seeker.get("city", "Unknown"),
+                program_code=seeker.get("program_code"),
                 lead_stage=seeker.get("lead_stage", "Intake"),
             ),
             ad_context=mas_handoff.get("ad_context", ""),
@@ -206,6 +216,7 @@ def _to_shared_enriched_thread_record(thread_record):
         ad_ids=list(thread_record.get("ad_ids") or []),
         user_info=dict(thread_record.get("user_info") or {}),
         city=thread_record.get("city", "Unknown"),
+        program_code=thread_record.get("program_code"),
         messages=[InboxMessage(**message) for message in thread_record.get("messages") or []],
         mas_handoff=shared_mas_handoff,
     )
@@ -225,7 +236,8 @@ def persist_thread_record(conn: sqlite3.Connection, thread_record: dict) -> dict
 
 def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn,
                   skip_navigation: bool = False, force_refresh: bool = False,
-                  allow_early_exit: bool = True) -> dict:
+                  allow_early_exit: bool = True,
+                  target_total_messages: int | None = None) -> dict:
     """Core scraping loop: scroll sidebar, click threads, extract messages."""
     return shared_scrape_inbox(
         page,
@@ -240,7 +252,8 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn,
         detect_city=detect_city,
         skip_navigation=skip_navigation,
         force_refresh=force_refresh,
-        allow_early_exit=allow_early_exit
+        allow_early_exit=allow_early_exit,
+        target_total_messages=target_total_messages,
     )
 
 
@@ -252,9 +265,83 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn,
 # --- Action: fetch_messages (Playwright browser fetch) ---
 # code:tool-fbmessages-001:main
 
+# code:inbox-parallel-fetch-001:cli
+def _clamp_workers(workers: int, log=None) -> int:
+    """Clamp --workers to [1, 8] (design doc §6: worker cap)."""
+    log = log or logger
+    if workers < 1:
+        log.warning(f"--workers {workers} is below the minimum; clamping to 1.")
+        return 1
+    if workers > 8:
+        log.warning(f"--workers {workers} exceeds the maximum; clamping to 8.")
+        return 8
+    return workers
+
+
+# code:inbox-activity-lock-001:fetch-cli
+SCHEDULER_IDLE_WAIT_S = float(os.environ.get("FB_FETCH_WAIT_FOR_SCHEDULER_S", "900"))
+
+
 def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
                    show_browser: bool = True, force_refresh: bool = False,
-                   max_threads: int = 50, use_cdp: bool = False, allow_early_exit: bool = True) -> dict:
+                   max_threads: int = 50, use_cdp: bool = False, allow_early_exit: bool = True,
+                   target_total_messages: int | None = None, workers: int = 1,
+                   classify_city: bool = False) -> dict:
+    """Public entry point. In ``--cdp`` mode the shared Chrome is coordinated
+    with the scheduler through ``l2_activity_lock``: wait for any running
+    scheduler browser cycle to finish, then publish ``inbox_fetch_cli`` (kept
+    alive by this tool's own log output) so scheduler cycles skip until we exit.
+
+    ``classify_city`` runs the LLM city/program pass for the threads this run
+    persisted *after* the lock is released. Retrospective [2026-09-17]: the
+    pass took 48 min for 547 users while still holding ``inbox_fetch_cli``,
+    so the scheduler skipped [FETCH]/[REPLY]/[WARMUP] the whole time although
+    Chrome had been idle since Stage 2 ended.
+    """
+    from fb_pipeline.session.l2_activity_lock import (
+        ROLE_FETCH_CLI, ROLE_SCHEDULER_BROWSER, hold_activity, wait_until_idle,
+    )
+    page_id = parse_page_id(page_input)
+    kwargs = dict(show_browser=show_browser, force_refresh=force_refresh, max_threads=max_threads,
+                  use_cdp=use_cdp, allow_early_exit=allow_early_exit,
+                  target_total_messages=target_total_messages, workers=workers)
+    if not use_cdp:
+        result = _fetch_messages_impl(page_input, credential_id, time_range, **kwargs)
+    else:
+        if not wait_until_idle(ROLE_SCHEDULER_BROWSER, page_id, SCHEDULER_IDLE_WAIT_S, logger):
+            return {"success": False,
+                    "error": f"Scheduler browser cycle still active after {SCHEDULER_IDLE_WAIT_S:.0f}s; refusing to share Chrome."}
+        with hold_activity(ROLE_FETCH_CLI, page_id, logger,
+                           label=f"fetch_messages {time_range} workers={workers}",
+                           log_paths=["./logs/fetch_fb_messages.log"]):
+            result = _fetch_messages_impl(page_input, credential_id, time_range, **kwargs)
+
+    if classify_city and result.get("success"):
+        result = _classify_after_fetch(result, page_id)
+    return result
+
+
+# code:tool-citydetect-001:post-fetch-optin
+def _classify_after_fetch(result: dict, page_id: str) -> dict:
+    """Opt-in LLM pass over the threads a fetch just persisted (lock already released)."""
+    stats = (result.get("data") or {}).get("stats") or {}
+    thread_ids = stats.get("processed_thread_ids") or []
+    if not thread_ids:
+        logger.info("Skipping city classification: this run persisted no threads.")
+        stats["llm_city"] = {"skipped": "no_processed_threads"}
+        return result
+    conn = get_db_connection(os.path.join("memory", "agent_memory"))
+    try:
+        stats["llm_city"] = _post_scrape_llm_city_classify(conn, page_id, thread_ids)
+    finally:
+        conn.close()
+    return result
+
+
+def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = "7d",
+                         show_browser: bool = True, force_refresh: bool = False,
+                         max_threads: int = 50, use_cdp: bool = False, allow_early_exit: bool = True,
+                         target_total_messages: int | None = None, workers: int = 1) -> dict:
     page_id = parse_page_id(page_input)
     logger.info(f"Using Page ID: {page_id}, Time Range: {time_range}")
 
@@ -271,19 +358,55 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
         with sync_playwright() as p:
             session = None
             try:
-                session = attach_to_authorized_session(p, page_id, f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}")
-                logger.info(f"Connected to CDP session. Opened new tab (total tabs: {len(session.context.pages)}).")
+                session = attach_to_authorized_session(
+                    p,
+                    page_id,
+                    f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}",
+                    prefer_new_tab=False,
+                )
+                logger.info(
+                    f"Connected to CDP session. {'Reused existing inbox tab' if session.selected_existing_tab else 'Opened new tab'} "
+                    f"(total tabs: {len(session.context.pages)})."
+                )
 
                 diag_dir = "./logs/diagnostic/cdp-direct"
                 os.makedirs(diag_dir, exist_ok=True)
                 run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
                 logger.info("Starting direct scrape...")
-                stats = _scrape_inbox(session.page, page_id, time_range, max_threads, conn, skip_navigation=True, force_refresh=force_refresh, allow_early_exit=allow_early_exit)
+                # The CDP attachment waits only for DOM readiness.  Reload through the
+                # scraper before collecting so Meta has initialized the complete
+                # virtualized sidebar rather than a stale short viewport.
+                if workers <= 1:
+                    stats = _scrape_inbox(
+                        session.page, page_id, time_range, max_threads, conn,
+                        skip_navigation=True,
+                        force_refresh=force_refresh,
+                        allow_early_exit=allow_early_exit,
+                        target_total_messages=target_total_messages,
+                    )
+                else:
+                    logger.info(f"Parallel fetch: --workers {workers} (1 orchestrator + {workers - 1} worker tabs).")
+                    deps = ThreadWorkerDeps(
+                        extract_ad_id_labels=extract_ad_id_labels,
+                        extract_user_info=extract_user_info,
+                        detect_city=detect_city,
+                    )
+                    stats = run_parallel_fetch(
+                        session.page, page_id, time_range, max_threads, conn, logger, record_fetch, deps,
+                        workers=workers,
+                        inbox_url=f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}",
+                        skip_navigation=True,
+                        force_refresh=force_refresh,
+                        allow_early_exit=allow_early_exit,
+                        target_total_messages=target_total_messages,
+                        memory_dir=memory_dir,
+                    )
 
-                # Post-scrape LLM city classification
-                llm_stats = _post_scrape_llm_city_classify(conn, page_id)
-                stats["llm_city"] = llm_stats
+                # City/program classification is not part of message
+                # ingestion: see ``fetch_messages`` (opt-in ``--classify-city``,
+                # runs after the browser lock is released).
+                stats["llm_city"] = {"skipped": "decoupled"}
 
                 with open(os.path.join(diag_dir, f"run_{run_ts}.log"), "w") as f:
                     f.write(f"CDP Direct Scrape: {run_ts}\n")
@@ -358,6 +481,8 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
             conn = get_db_connection(memory_dir)
 
             logger.info(f"Credential '{credential_id}' found. Launching {'headful' if show_browser else 'headless'} browser.")
+            if workers != 1:
+                logger.info("--workers applies to --cdp mode only; running sequentially")
             try:
                 browser = p.chromium.launch(headless=not show_browser)
                 context = browser.new_context(
@@ -366,11 +491,9 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
                 )
                 page = context.new_page()
 
-                stats = _scrape_inbox(page, page_id, time_range, max_threads, conn, force_refresh=force_refresh, allow_early_exit=allow_early_exit)
+                stats = _scrape_inbox(page, page_id, time_range, max_threads, conn, force_refresh=force_refresh, allow_early_exit=allow_early_exit, target_total_messages=target_total_messages)
 
-                # Post-scrape LLM city classification
-                llm_stats = _post_scrape_llm_city_classify(conn, page_id)
-                stats["llm_city"] = llm_stats
+                stats["llm_city"] = {"skipped": "decoupled"}
 
                 conn.close()
                 logger.info(f"Storage: Saved output to FrankenSQLite DB. Stats: {stats}")
@@ -403,9 +526,20 @@ def main():
     parser.add_argument("--refresh", action="store_true", help="Force a fresh fetch, bypassing 1-hour cache.")
     parser.add_argument("--userId", default=None, help="User ID (thread_id, phone, or email) for fetch_message_by_user.")
     parser.add_argument("--maxThreads", type=int, default=1000, help="Maximum number of threads to sync (default: 1000).")
+    parser.add_argument("--targetMessages", type=int, default=None,
+                        help="Stop after the page has this many messages in the local database.")
     parser.add_argument("--cdp", action="store_true", help="Scrape directly via CDP connection to Chrome on port 9222 (no cookie export/import).")
     parser.add_argument("--no-early-exit", action="store_true", help="Disable the targeted early-exit algorithm, allowing deep retroactive UI scrolls.")
-    
+    parser.add_argument("--workers", type=int, default=5,
+                        help="Number of CDP tabs (1 orchestrator + N-1 Stage-2 worker tabs) for --cdp mode. "
+                             "Clamped to [1, 8]. --workers 1 keeps the legacy sequential path.")
+    parser.add_argument("--classify-city", action="store_true",
+                        help="After fetch_messages, run the LLM city/program pass on the threads this run "
+                             "persisted (browser lock already released). Default: off — use "
+                             "--action classify_city_llm or the scheduler [CLASSIFY] route instead.")
+    parser.add_argument("--all-users", action="store_true",
+                        help="classify_city_llm: re-classify every user of the page instead of only stale ones.")
+
     args = parser.parse_args()
     page_id = parse_page_id(args.pageId)
     
@@ -414,10 +548,13 @@ def main():
     
     if args.action == "fetch_messages":
         show_browser_flag = not args.headless
+        workers = _clamp_workers(args.workers, logger)
         result = fetch_messages(args.pageId, args.credential, args.time_range,
                                 show_browser=show_browser_flag, force_refresh=args.refresh,
                                 max_threads=args.maxThreads, use_cdp=args.cdp,
-                                allow_early_exit=not args.no_early_exit)
+                                allow_early_exit=not args.no_early_exit,
+                                target_total_messages=args.targetMessages,
+                                workers=workers, classify_city=args.classify_city)
     elif args.action == "get_list_unique_user":
         result = get_list_unique_user(page_id, args.time_range)
     elif args.action == "fetch_message_by_user":
@@ -433,7 +570,7 @@ def main():
         result = propagate_city_from_ads(page_id)
     elif args.action == "classify_city_llm":
         conn = get_db_connection()
-        llm_result = _post_scrape_llm_city_classify(conn, page_id)
+        llm_result = _post_scrape_llm_city_classify(conn, page_id, only_stale=not args.all_users)
         conn.close()
         result = {"success": True, "action": "classify_city_llm", **llm_result}
     else:
