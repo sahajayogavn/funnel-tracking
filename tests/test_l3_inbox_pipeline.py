@@ -470,15 +470,15 @@ class TestInboxContracts(unittest.TestCase):
             )
 
         first = persist_thread_record(self.conn, _record(), detect_city)
-        self.assertEqual(first["messages_added"], 3)
+        self.assertEqual(first["messages_added"], 2)
         senders = [r[0] for r in self.conn.execute(
             "SELECT sender FROM messages WHERE thread_id = ? ORDER BY seq", (first["thread_id"],))]
-        self.assertEqual(senders, ["Auto_Page", "Customer", "Auto_Page"])
+        self.assertEqual(senders, ["Customer", "Auto_Page"])
 
         second = persist_thread_record(self.conn, _record(), detect_city)
         self.assertEqual(second["messages_added"], 0)
         count = self.conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id = ?", (first["thread_id"],)).fetchone()[0]
-        self.assertEqual(count, 3)
+        self.assertEqual(count, 2)
 
     def test_persist_thread_record_writes_all_boundaries(self):
         thread_record = enrich_thread_record(
@@ -513,6 +513,35 @@ class TestInboxContracts(unittest.TestCase):
         msgs = self.conn.execute("SELECT content, seq FROM messages WHERE thread_id = ? ORDER BY seq", (thread_record.thread_id,)).fetchall()
         self.assertIn("--- [AD SOURCE]: Thiền miễn phí tại Hà Nội ---", msgs[0]["content"])
         self.assertEqual(msgs[1]["seq"], 1)
+
+    def test_persist_ignores_assignment_banners_and_preserves_sidebar_order_on_detail_refresh(self):
+        initial = enrich_thread_record(
+            build_thread_record("page1", {"name": "Hung Bui", "text": "Hung Bui\\nHello", "domIndex": 7}),
+            [{"sender": "Customer", "text": "Hello", "timestamp": "Mar 31, 2026, 10:31 AM"}],
+            extract_user_info, detect_city,
+        )
+        persist_thread_record(self.conn, initial, detect_city)
+
+        detail_refresh = enrich_thread_record(
+            build_thread_record("page1", {"name": "Hung Bui", "text": "Hung Bui\\nHello", "domIndex": None}),
+            [
+                {"sender": "Customer", "text": "Hello", "timestamp": "Mar 31, 2026, 10:31 AM"},
+                {"sender": "Page", "text": "Hung Bui assigned this conversation to Hung Bui.", "timestamp": "Tue 9:00 PM"},
+            ],
+            extract_user_info, detect_city,
+        )
+        result = persist_thread_record(self.conn, detail_refresh, detect_city)
+
+        self.assertEqual(result["messages_added"], 0)
+        rows = self.conn.execute(
+            "SELECT content FROM messages WHERE thread_id = ? ORDER BY seq", (initial.thread_id,)
+        ).fetchall()
+        self.assertEqual([row["content"] for row in rows], ["Hello"])
+        thread = self.conn.execute(
+            "SELECT inbox_sort_index, last_message_at FROM threads WHERE id = ?", (initial.thread_id,)
+        ).fetchone()
+        self.assertEqual(thread["inbox_sort_index"], 7)
+        self.assertIn("2026-03-31 10:31:00", thread["last_message_at"])
 
     # Gate 3: code:test-validation-001:l1-to-l4 (dedup stability)
     def test_persist_thread_record_dedups_literal_newline_and_late_reaction(self):

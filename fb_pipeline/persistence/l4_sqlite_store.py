@@ -707,3 +707,11 @@ def log_mas_decision(
     finally:
         if owns_connection and conn is not None:
             conn.close()
+    # code:inbox-msg-kind-001 / code:inbox-msg-abs-time-001
+    # `kind` separates real turns from Inbox system rows (banners, reactions);
+    # `message_at` is the label resolved to an absolute local datetime at
+    # scrape time, so ageing decisions never depend on "Mon 11:10 AM".
+    _ensure_column(cursor, "messages", "kind", "kind TEXT NOT NULL DEFAULT 'message'")
+    _ensure_column(cursor, "messages", "message_at", "message_at DATETIME")
+    _ensure_column(cursor, "messages", "message_at_approx", "message_at_approx INTEGER DEFAULT 0")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread_kind_seq ON messages(thread_id, kind, seq)")

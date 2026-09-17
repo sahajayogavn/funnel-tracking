@@ -2,6 +2,8 @@ import hashlib
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
+from fb_pipeline.contracts.l1_message_kind import classify_message_kind, KIND_MESSAGE
+from fb_pipeline.contracts.l1_message_time import resolve_message_at
 from fb_pipeline.contracts.l1_inbox import (
     EnrichedThreadRecord,
     InboxMessage,
@@ -100,7 +102,9 @@ def build_thread_record(page_id: str, visible_thread: dict) -> ThreadRecord:
         thread_name=name,
         preview_text=preview_text,
         thread_lines=thread_lines,
-        dom_index=visible_thread.get("domIndex", 0),
+        # `domIndex` is emitted only by sidebar discovery.  A targeted/detail
+        # fetch has no Inbox position and must not be treated as position zero.
+        dom_index=visible_thread.get("domIndex"),
         sidebar_time_text=sidebar_time_text,
         sidebar_timestamp_ms=visible_thread.get("sidebarTimestampMs"),
         sidebar_time_kind=sidebar_time_kind,
@@ -220,8 +224,16 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     existing_list = [(_normalize_sender(row['sender']), _normalize(row['content'])) for row in existing_msgs]
     existing_set = set(existing_list)
     
+    # Inbox includes operational rows (assignment, labels, etc.) in its DOM.
+    # They are not conversation messages and must neither be saved nor affect
+    # overlap/sequence calculation for the actual message timeline.
+    conversation_messages = [
+        msg for msg in thread_record.messages
+        if classify_message_kind(msg.content) == KIND_MESSAGE
+    ]
+
     new_tuples = []
-    for msg in thread_record.messages:
+    for msg in conversation_messages:
         content = msg.content
         sender = msg.sender
         if sender == "Page":
@@ -240,7 +252,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             best_overlap = i
             
     next_seq = existing_msgs[-1]['seq'] + 1 if existing_msgs else 0
-    candidate_msgs = thread_record.messages[best_overlap:]
+    candidate_msgs = conversation_messages[best_overlap:]
 
     msgs_to_insert = []
     for msg in candidate_msgs:
@@ -274,36 +286,46 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             msg_content_to_save = f"--- [AD SOURCE]: {ad_context} ---\n\n{msg_content_to_save}"
             if sender_to_save == "Page": sender_to_save = "Auto_Page"
             
+        # code:inbox-msg-kind-001 / code:inbox-msg-abs-time-001
+        # Candidates were filtered by their original Inbox row above.  The
+        # optional AD-context prefix is metadata, not a system-banner kind.
+        msg_kind = KIND_MESSAGE
+        message_at, message_at_approx = resolve_message_at(msg.message_timestamp, datetime.now())
         cursor.execute(
-            "INSERT OR IGNORE INTO messages (thread_id, sender, content, message_timestamp, seq) VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO messages (thread_id, sender, content, message_timestamp, seq, kind, message_at, message_at_approx) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 thread_record.thread_id,
                 sender_to_save,
                 msg_content_to_save,
                 msg.message_timestamp,
                 next_seq + idx,
+                msg_kind,
+                message_at,
+                1 if message_at_approx else 0,
             )
         )
         if cursor.rowcount > 0:
             messages_added += 1
-            if msg.sender == "Customer":
+            # Only a genuine customer turn may move `last_interaction`; a
+            # re-scraped "replied to an ad." banner must not.
+            if msg.sender == "Customer" and msg_kind == KIND_MESSAGE:
                 new_customer_message_added = True
-    # The sidebar describes the thread's most recent message regardless of
-    # sender. Prefer it over `users.last_interaction`, which intentionally
-    # tracks customer activity only and therefore cannot reproduce Inbox order.
+    # Prefer the last real DOM message.  The sidebar can instead reflect an
+    # operational event such as an assignment banner, which must not make an
+    # old conversation look newly active or reorder the Inbox snapshot.
     last_message_at = None
-    if thread_record.sidebar_timestamp_ms:
+    for message in reversed(conversation_messages):
+        parsed_message_time = parse_sidebar_time_token(message.message_timestamp or "")
+        parsed_at = parsed_message_time.get("parsed_at")
+        if parsed_at and " " in parsed_at:
+            last_message_at = parsed_at.replace("T", " ")
+            break
+    if not last_message_at and thread_record.sidebar_timestamp_ms:
         last_message_at = datetime.fromtimestamp(thread_record.sidebar_timestamp_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
     sidebar_time = parse_sidebar_time_token(thread_record.sidebar_time_text)
     if not last_message_at and sidebar_time.get("parsed_at") and " " in sidebar_time["parsed_at"]:
         last_message_at = sidebar_time["parsed_at"].replace("T", " ")
-    if not last_message_at:
-        for message in reversed(thread_record.messages):
-            parsed_message_time = parse_sidebar_time_token(message.message_timestamp or "")
-            parsed_at = parsed_message_time.get("parsed_at")
-            if parsed_at and " " in parsed_at:
-                last_message_at = parsed_at.replace("T", " ")
-                break
 
     cursor.execute('''
         INSERT INTO threads (id, page_id, thread_name, last_synced_time, inbox_sort_index, last_message_at)
@@ -311,7 +333,9 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
         ON CONFLICT(id) DO UPDATE SET
             thread_name=excluded.thread_name,
             last_synced_time=excluded.last_synced_time,
-            inbox_sort_index=excluded.inbox_sort_index,
+            -- A targeted detail refresh does not have a sidebar ordinal.
+            -- Retain the Stage-1 order in that case.
+            inbox_sort_index=COALESCE(excluded.inbox_sort_index, threads.inbox_sort_index),
             last_message_at=COALESCE(excluded.last_message_at, threads.last_message_at)
     ''', (
         thread_record.thread_id,
@@ -344,7 +368,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     # Priority 1: Check if the latest message has an exact, valid timestamp (like "8:20 AM" or "Feb 6, 2026, 1:58 PM")
     interaction_time_sql = "datetime('now')"
     latest_msg_ts = None
-    for msg in reversed(thread_record.messages):
+    for msg in reversed(conversation_messages):
         ts_cand = (msg.message_timestamp or "").strip()
         if ts_cand:
             t_cand_data = parse_sidebar_time_token(ts_cand)
@@ -365,9 +389,9 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
                 now = dt_mod.datetime.now()
                 # If date is today, never place it in the future! Use current time staggered backward.
                 if time_data.get("kind") == "today" or time_data.get("days_ago") == 0 or parsed_dt == now.strftime("%Y-%m-%d"):
-                    staggered = now - dt_mod.timedelta(minutes=thread_record.dom_index)
+                    staggered = now - dt_mod.timedelta(minutes=thread_record.dom_index or 0)
                 else:
-                    staggered = now.replace(hour=23, minute=59, second=59) - dt_mod.timedelta(minutes=thread_record.dom_index)
+                    staggered = now.replace(hour=23, minute=59, second=59) - dt_mod.timedelta(minutes=thread_record.dom_index or 0)
                 parsed_dt = f"{parsed_dt} {staggered.strftime('%H:%M:%S')}"
             interaction_time_sql = f"'{parsed_dt}'"
 

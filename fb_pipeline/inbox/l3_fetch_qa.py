@@ -81,13 +81,16 @@ def _qa_logic(page_id: str, fetch_started_at: datetime, page, conn, logger) -> d
             "sender_dom": "Page" if (tr.preview_text or "").lower().startswith(("bạn:", "you:")) else "Customer"
         })
         
-    # Get DB top 10
+    # Get DB top 10 from the persisted sidebar snapshot.  Never allow NULL
+    # ranks into this comparison: SQLite sorts NULL before integers, which
+    # silently turns QA's "top 10" into arbitrary historical rows after a
+    # partial/interrupted fetch.  Missing ranks must fail honestly instead.
     cursor = conn.cursor()
     cursor.execute("""
         SELECT id, thread_name 
         FROM threads 
-        WHERE page_id=? 
-        ORDER BY inbox_sort_index 
+        WHERE page_id=? AND inbox_sort_index IS NOT NULL
+        ORDER BY inbox_sort_index ASC
         LIMIT 10
     """, (page_id,))
     db_top_10_rows = cursor.fetchall()
@@ -132,7 +135,14 @@ def _qa_logic(page_id: str, fetch_started_at: datetime, page, conn, logger) -> d
         qa1_results.append({"rank": rank, "dom_id": dom_id, "db_id": dom_id, "verdict": verdict1})
         
         # QA-2 logic
-        cursor.execute("SELECT content, sender FROM messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1", (dom_id,))
+        # System banners are Inbox UI events, not the message preview that
+        # this QA compares.  This predicate also protects old rows inserted
+        # before the parser learned to discard those events.
+        cursor.execute(
+            "SELECT content, sender FROM messages "
+            "WHERE thread_id=? AND kind='message' ORDER BY seq DESC LIMIT 1",
+            (dom_id,),
+        )
         msg_row = cursor.fetchone()
         db_raw = msg_row[0] if msg_row else ""
         db_sender = msg_row[1] if msg_row else ""
@@ -247,4 +257,3 @@ def _save_and_alert(page_id: str, res: dict, logger, reason: str):
         db.commit()
     except Exception as e:
         logger.error(f"Failed to send Telegram alert for Fetch QA: {e}")
-

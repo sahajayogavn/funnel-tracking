@@ -142,10 +142,10 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
             max_days = 7
 
     cursor = conn.cursor()
-    # A crawl is one authoritative Inbox snapshot.  Remove positions from an
-    # older virtualized viewport so a stale row can never share a top rank.
-    cursor.execute("UPDATE threads SET inbox_sort_index = NULL WHERE page_id = ?", (page_id,))
-    conn.commit()
+    # Do not clear the saved ordering before discovery succeeds.  Targeted,
+    # capped, or interrupted fetches are partial snapshots; clearing here
+    # erased the prior top-ten order and made the Seekers list fall back to
+    # timestamp sorting.  Each discovered sidebar card updates its own rank.
     processed_thread_keys = set()
     scroll_round = 0
     reached_date_limit = False
@@ -247,6 +247,17 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
                 stats["threads_psid_resolved"] += 1
             cursor.execute("SELECT id FROM threads WHERE id = ?", (thread_record.thread_id,))
             row = cursor.fetchone()
+
+            # INBOX-ORDER INVARIANT: Stage 1 is the sole authority for the
+            # visible Inbox order.  Cache-hit threads deliberately skip Stage
+            # 2/message persistence, but their rank still has to be written
+            # here.  Do not move this update below the skip path: doing so
+            # leaves a successful fetch with stale (or NULL) top-ten ranks.
+            if row:
+                cursor.execute(
+                    "UPDATE threads SET inbox_sort_index = ? WHERE id = ?",
+                    (thread_record.dom_index, thread_record.thread_id),
+                )
 
             is_match = False
             force_resync = False
@@ -353,6 +364,7 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
         stats["sidebar_wait_ms"] += scroll_result.get("elapsed_ms", 0)
 
     # END STAGE 1
+    conn.commit()
     logger.info(f"Stage 1 Complete. Listed {len(collected_threads)} threads in range.")
 
     return {
