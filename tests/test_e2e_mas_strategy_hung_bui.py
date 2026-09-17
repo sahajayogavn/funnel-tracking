@@ -14,8 +14,8 @@ Tests all 6 phases of the MAS Execution Pipeline as defined in mas_strategy.md:
   Phase 6: Route Coverage  → Inbox, WarmUp, Reaction, Event pipelines
 
 Run (LLM tests only):
-    OPENAI_API_BASE=$(echo "aHR0cDovLzEwLjAuMS40Mjo4MzE3L3Yx" | base64 -d) \\
-    OPENAI_API_KEY=$(echo "aHVuZ2J1aS0yNTE2" | base64 -d) \\
+    OPENAI_API_BASE=$(echo "aHR0cHM6Ly9hcGlrZXkuY2xpY2svdjE=" | base64 -d) \\
+    OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base64 -d) \\
     .venv/bin/python -m pytest tests/test_e2e_mas_strategy_hung_bui.py -v
 
 DB-only tests run without LLM credentials:
@@ -41,9 +41,21 @@ PAGE_ID = "1548373332058326"
 HUNG_BUI_FB_ID = "f9b35a5530b3a8f2"
 HUNG_BUI_THREAD_ID = f"{PAGE_ID}_{HUNG_BUI_FB_ID}"
 
+def _is_hung_bui_in_db() -> bool:
+    if not os.path.exists(DB_PATH):
+        return False
+    try:
+        conn = get_readonly_conn()
+        row = conn.execute("SELECT id FROM threads WHERE id = ?", (HUNG_BUI_THREAD_ID,)).fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
 SKIP_NO_DB = pytest.mark.skipif(
-    not os.path.exists(DB_PATH),
-    reason="Production frankensqlite.db not found",
+    not _is_hung_bui_in_db(),
+    reason=f"Hung Bui thread ({HUNG_BUI_THREAD_ID}) not present in frankensqlite.db (run live crawl first)",
 )
 SKIP_NO_LLM = pytest.mark.skipif(
     not (os.environ.get("OPENAI_API_BASE") and os.environ.get("OPENAI_API_KEY")),

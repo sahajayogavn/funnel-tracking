@@ -12,8 +12,8 @@ Prerequisites:
   - OPENAI_API_BASE + OPENAI_API_KEY env vars set
 
 Run:
-    OPENAI_API_BASE=$(echo "aHR0cDovLzEwLjAuMS40Mjo4MzE3L3Yx" | base64 -d) \\
-    OPENAI_API_KEY=$(echo "aHVuZ2J1aS0yNTE2" | base64 -d) \\
+    OPENAI_API_BASE=$(echo "aHR0cHM6Ly9hcGlrZXkuY2xpY2svdjE=" | base64 -d) \\
+    OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base64 -d) \\
     .venv/bin/python tests/test_qa_dual_verification.py
 """
 import json

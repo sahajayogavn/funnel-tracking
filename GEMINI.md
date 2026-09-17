@@ -24,9 +24,9 @@ The repository is structured to support Agile XP methodologies for AI Agents, en
 
 ## 2. Web Application (Next.js)
 
-The full-stack web dashboard lives in `web/` and runs on **port 9994** by default.
+The full-stack web dashboard lives in `web/` and runs on **port 9995** by default (configurable via `PORT` environment variable).
 
-- **Dev Server**: `cd web && npm run dev` → `http://localhost:9994`
+- **Dev Server**: `cd web && npm run dev` → `http://localhost:9995` (or `PORT=<port> npm run dev`)
 - **Production Build**: `cd web && npm run build && npm start`
 - **Database**: Reads existing `memory/agent_memory/frankensqlite.db` via `better-sqlite3` (readonly)
 - **Rules**: Follow `.agents/rules/fullstack-rules.md` for server/client boundary, dynamic rendering, etc.
@@ -101,15 +101,15 @@ The `adk_agents/` package uses Google ADK 1.27+ with LiteLLM for OpenAI-compatib
 - `google-adk` and `litellm` must be installed in `.venv`
 - LLM credentials must be decoded from Base64 and set as env vars:
   ```bash
-  export OPENAI_API_BASE=$(echo "aHR0cDovLzEwLjAuMS40Mjo4MzE3L3Yx" | base64 -d)
-  export OPENAI_API_KEY=$(echo "aHVuZ2J1aS0yNTE2" | base64 -d)
+  export OPENAI_API_BASE=$(echo "aHR0cHM6Ly9hcGlrZXkuY2xpY2svdjE=" | base64 -d)
+  export OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base64 -d)
   ```
 
 ### Interactive Testing (ADK Web UI)
 
 ```bash
-OPENAI_API_BASE=$(echo "aHR0cDovLzEwLjAuMS40Mjo4MzE3L3Yx" | base64 -d) \
-OPENAI_API_KEY=$(echo "aHVuZ2J1aS0yNTE2" | base64 -d) \
+OPENAI_API_BASE=$(echo "aHR0cHM6Ly9hcGlrZXkuY2xpY2svdjE=" | base64 -d) \
+OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base64 -d) \
 .venv/bin/adk web .
 ```
 
@@ -120,8 +120,8 @@ OPENAI_API_KEY=$(echo "aHVuZ2J1aS0yNTE2" | base64 -d) \
 ### Automated E2E Tests (pytest)
 
 ```bash
-OPENAI_API_BASE=$(echo "aHR0cDovLzEwLjAuMS40Mjo4MzE3L3Yx" | base64 -d) \
-OPENAI_API_KEY=$(echo "aHVuZ2J1aS0yNTE2" | base64 -d) \
+OPENAI_API_BASE=$(echo "aHR0cHM6Ly9hcGlrZXkuY2xpY2svdjE=" | base64 -d) \
+OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base64 -d) \
 .venv/bin/python -m pytest tests/test_adk_e2e.py -v
 ```
 
@@ -132,8 +132,8 @@ OPENAI_API_KEY=$(echo "aHVuZ2J1aS0yNTE2" | base64 -d) \
 ### ADK Eval (Rubric-Based LLM-as-Judge)
 
 ```bash
-OPENAI_API_BASE=$(echo "aHR0cDovLzEwLjAuMS40Mjo4MzE3L3Yx" | base64 -d) \
-OPENAI_API_KEY=$(echo "aHVuZ2J1aS0yNTE2" | base64 -d) \
+OPENAI_API_BASE=$(echo "aHR0cHM6Ly9hcGlrZXkuY2xpY2svdjE=" | base64 -d) \
+OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base64 -d) \
 .venv/bin/adk eval adk_agents/ adk_agents/inbox_mas.evalset.json --print_detailed_results
 ```
 
