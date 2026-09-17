@@ -1,5 +1,6 @@
 import json
 import asyncio
+from tools.l5_adk_runtime import run_runner
 
 # code:tool-scheduler-001:reactor-adk
 # code:tool-scheduler-001:warmup-composer-adk
@@ -30,7 +31,9 @@ def _run_adk_route(agent, app_name: str, user_id: str, state: dict, prompt: str)
     )
 
     events = []
-    for event in runner.run(user_id=user_id, session_id=session.id, new_message=user_msg):
+    for event in run_runner(
+        runner, user_id=user_id, session_id=session.id, new_message=user_msg
+    ):
         if hasattr(event, "content") and event.content and event.content.parts:
             text = event.content.parts[0].text
             if text:

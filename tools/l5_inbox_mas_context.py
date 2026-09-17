@@ -43,25 +43,41 @@ def load_knowledge_context() -> str:
     return "\\n\\n".join(section for section in sections if section)
 
 
+# code:tool-inbox-mas-001:llm-source-of-truth
+def get_llm_config() -> dict:
+    """Read the canonical LLM configuration from the project `.env`.
+
+    Legacy OPENAI_API_* variables are used only when the `.env` has no
+    corresponding value, so a stale shell value cannot override the provider
+    configured for this project.
+    """
+    from tools.env_manager import load_credentials
+
+    creds = load_credentials(prefer_environment=False)
+    api_base = (creds.get("OPENAI_COMPATIBLE_URL") or os.environ.get("OPENAI_API_BASE", "")).strip()
+    api_key = creds.get("OPENAI_COMPATIBLE_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    model = (creds.get("OPENAI_COMPATIBLE_MODELS") or os.environ.get("ADK_MODEL", "gpt-5.4")).strip()
+    model = model.split(",", 1)[0].strip()
+
+    if not api_base or not api_key:
+        raise RuntimeError(
+            "LLM credentials not found. Set OPENAI_COMPATIBLE_URL and "
+            "OPENAI_COMPATIBLE_KEY in the project .env."
+        )
+    return {"api_base": api_base, "api_key": api_key, "model": model}
+
+
 def setup_llm_env():
     """Configure LLM environment variables for ADK/LiteLLM."""
-    # Load credentials from env_manager
-    from tools.env_manager import load_credentials
-    creds = load_credentials()
-
-    # Set OpenAI-compatible vars for LiteLLM
-    # Prefer OPENAI_API_BASE from shell environment if user exported it explicitly
-    api_base = os.environ.get("OPENAI_API_BASE") or creds.get("OPENAI_COMPATIBLE_URL", os.environ.get("OPENAI_COMPATIBLE_URL", ""))
-    api_key = os.environ.get("OPENAI_API_KEY") or creds.get("OPENAI_COMPATIBLE_KEY", os.environ.get("OPENAI_COMPATIBLE_KEY", ""))
-
-    if api_base:
-        os.environ["OPENAI_API_BASE"] = api_base
-    if api_key:
-        os.environ["OPENAI_API_KEY"] = api_key
-
-    # ADK reads ADK_MODEL (LiteLLM name, "openai/<model>"); derive it from .env unless overridden.
-    model = creds.get("OPENAI_COMPATIBLE_MODELS", os.environ.get("OPENAI_COMPATIBLE_MODELS", ""))
-    if model and not os.environ.get("ADK_MODEL"):
-        os.environ["ADK_MODEL"] = model if model.startswith("openai/") else f"openai/{model.split(',')[0].strip()}"
-
-    logger.info(f"LLM configured: base={api_base[:30]}... model={os.environ.get('ADK_MODEL', 'openai/gpt-5.4')}")
+    config = get_llm_config()
+    os.environ["OPENAI_API_BASE"] = config["api_base"]
+    os.environ["OPENAI_API_KEY"] = config["api_key"]
+    os.environ["ADK_MODEL"] = (
+        config["model"] if config["model"].startswith("openai/")
+        else f"openai/{config['model']}"
+    )
+    logger.info(
+        "LLM configured from project .env: base=%s... model=%s",
+        config["api_base"][:30], os.environ["ADK_MODEL"],
+    )
+    return config

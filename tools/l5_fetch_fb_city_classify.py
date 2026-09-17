@@ -9,14 +9,8 @@ logger = logging.getLogger("fetch_fb_city_classify")
 def _get_llm_config_safe() -> dict | None:
     """Try to load LLM config. Returns None if credentials unavailable."""
     try:
-        from tools.env_manager import load_credentials
-        creds = load_credentials()
-        api_base = os.environ.get("OPENAI_API_BASE") or creds.get("OPENAI_COMPATIBLE_URL", "")
-        api_key = os.environ.get("OPENAI_API_KEY") or creds.get("OPENAI_COMPATIBLE_KEY", "")
-        model = os.environ.get("ADK_MODEL") or creds.get("OPENAI_COMPATIBLE_MODELS", "gpt-5.4")
-        if not api_base or not api_key:
-            return None
-        return {"api_base": api_base, "api_key": api_key, "model": model}
+        from tools.l5_inbox_mas_context import get_llm_config
+        return get_llm_config()
     except Exception as e:
         logger.debug(f"LLM config not available: {e}")
         return None

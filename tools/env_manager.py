@@ -34,10 +34,15 @@ def save_credentials(credentials: dict):
             f.write(f"{key}={encoded_val}\n")
     print(f"DEBUG: Credentials strictly encoded and saved to {ENV_FILE_PATH}")
 
-def load_credentials() -> dict:
+def load_credentials(prefer_environment: bool = True) -> dict:
     """
     Load encoded .env file and decode it for application usage.
     Returns a dictionary of key: plaintext_value.
+
+    ``prefer_environment`` keeps the historical shell override behavior for
+    general credentials. LLM callers that use the project's single `.env`
+    configuration can disable it so a stale environment variable cannot
+    silently select a different endpoint.
     """
     credentials = {}
     if not os.path.exists(ENV_FILE_PATH):
@@ -59,7 +64,7 @@ def load_credentials() -> dict:
                     decoded_val = encoded_val
                     print(f"DEBUG: Key {key} could not be base64 decoded, loading as plaintext.")
                 
-                if key in os.environ:
+                if prefer_environment and key in os.environ:
                     credentials[key] = os.environ[key]
                 else:
                     credentials[key] = decoded_val
@@ -94,4 +99,3 @@ if __name__ == '__main__':
         print("Decoded Data preview (for debug only):")
         for k, v in data.items():
             print(f" - {k}: {v[:5]}... (truncated)")
-

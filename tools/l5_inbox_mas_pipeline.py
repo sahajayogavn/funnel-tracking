@@ -2,6 +2,7 @@ import json
 import logging
 import asyncio
 from tools.l5_inbox_mas_context import load_knowledge_context
+from tools.l5_adk_runtime import run_runner
 
 logger = logging.getLogger("inbox_mas_pipeline")
 
@@ -37,12 +38,7 @@ def run_adk_pipeline(thread_messages: list, seeker_context: dict, feedback: str 
         app_name="sahajayoga_inbox",
         session_service=session_service,
     )
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    session = loop.run_until_complete(
+    session = asyncio.run(
         session_service.create_session(
             app_name="sahajayoga_inbox",
             user_id="inbox_runner",
@@ -74,7 +70,8 @@ def run_adk_pipeline(thread_messages: list, seeker_context: dict, feedback: str 
         "knowledge_context": knowledge_context,
     }
 
-    for event in runner.run(
+    for event in run_runner(
+        runner,
         user_id="inbox_runner",
         session_id=session.id,
         new_message=user_msg
@@ -132,13 +129,7 @@ def run_adk_batch_pipeline(batch_payload: list, feedback: str = None) -> list:
             "messages": item.get("messages", [])
         })
 
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    session = loop.run_until_complete(
+    session = asyncio.run(
         session_service.create_session(
             app_name="sahajayoga_batch_inbox",
             user_id="inbox_batch_runner",
@@ -161,7 +152,8 @@ def run_adk_batch_pipeline(batch_payload: list, feedback: str = None) -> list:
     batch_results = []
     raw_response = ""
 
-    for event in runner.run(
+    for event in run_runner(
+        runner,
         user_id="inbox_batch_runner",
         session_id=session.id,
         new_message=user_msg
@@ -213,7 +205,8 @@ def run_adk_batch_pipeline(batch_payload: list, feedback: str = None) -> list:
             ))]
         )
         raw_retry = ""
-        for event in runner.run(
+        for event in run_runner(
+            runner,
             user_id="inbox_batch_runner",
             session_id=session.id,
             new_message=retry_msg

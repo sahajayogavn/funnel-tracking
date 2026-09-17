@@ -34,7 +34,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from tools.env_manager import load_credentials
+from tools.l5_inbox_mas_context import get_llm_config as _get_project_llm_config
 from fb_pipeline.contracts.l1_city_llm import detect_city_llm, detect_city_batch_llm, gather_signals_for_user
 from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
 
@@ -54,18 +54,7 @@ logger = logging.getLogger("classify_city")
 # code:tool-citydetect-001:get-llm-config
 def get_llm_config() -> dict:
     """Load LLM credentials from .env via env_manager."""
-    creds = load_credentials()
-    api_base = os.environ.get("OPENAI_API_BASE") or creds.get("OPENAI_COMPATIBLE_URL", "")
-    api_key = os.environ.get("OPENAI_API_KEY") or creds.get("OPENAI_COMPATIBLE_KEY", "")
-    model = os.environ.get("ADK_MODEL") or creds.get("OPENAI_COMPATIBLE_MODELS", "gpt-5.4")
-
-    if not api_base or not api_key:
-        raise RuntimeError(
-            "LLM credentials not found. Ensure OPENAI_COMPATIBLE_URL and "
-            "OPENAI_COMPATIBLE_KEY are set in .env (Base64-encoded)."
-        )
-
-    return {"api_base": api_base, "api_key": api_key, "model": model}
+    return _get_project_llm_config()
 
 
 # code:tool-citydetect-001:classify-one
