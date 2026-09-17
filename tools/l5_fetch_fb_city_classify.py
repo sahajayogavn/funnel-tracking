@@ -11,9 +11,9 @@ def _get_llm_config_safe() -> dict | None:
     try:
         from tools.env_manager import load_credentials
         creds = load_credentials()
-        api_base = creds.get("OPENAI_COMPATIBLE_URL") or os.environ.get("OPENAI_API_BASE", "")
-        api_key = creds.get("OPENAI_COMPATIBLE_KEY") or os.environ.get("OPENAI_API_KEY", "")
-        model = creds.get("OPENAI_COMPATIBLE_MODELS") or os.environ.get("ADK_MODEL", "gpt-5.4")
+        api_base = os.environ.get("OPENAI_API_BASE") or creds.get("OPENAI_COMPATIBLE_URL", "")
+        api_key = os.environ.get("OPENAI_API_KEY") or creds.get("OPENAI_COMPATIBLE_KEY", "")
+        model = os.environ.get("ADK_MODEL") or creds.get("OPENAI_COMPATIBLE_MODELS", "gpt-5.4")
         if not api_base or not api_key:
             return None
         return {"api_base": api_base, "api_key": api_key, "model": model}
@@ -164,16 +164,15 @@ def _post_scrape_llm_city_classify(conn, page_id: str, thread_ids: list[str] | N
             new_city = res.get("city", "Unknown")
             program_code = res.get("program_code")
             proof = res.get("proof", "")
-            if new_city != "Unknown":
-                cursor.execute(
-                    "UPDATE users SET city = ?, program_code = ?, classification_proof = ?, classification_verified_at = datetime('now','localtime') WHERE thread_id = ?",
-                    (new_city, program_code, proof, thread_id)
-                )
-                updated += 1
-                logger.info(
-                    f"LLM city batch_updated [{b_idx+1}/{len(batches)}] {thread_name}: "
-                    f"{old_city} → {new_city} [{res.get('confidence', '')}] {res.get('reasoning', '')}"
-                )
+            cursor.execute(
+                "UPDATE users SET city = ?, program_code = ?, classification_proof = ?, classification_verified_at = datetime('now','localtime') WHERE thread_id = ?",
+                (new_city, program_code, proof, thread_id)
+            )
+            updated += 1
+            logger.info(
+                f"LLM city batch_updated [{b_idx+1}/{len(batches)}] {thread_name}: "
+                f"{old_city} → {new_city} [{res.get('confidence', '')}] {res.get('reasoning', '')}"
+            )
         
         conn.commit()
         if b_idx < len(batches) - 1:

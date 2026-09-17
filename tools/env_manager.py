@@ -53,13 +53,17 @@ def load_credentials() -> dict:
             if '=' in line:
                 key, encoded_val = line.split('=', 1)
                 try:
-                    credentials[key] = decode_credential(encoded_val)
+                    decoded_val = decode_credential(encoded_val)
                 except Exception as e:
                     # Fallback to plain text if it's not base64 encoded
-                    credentials[key] = encoded_val
+                    decoded_val = encoded_val
                     print(f"DEBUG: Key {key} could not be base64 decoded, loading as plaintext.")
                 
-                os.environ[key] = credentials[key] # Directly load to os environment
+                if key in os.environ:
+                    credentials[key] = os.environ[key]
+                else:
+                    credentials[key] = decoded_val
+                    os.environ[key] = decoded_val # Directly load to os environment
     
     print("DEBUG: Credentials successfully loaded and decoded into environment variables.")
     return credentials

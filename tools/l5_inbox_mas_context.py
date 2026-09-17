@@ -50,12 +50,18 @@ def setup_llm_env():
     creds = load_credentials()
 
     # Set OpenAI-compatible vars for LiteLLM
-    api_base = creds.get("OPENAI_COMPATIBLE_URL", os.environ.get("OPENAI_COMPATIBLE_URL", ""))
-    api_key = creds.get("OPENAI_COMPATIBLE_KEY", os.environ.get("OPENAI_COMPATIBLE_KEY", ""))
+    # Prefer OPENAI_API_BASE from shell environment if user exported it explicitly
+    api_base = os.environ.get("OPENAI_API_BASE") or creds.get("OPENAI_COMPATIBLE_URL", os.environ.get("OPENAI_COMPATIBLE_URL", ""))
+    api_key = os.environ.get("OPENAI_API_KEY") or creds.get("OPENAI_COMPATIBLE_KEY", os.environ.get("OPENAI_COMPATIBLE_KEY", ""))
 
     if api_base:
         os.environ["OPENAI_API_BASE"] = api_base
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
+
+    # ADK reads ADK_MODEL (LiteLLM name, "openai/<model>"); derive it from .env unless overridden.
+    model = creds.get("OPENAI_COMPATIBLE_MODELS", os.environ.get("OPENAI_COMPATIBLE_MODELS", ""))
+    if model and not os.environ.get("ADK_MODEL"):
+        os.environ["ADK_MODEL"] = model if model.startswith("openai/") else f"openai/{model.split(',')[0].strip()}"
 
     logger.info(f"LLM configured: base={api_base[:30]}... model={os.environ.get('ADK_MODEL', 'openai/gpt-5.4')}")

@@ -55,9 +55,9 @@ logger = logging.getLogger("classify_city")
 def get_llm_config() -> dict:
     """Load LLM credentials from .env via env_manager."""
     creds = load_credentials()
-    api_base = creds.get("OPENAI_COMPATIBLE_URL") or os.environ.get("OPENAI_API_BASE", "")
-    api_key = creds.get("OPENAI_COMPATIBLE_KEY") or os.environ.get("OPENAI_API_KEY", "")
-    model = creds.get("OPENAI_COMPATIBLE_MODELS") or os.environ.get("ADK_MODEL", "gpt-5.4")
+    api_base = os.environ.get("OPENAI_API_BASE") or creds.get("OPENAI_COMPATIBLE_URL", "")
+    api_key = os.environ.get("OPENAI_API_KEY") or creds.get("OPENAI_COMPATIBLE_KEY", "")
+    model = os.environ.get("ADK_MODEL") or creds.get("OPENAI_COMPATIBLE_MODELS", "gpt-5.4")
 
     if not api_base or not api_key:
         raise RuntimeError(
