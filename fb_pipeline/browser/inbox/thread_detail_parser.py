@@ -160,6 +160,9 @@ def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fi
 
 
 def extract_ad_context(page) -> str:
+    # Do not broaden this ancestor walk into the message-list container.  That
+    # would capture unrelated historical chat as "ad" text; ad IDs are shared
+    # and the transcript could then be sent to another seeker's LLM call.
     return page.evaluate('''() => {
         let links = Array.from(document.querySelectorAll('a, div[role="button"]'));
         let target = links.find(a =>

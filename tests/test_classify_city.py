@@ -24,6 +24,7 @@ from fb_pipeline.contracts.l1_city_llm import (
     _parse_llm_response,
     detect_city_llm,
     gather_signals_for_user,
+    sanitize_ad_content,
 )
 from fb_pipeline.contracts.l1_inbox import detect_city
 
@@ -53,6 +54,14 @@ class TestBuildPrompt(unittest.TestCase):
         prompt = _build_prompt("User", ["Em ở HCM ạ"], [], "")
         self.assertIn("Em ở HCM ạ", prompt)
         self.assertIn("(no page messages)", prompt)
+
+    def test_rejects_inbox_transcript_mistaken_for_ad_content(self):
+        contaminated = (
+            "Khanh Minh Nguyen replied to an ad.\n"
+            "[Quoted Reply/Link]: Hỏi chi tiết\n"
+            "KHÓA HỌC THIỀN ĐỊNH MIỄN PHÍ"
+        )
+        self.assertEqual(sanitize_ad_content(contaminated), "")
 
 
 class TestParseLlmResponse(unittest.TestCase):
@@ -247,6 +256,17 @@ class TestGatherSignals(unittest.TestCase):
 
         signals = gather_signals_for_user(self.conn, "t2")
         self.assertEqual(signals["ad_content"], "")
+    def test_gather_excludes_contaminated_shared_ad_context(self):
+        cursor = self.conn.cursor()
+        cursor.execute("INSERT INTO user_ad_ids VALUES ('t1', 'unsafe-ad')")
+        cursor.execute(
+            "INSERT INTO ad_posts VALUES ('unsafe-ad', ?)",
+            ("Another Person replied to an ad.\nSent by\nAn operator",),
+        )
+        self.conn.commit()
+
+        signals = gather_signals_for_user(self.conn, "t1")
+        self.assertNotIn("Another Person", signals["ad_content"])
 
 
 class TestClassifyUser(unittest.TestCase):

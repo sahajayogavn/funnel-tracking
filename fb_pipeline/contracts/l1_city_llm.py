@@ -15,6 +15,7 @@ import logging
 import os
 import time
 import requests
+import re
 from fb_pipeline.contracts.l1_program_catalog import PROGRAM_CODES
 from fb_pipeline.persistence.l4_llm_trace import start_call, end_call, span_attempt
 
@@ -211,6 +212,30 @@ USER_PROMPT_TEMPLATE = """Classify the city for this seeker.
 ## Signal 3 — Ad content the user interacted with (LOWEST priority)
 {ad_content}
 """
+
+
+# `ad_posts` is shared by every seeker associated with an ad id. It must only
+# contain creative text: Inbox DOM around a reply-to-ad can include another
+# seeker's chat and must never become Signal 3 for a later classification.
+_AD_CONTEXT_CONVERSATION_MARKERS = re.compile(
+    r"\[Quoted Reply/Link\]|\b(?:replied to an ad|reply to your ad|"
+    r"đã trả lời về một bài viết|sent by|message removed)\b",
+    re.IGNORECASE,
+)
+
+
+def sanitize_ad_content(ad_content: object) -> str:
+    """Keep an ad creative only when it contains no Inbox conversation data.
+
+    Discarding suspect Signal 3 is safer than attempting to recover a fragment
+    from a shared record and leaking or misclassifying another seeker's data.
+    """
+    if not isinstance(ad_content, str):
+        return ""
+    cleaned = ad_content.strip()
+    if not cleaned or _AD_CONTEXT_CONVERSATION_MARKERS.search(cleaned):
+        return ""
+    return cleaned
 
 
 def _build_prompt(thread_name: str, customer_messages: list[str],
@@ -528,7 +553,11 @@ def gather_signals_for_user(conn, thread_id: str) -> dict:
         JOIN user_ad_ids ua ON ap.ad_id = ua.ad_id
         WHERE ua.thread_id = ?
     """, (thread_id,))
-    ad_parts = [r["ad_content"] for r in cursor.fetchall() if r["ad_content"]]
+    ad_parts = [
+        cleaned
+        for row in cursor.fetchall()
+        if (cleaned := sanitize_ad_content(row["ad_content"]))
+    ]
     ad_content = "\n---\n".join(ad_parts) if ad_parts else ""
 
     return {
@@ -544,5 +573,6 @@ __all__ = [
     "detect_city_llm",
     "detect_city_batch_llm",
     "verify_city_program_batch_llm",
+    "sanitize_ad_content",
     "gather_signals_for_user",
 ]

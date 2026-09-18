@@ -16,6 +16,7 @@ from fb_pipeline.contracts.l1_inbox import (
     extract_user_info,
     parse_ad_ids,
 )
+from fb_pipeline.contracts.l1_city_llm import sanitize_ad_content
 from fb_pipeline.browser.inbox.thread_list_parser import (
     is_conversation_name,
     parse_sidebar_time_token,
@@ -117,6 +118,10 @@ def build_thread_record(page_id: str, visible_thread: dict) -> ThreadRecord:
 def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract_user_info,
                          detect_city=None, ad_context: str = "", fb_url: str = "",
                          ad_ids: list | None = None) -> EnrichedThreadRecord:
+    # Do not attach a surrounding Inbox transcript to a shared ad id: it would
+    # make another seeker's messages available to later Signal 3 LLM calls.
+    ad_context = sanitize_ad_content(ad_context)
+
     db_msgs = [{"sender": m.get("sender"), "content": m.get("text", "")} for m in js_messages]
     user_info = extract_user_info(db_msgs, thread_record.thread_name, ad_context)
     # Classification is intentionally deferred to one batch + independent
@@ -195,7 +200,9 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     cursor = conn.cursor()
     messages_added = 0
     new_customer_message_added = False
-    ad_context = thread_record.ad_context
+    # Defend this boundary too: callers can construct records directly.
+    ad_context = sanitize_ad_content(thread_record.ad_context)
+
 
     cursor.execute("SELECT sender, content, seq FROM messages WHERE thread_id=? ORDER BY seq ASC", (thread_record.thread_id,))
     existing_msgs = cursor.fetchall()
