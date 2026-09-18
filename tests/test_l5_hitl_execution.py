@@ -1,0 +1,26 @@
+"""Isolation contract for the standalone human-approved action executor."""
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_hitl_executor_is_not_registered_by_mas_scheduler():
+    scheduler_source = (ROOT / "tools" / "l5_scheduler.py").read_text(encoding="utf-8")
+    assert "hitl_execution_job" not in scheduler_source
+    assert "telegram_poller_job" not in scheduler_source
+
+
+def test_standalone_worker_only_imports_delivery_dependencies():
+    source = (ROOT / "tools" / "l5_hitl_execution.py").read_text(encoding="utf-8")
+    assert "def hitl_execution_job" in source
+    assert "def run_hitl_loop" in source
+    assert "run_fetch_cycle" not in source
+    assert "run_adk_pipeline" not in source
+    assert "run_adk_warmup_composer" not in source
+
+
+def test_shell_runner_requires_an_explicit_mode():
+    source = (ROOT / "tools" / "run_hitl_execution_loop.sh").read_text(encoding="utf-8")
+    assert "{live|dry-run}" in source
+    assert "l5_hitl_execution.py" in source

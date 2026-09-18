@@ -20,7 +20,7 @@ from tools.l5_telegram_hitl import (
     check_hitl_status,
     get_db_connection
 )
-from tools.l5_scheduler import hitl_execution_job
+from tools.l5_hitl_execution import hitl_execution_job
 
 logging.basicConfig(
     level=logging.INFO,
