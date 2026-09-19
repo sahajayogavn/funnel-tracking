@@ -168,7 +168,9 @@ The system uses an ultra-compact elapsed-time convention across `/seekers`, seek
 The dashboard and its API routes require a signed session cookie. At `/login`,
 users answer both Sahaja Yoga questions. Answers are checked on the server,
 ignoring case and surrounding whitespace. The HttpOnly, SameSite=Lax cookie
-remembers access for one year and uses Secure on HTTPS.
+remembers access for one year and uses Secure on HTTPS. A signed copy is also
+kept in localStorage, allowing the login page to silently restore the cookie
+when browser or local development state drops it.
 
 Set `AUTH_SECRET` to a persistent random secret (at least 32 random bytes) for
 deployments, sharing it across all instances. Without it, the local server creates

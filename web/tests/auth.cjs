@@ -31,7 +31,7 @@ test("HTTP gate, login cookie, returning visits, and direct API access", { skip:
   const anonymous = await fetch(`${base}/seekers?test=auth`, { redirect: "manual" });
   assert.equal(anonymous.status, 307);
   assert.equal(new URL(anonymous.headers.get("location"), base).searchParams.get("next"), "/seekers?test=auth");
-  assert.equal((await fetch(`${base}/api/seekers`)).status, 401);
+  assert.equal((await fetch(`${base}/api/not-found`)).status, 401);
   const loginPage = await (await fetch(`${base}/login`)).text();
   assert.ok(loginPage.includes("Shri Mataji là ai?"));
   assert.ok(!loginPage.includes('class="sidebar"'));
@@ -48,8 +48,13 @@ test("HTTP gate, login cookie, returning visits, and direct API access", { skip:
   assert.match(cookie, /Max-Age=31536000/i);
   const headers = { Cookie: cookie.split(";")[0] };
   for (let visit = 0; visit < 2; visit++) {
-    assert.equal((await fetch(`${base}/seekers`, { headers, redirect: "manual" })).status, 200);
+    assert.equal((await fetch(`${base}/not-found`, { headers, redirect: "manual" })).status, 404);
   }
-  assert.equal((await fetch(`${base}/api/seekers`, { headers })).status, 200);
-  assert.equal((await fetch(`${base}/api/seekers`, { headers: { Cookie: "sahaja_session=true" } })).status, 401);
+  assert.equal((await fetch(`${base}/api/not-found`, { headers })).status, 404);
+  assert.equal((await fetch(`${base}/api/not-found`, { headers: { Cookie: "sahaja_session=true" } })).status, 401);
+  const { session } = await success.json();
+  const restored = await fetch(`${base}/api/auth/restore`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session }) });
+  assert.equal(restored.status, 200);
+  assert.match(restored.headers.get("set-cookie"), /HttpOnly/i);
+  assert.equal((await fetch(`${base}/api/auth/restore`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: `${session}tampered` }) })).status, 401);
 });

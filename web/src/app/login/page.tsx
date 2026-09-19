@@ -1,11 +1,38 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import styles from "./page.module.css";
+
+const LOCAL_SESSION_KEY = "sahaja_session";
 
 export default function LoginPage() {
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+
+  function continueToApp() {
+    const next = new URLSearchParams(window.location.search).get("next");
+    const destination = new URL(next || "/", window.location.origin);
+    window.location.replace(destination.origin === window.location.origin && destination.pathname !== "/login" ? destination.href : "/");
+  }
+
+  useEffect(() => {
+    const session = window.localStorage.getItem(LOCAL_SESSION_KEY);
+    if (!session) return;
+    let active = true;
+    fetch("/api/auth/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session }),
+    }).then(async (response) => {
+      if (!active) return;
+      if (response.ok) {
+        continueToApp();
+        return;
+      }
+      window.localStorage.removeItem(LOCAL_SESSION_KEY);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -24,9 +51,9 @@ export default function LoginPage() {
         setPending(false);
         return;
       }
-      const next = new URLSearchParams(window.location.search).get("next");
-      const destination = new URL(next || "/", window.location.origin);
-      window.location.replace(destination.origin === window.location.origin && destination.pathname !== "/login" ? destination.href : "/");
+      const result = await response.json();
+      window.localStorage.setItem(LOCAL_SESSION_KEY, result.session);
+      continueToApp();
     } catch {
       setError("Không thể kết nối. Vui lòng thử lại.");
       setPending(false);
