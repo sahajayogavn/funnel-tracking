@@ -19,6 +19,10 @@ PAGE_ID="${FUNNEL_PAGE_ID:-1548373332058326}"
 INTERVAL_SECONDS="${FUNNEL_INTERVAL_SECONDS:-900}"
 FETCH_WORKERS="${FUNNEL_FETCH_WORKERS:-5}"
 MAS_MAX_THREADS="${FUNNEL_MAS_MAX_THREADS:-5}"
+CLASSIFY_WORKERS="${FUNNEL_CLASSIFY_WORKERS:-10}"
+MAS_CITY="${FUNNEL_MAS_CITY:-Hà Nội}"
+MAS_ALWAYS="${FUNNEL_MAS_ALWAYS:-0}"
+FETCH_FORCE_REFRESH="${FUNNEL_FETCH_FORCE_REFRESH:-0}"
 MODE="${1:-}"
 
 if [[ ! -x "$PYTHON" ]]; then
@@ -35,12 +39,20 @@ case "$MODE" in
 esac
 
 run_fetch() {
+  # The loop polls for changes, so unchanged threads must remain eligible for
+  # Stage 1's preview/cache skip. Use FUNNEL_FETCH_FORCE_REFRESH=1 only for a
+  # deliberate full re-scan.
+  local refresh_args=()
+  case "$FETCH_FORCE_REFRESH" in
+    1|true|TRUE|yes|YES) refresh_args+=(--refresh) ;;
+  esac
+
   "$PYTHON" "$PROJECT_ROOT/tools/l5_fetch_fb_messages.py" \
     --pageId "$PAGE_ID" \
     --credential default \
     --time_range 7d \
     --cdp \
-    --refresh \
+    "${refresh_args[@]}" \
     --workers "$FETCH_WORKERS"
 }
 
@@ -48,13 +60,37 @@ run_mas() {
   "$PYTHON" "$PROJECT_ROOT/tools/l5_inbox_mas_runner.py" \
     --page-id "$PAGE_ID" \
     --once \
+    --city "$MAS_CITY" \
     --max-threads "$MAS_MAX_THREADS"
+}
+
+# code:route-morning-brief-001:event-trigger
+# In pipeline mode the MAS only runs when the fetch that just finished stored new
+# messages; polling the LLM every 15 minutes over an unchanged DB was the main
+# source of wasted calls. FUNNEL_MAS_ALWAYS=1 restores the old behaviour.
+fetch_found_new_messages() {
+  case "$MAS_ALWAYS" in 1|true|TRUE|yes|YES) return 0 ;; esac
+  local count
+  count="$("$PYTHON" - "$PROJECT_ROOT" "$PAGE_ID" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+conn = get_db_connection()
+row = conn.execute(
+    "SELECT COALESCE(messages_found, 0) FROM fetch_log WHERE page_id=? ORDER BY id DESC LIMIT 1",
+    (sys.argv[2],),
+).fetchone()
+print(int(row[0]) if row else 0)
+PY
+)"
+  [[ "${count:-0}" -gt 0 ]]
 }
 
 run_classify() {
   "$PYTHON" "$PROJECT_ROOT/tools/l5_fetch_fb_messages.py" \
     --pageId "$PAGE_ID" \
-    --action classify_city_llm
+    --action classify_city_llm \
+    --workers "$CLASSIFY_WORKERS"
 }
 
 trap 'echo "Stopping inbox/MAS loop."; exit 0' INT TERM
@@ -93,10 +129,12 @@ while true; do
     if (( classify_status != 0 )); then
       echo "[$(date '+%Y-%m-%d %H:%M:%S')] City/program classification failed with status $classify_status"
     fi
-    if (( classify_status == 0 )); then
-      run_mas || echo "[$(date '+%Y-%m-%d %H:%M:%S')] MAS failed with status $?"
-    else
+    if (( classify_status != 0 )); then
       echo "[$(date '+%Y-%m-%d %H:%M:%S')] Skipping MAS because classification failed"
+    elif ! fetch_found_new_messages; then
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Skipping MAS: fetch stored no new messages (set FUNNEL_MAS_ALWAYS=1 to override)"
+    else
+      run_mas || echo "[$(date '+%Y-%m-%d %H:%M:%S')] MAS failed with status $?"
     fi
   elif [[ "$MODE" == "mas" ]]; then
     run_mas || echo "[$(date '+%Y-%m-%d %H:%M:%S')] MAS failed with status $?"

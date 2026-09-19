@@ -24,7 +24,9 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
     )
     from adk_agents.tools.l5_stage_tools import evaluate_stage_gate
     from fb_pipeline.persistence.l4_sqlite_store import log_mas_decision
-    from tools.l5_telegram_hitl import send_proposal_to_telegram
+    from tools.l5_telegram_hitl import (
+        format_escalation_proposal, format_inbox_proposal, send_proposal_to_telegram,
+    )
 
 
     if not dry_run:
@@ -38,21 +40,48 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
         return {"status": "skipped", "reason": "no_messages"}
 
     # 2. Lookup seeker in CRM
-    seeker = lookup_seeker(thread_id)
+    seeker = {**(lookup_seeker(thread_id) or {}), "thread_id": thread_id, "page_id": page_id}
 
     # 3. Run ADK pipeline
     logger.info(f"Running ADK pipeline for {thread_name}...")
-    adk_result = run_adk_pipeline(msg_result["messages"], seeker)
+    pipeline_kwargs = {}
+    if msg_result.get("reaction_events"):
+        pipeline_kwargs["reaction_events"] = msg_result["reaction_events"]
+    adk_result = run_adk_pipeline(msg_result["messages"], seeker, **pipeline_kwargs)
 
     classification = adk_result.get("classification", "")
     reply_text = adk_result.get("reply_text", "")
+    escalation_reason = adk_result.get("escalation_reason", "")
 
     logger.info(f"Classification: {classification[:100]}")
     logger.info(f"Generated reply: {reply_text[:100]}")
 
-    if not reply_text:
-        logger.warning(f"No reply generated for {thread_name}")
-        return {"status": "no_reply", "classification": classification}
+    # code:agent-mas-002:escalation-taxonomy — never draft an escalation note
+    # into the composer; it is not a reply, only a flag for a human to read.
+    if escalation_reason:
+        logger.warning(f"Escalated to human for {thread_name}: {escalation_reason} — {reply_text[:80]!r}")
+        note = adk_result.get("escalation_note", "")
+        send_proposal_to_telegram(
+            route="inbox",
+            thread_id=thread_id,
+            proposed_text=format_escalation_proposal(
+                thread_id, thread_name, msg_result["messages"], escalation_reason, note,
+            ),
+            payload={"status": "escalated", "classification": classification},
+            escalation_reason=escalation_reason,
+            escalation_note=note,
+        )
+        log_mas_decision(page_id, "inbox_escalation", "thread", thread_id,
+                         escalation_reason, note, dry_run=dry_run)
+        return {"status": "escalated", "classification": classification,
+                "escalation_reason": escalation_reason, "escalation_note": note}
+
+    if not reply_text or reply_text.strip().upper().startswith("[NO_REPLY"):
+        logger.warning(f"No reply generated for {thread_name}: {reply_text[:80]!r}")
+        result = {"status": "no_reply", "classification": classification}
+        if reply_text.strip():
+            result["reason"] = reply_text.strip()[:120]
+        return result
 
     latest_customer_message_timestamp = None
     latest_customer_message_text = ""
@@ -139,9 +168,12 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
             f"{stage_result.get('from_stage')} -> {stage_result.get('to_stage')}"
         )
 
-    combined_text = f"User: {latest_customer_message_text}\\n\\nOur Reply: {reply_text}"
-    if len(combined_text) > 4000:
-        combined_text = combined_text[:4000] + "... (truncated)"
+    combined_text = format_inbox_proposal(
+        thread_id=thread_id,
+        seeker_name=thread_name,
+        messages=msg_result["messages"],
+        reply_text=reply_text,
+    )
 
     msg_id = send_proposal_to_telegram(
         route="inbox",

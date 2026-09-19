@@ -3,9 +3,8 @@
 CLI tool: LLM-based city classification for seekers.
 code:tool-citydetect-001:cli
 
-Batch-classify or single-classify users' cities using an LLM
-instead of keyword matching. Reads signals from FrankenSQLite
-and calls the OpenAI-compatible API.
+Batch-classify or single-classify users' cities using Gemini instead of
+keyword matching. Reads signals from FrankenSQLite.
 
 Usage:
     # Preview mode (dry-run, no DB writes)
@@ -20,22 +19,21 @@ Usage:
     # Force re-classify all users (including those already classified)
     python tools/classify_city.py --action classify_all --force
 
-Requires: OPENAI_COMPATIBLE_URL, OPENAI_COMPATIBLE_KEY, OPENAI_COMPATIBLE_MODELS
-in .env (Base64-encoded, decoded via env_manager.py).
+Requires: GOOGLE_API_KEY and GEMINI_MODEL in `.env` (Base64-encoded, decoded
+via env_manager.py).  City/Program/Name/Phone classification is Gemini-only.
 """
 import argparse
 import json
 import logging
 import os
 import sys
-import time
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from tools.l5_inbox_mas_context import get_llm_config as _get_project_llm_config
-from fb_pipeline.contracts.l1_city_llm import detect_city_llm, detect_city_batch_llm, gather_signals_for_user
+from fb_pipeline.contracts.l1_city_llm import detect_city_llm, gather_signals_for_user
 from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
 
 # code:tool-citydetect-001:logging
@@ -77,19 +75,30 @@ def classify_user(conn, thread_id: str, llm_config: dict, dry_run: bool = True) 
         customer_messages=signals["customer_messages"],
         page_messages=signals["page_messages"],
         ad_content=signals["ad_content"],
-        api_base=llm_config["api_base"],
-        api_key=llm_config["api_key"],
-        model=llm_config["model"],
+            llm_config=llm_config,
+        subject_id=thread_id,
+        trigger="cli",
     )
 
     new_city = result["city"]
     updated = False
 
     new_program_code = result.get("program_code")
-    if not dry_run and ((new_city != "Unknown" and new_city != old_city) or new_program_code):
+    real_name = result.get("full_name")
+    if not dry_run and ((new_city != "Unknown" and new_city != old_city) or new_program_code or real_name):
+        columns = {row[1] for row in cursor.execute("PRAGMA table_info(users)")}
+        assignments = [
+            "city = CASE WHEN ? != 'Unknown' THEN ? ELSE city END",
+            "program_code = COALESCE(?, program_code)",
+        ]
+        params = [new_city, new_city, new_program_code]
+        if "real_name" in columns:
+            assignments.append("real_name = COALESCE(?, real_name)")
+            params.append(real_name)
+        params.append(thread_id)
         cursor.execute(
-            "UPDATE users SET city = CASE WHEN ? != 'Unknown' THEN ? ELSE city END, program_code = COALESCE(?, program_code) WHERE thread_id = ?",
-            (new_city, new_city, new_program_code, thread_id)
+            f"UPDATE users SET {', '.join(assignments)} WHERE thread_id = ?",
+            params,
         )
         conn.commit()
         updated = True
@@ -101,6 +110,7 @@ def classify_user(conn, thread_id: str, llm_config: dict, dry_run: bool = True) 
         "old_city": old_city,
         "new_city": new_city,
         "program_code": new_program_code,
+        "real_name": real_name,
         "confidence": result["confidence"],
         "reasoning": result["reasoning"],
         "updated": updated,
@@ -112,10 +122,10 @@ def classify_user(conn, thread_id: str, llm_config: dict, dry_run: bool = True) 
     }
 
 
-# code:tool-citydetect-001:classify-batch
+# code:tool-citydetect-001:classify-all
 def classify_all(conn, llm_config: dict, dry_run: bool = True,
                  force: bool = False, limit: int = 0) -> dict:
-    """Batch classify all users.
+    """Classify all selected users, one complete thread per LLM request.
 
     Args:
         conn: DB connection
@@ -145,95 +155,14 @@ def classify_all(conn, llm_config: dict, dry_run: bool = True,
     results = []
     updated_count = 0
     error_count = 0
-    
-    batches = []
-    current_batch = []
-    current_chars = 0
-    MAX_CHARS = 80000
-    
     for row in user_rows:
-        tid = row["thread_id"]
-        old_city = row["city"]
-        try:
-            signals = gather_signals_for_user(conn, tid)
-            user_prompt_chunk = f"## Seeker: {signals['thread_name']}\n"
-            user_prompt_chunk += f"Signal 1 (Customer messages): {' '.join(signals['customer_messages'])}\n"
-            user_prompt_chunk += f"Signal 2 (Page messages): {' '.join(signals['page_messages'])}\n"
-            user_prompt_chunk += f"Signal 3 (Ad content): {signals['ad_content']}\n\n"
-            
-            chunk_len = len(user_prompt_chunk)
-            if current_chars + chunk_len > MAX_CHARS and current_batch:
-                batches.append(current_batch)
-                current_batch = []
-                current_chars = 0
-                
-            current_batch.append({
-                "thread_id": tid,
-                "thread_name": signals["thread_name"],
-                "old_city": old_city,
-                "prompt_chunk": user_prompt_chunk
-            })
-            current_chars += chunk_len
-        except Exception as e:
-            logger.warning(f"Error gathering signals for {tid}: {e}")
+        result = classify_user(conn, row["thread_id"], llm_config, dry_run=dry_run)
+        if result.get("error"):
             error_count += 1
-            
-    if current_batch:
-        batches.append(current_batch)
-        
-    for b_idx, batch in enumerate(batches):
-        logger.info(f"Classifying batch {b_idx+1}/{len(batches)} ({len(batch)} users)...")
-        batch_payload = "\n".join([item["prompt_chunk"] for item in batch])
-        try:
-            batch_res = detect_city_batch_llm(
-                batch_payload=batch_payload,
-                api_base=llm_config["api_base"],
-                api_key=llm_config["api_key"],
-                model=llm_config["model"],
-            )
-            
-            name_to_res = {r.get("thread_name", ""): r for r in batch_res}
-            
-            for item in batch:
-                tid = item["thread_id"]
-                tname = item["thread_name"]
-                old_city = item["old_city"]
-                
-                res = name_to_res.get(tname)
-                if not res:
-                    logger.warning(f"LLM omitted {tname}")
-                    error_count += 1
-                    continue
-                    
-                new_city = res.get("city", "Unknown")
-                new_program_code = res.get("program_code")
-                updated = False
-                if not dry_run and ((new_city != "Unknown" and new_city != old_city) or new_program_code):
-                    cursor.execute(
-                        "UPDATE users SET city = CASE WHEN ? != 'Unknown' THEN ? ELSE city END, program_code = COALESCE(?, program_code) WHERE thread_id = ?",
-                        (new_city, new_city, new_program_code, tid)
-                    )
-                    conn.commit()
-                    updated = True
-                    updated_count += 1
-                    logger.info(f"Updated {tname}: {old_city} → {new_city}")
-                    
-                results.append({
-                    "thread_id": tid,
-                    "thread_name": tname,
-                    "old_city": old_city,
-                    "new_city": new_city,
-                    "program_code": new_program_code,
-                    "confidence": res.get("confidence", "low"),
-                    "reasoning": res.get("reasoning", ""),
-                    "updated": updated
-                })
-            
-            if b_idx < len(batches) - 1:
-                time.sleep(0.5)
-        except Exception as e:
-            logger.error(f"Error classifying batch {b_idx}: {e}")
-            error_count += len(batch)
+            logger.warning("Failed to classify %s: %s", row["thread_id"], result["error"])
+            continue
+        results.append(result)
+        updated_count += int(result["updated"])
 
     # Summary
     city_distribution = {}
@@ -285,7 +214,7 @@ def main():
 
     try:
         llm_config = get_llm_config()
-        logger.info(f"LLM config: base={llm_config['api_base']}, model={llm_config['model']}")
+        logger.info("LLM config: provider=%s, model=%s", llm_config["provider"], llm_config["model"])
     except RuntimeError as e:
         logger.error(str(e))
         print(json.dumps({"success": False, "error": str(e)}, indent=2))

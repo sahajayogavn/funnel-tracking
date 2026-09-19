@@ -1,7 +1,7 @@
 // code:web-component-002:seekers-table
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useTransition } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { formatRelativeElapsed, getStageNumber, type Seeker } from '@/lib/types';
 import { isDateInRange, parseRealDate } from '@/lib/funnel-filters';
@@ -74,15 +74,19 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
   const searchParams = useSearchParams();
   const journeyStage = searchParams.get('journeyStage') || '';
   const seekers = initialSeekers;
+  const [isRefreshing, startRefresh] = useTransition();
+  const pendingClassifications = seekers.filter(
+    seeker => seeker.classificationStatus === 'pending',
+  ).length;
 
   useEffect(() => {
-    const hasPending = seekers.some(s => s.classificationStatus === 'pending');
-    if (!hasPending) return;
+    if (!pendingClassifications) return;
+    const refreshProgress = () => startRefresh(() => router.refresh());
     const interval = setInterval(() => {
-      router.refresh();
+      refreshProgress();
     }, 2500);
     return () => clearInterval(interval);
-  }, [seekers, router]);
+  }, [pendingClassifications, router, startRefresh]);
   const [sortField, setSortField] = useState<SortField>('lastMessageDate');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [search, setSearch] = useState('');
@@ -120,6 +124,9 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchResult, setBatchResult] = useState<string | null>(null);
   const [batchJob, setBatchJob] = useState<MasJob | null>(null);
+  const [replyInstruction, setReplyInstruction] = useState('Soạn tin nhắn phản hồi phù hợp với câu hỏi mới nhất của seeker; trả lời rõ ràng, thân thiện và không hỏi lại thông tin đã có.');
+  const [reminderInstruction, setReminderInstruction] = useState('Soạn tin nhắc lịch học phù hợp cho seeker đã chọn. Chỉ đề xuất khi có lịch đã được xác thực và seeker còn phù hợp để nhận tin.');
+  const [warmupInstruction, setWarmupInstruction] = useState('Soạn một tin nhắn warm-up chủ động, nhẹ nhàng và phù hợp với hành trình của seeker. Không đề xuất gửi nếu seeker đã từ chối nhận tin.');
 
   // Sort & filter
   const sorted = [...seekers]
@@ -141,6 +148,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
       if (!search) return true;
       const q = search.toLowerCase();
       return s.name?.toLowerCase().includes(q) ||
+        s.realName?.toLowerCase().includes(q) ||
         s.city?.toLowerCase().includes(q) ||
         s.programCode?.toLowerCase().includes(q) ||
         s.phone?.toLowerCase().includes(q) ||
@@ -214,6 +222,10 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
       if (job.status === 'completed') {
         setBatchResult(job.result?.message || `Đã tạo ${job.result?.count ?? 0} đề xuất mới vào hàng đợi chờ duyệt.`);
         setBatchRunning(false);
+        // The table receives its seeker rows from the server. Refresh it as
+        // soon as the durable job completes so Pending message appears without
+        // a manual browser reload.
+        startRefresh(() => router.refresh());
         return;
       }
       if (job.status === 'failed') {
@@ -228,15 +240,27 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
     }
   };
 
-  const handleRunBatchRec = async (type: MasRunType) => {
+  const handleRunBatchRec = async (type: MasRunType, instruction: string, carePurpose?: 'class_reminder' | 'warmup' | 'event') => {
     if (!selectedDmThreadIds.length) return;
+    if (!instruction.trim()) {
+      setBatchResult('⚠️ Hãy nhập nội dung chỉ dẫn cho MAS.');
+      return;
+    }
     setBatchRunning(true);
     setBatchResult(null);
     try {
       const res = await fetch('/api/action-queue/recommendations', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ type, threadIds: selectedDmThreadIds, city: filterState.city !== 'all' ? filterState.city : undefined, limit: selectedDmThreadIds.length }),
+        body: JSON.stringify({
+          type,
+          threadIds: selectedDmThreadIds,
+          city: filterState.city !== 'all' ? filterState.city : undefined,
+          programCode: filterState.programCode !== 'all' ? filterState.programCode : undefined,
+          instruction,
+          carePurpose,
+          limit: selectedDmThreadIds.length,
+        }),
       });
       const data = await res.json();
       if (!res.ok || !data.job) {
@@ -331,6 +355,43 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
         }
       />
 
+      {pendingClassifications > 0 && (
+        <div className="seeker-classification-progress" role="status" aria-live="polite">
+          <span className="seeker-classification-progress-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16">
+              <circle cx="8" cy="8" r="5.5" />
+              <path d="M8 2.5a5.5 5.5 0 0 1 5.5 5.5" />
+              <path d="M8 5.25v2.9l2 1.2" />
+            </svg>
+          </span>
+          <div className="seeker-classification-progress-copy">
+            <strong>LLM đang cập nhật City / Program</strong>
+            <span>
+              {pendingClassifications} seeker đang được suy luận
+              {isRefreshing ? ' · đang lấy tiến trình mới…' : ' · tự cập nhật mỗi 2,5 giây'}
+            </span>
+          </div>
+          <div
+            className="seeker-classification-progress-track"
+            role="progressbar"
+            aria-label="Tiến trình phân loại seeker"
+            aria-valuemin={0}
+            aria-valuemax={seekers.length}
+            aria-valuenow={seekers.length - pendingClassifications}
+          >
+            <span style={{ width: `${((seekers.length - pendingClassifications) / seekers.length) * 100}%` }} />
+          </div>
+          <button
+            type="button"
+            className="seeker-classification-refresh"
+            onClick={() => startRefresh(() => router.refresh())}
+            disabled={isRefreshing}
+          >
+            {isRefreshing ? 'Đang cập nhật…' : 'Cập nhật ngay'}
+          </button>
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: '0px', position: 'relative' }}>
         {/* Main table area */}
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -364,6 +425,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                   <th onClick={() => handleSort('leadStage')} style={{ minWidth: '130px', textAlign: 'center' }}>
                     Stage {sortField === 'leadStage' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
                   </th>
+                  <th style={{ minWidth: '260px' }}>Pending message</th>
                 </tr>
               </thead>
               <tbody>
@@ -418,17 +480,24 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                               </svg>
                             </a>
                           )}
-                          <button
-                            type="button"
-                            className="seeker-name-link"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              void handleRowClick(seeker, idx, event.shiftKey);
-                            }}
-                            title={`Xem nhanh ${seeker.name || 'seeker'} ở khung bên phải`}
-                          >
-                            {seeker.name || '—'}
-                          </button>
+                          <div className="seeker-name-copy">
+                            <button
+                              type="button"
+                              className="seeker-name-link"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                router.push(seekerDetailUrl(seeker));
+                              }}
+                              title={`Mở chi tiết của ${seeker.name || 'seeker'}`}
+                            >
+                              {seeker.name || '—'}
+                            </button>
+                            {seeker.realName && seeker.realName !== seeker.name && (
+                              <span className="seeker-real-name" title="Tên người đăng ký cung cấp trong cuộc trò chuyện">
+                                {seeker.realName}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </td>
 
@@ -474,11 +543,21 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                       <td style={{ textAlign: 'center' }}>
                         <SevenStarProgress leadStage={seeker.leadStage} />
                       </td>
+                      <td onClick={event => event.stopPropagation()}>
+                        {seeker.pendingMessage ? (
+                          <div title={seeker.pendingMessage} style={{ maxWidth: '320px', color: '#fcd34d', fontSize: '11px', lineHeight: 1.4 }}>
+                            <div style={{ fontSize: '10px', color: '#a5b4fc', fontWeight: 700, marginBottom: '3px' }}>
+                              ⏳ {seeker.pendingMessageKind || 'MAS'}
+                            </div>
+                            {seeker.pendingMessage.length > 150 ? `${seeker.pendingMessage.slice(0, 150)}…` : seeker.pendingMessage}
+                          </div>
+                        ) : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                      </td>
                     </tr>
                   );
                 })}
                 {sorted.length === 0 && (
-                  <tr><td colSpan={7} style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>No seekers found</td></tr>
+                  <tr><td colSpan={8} style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>No seekers found</td></tr>
                 )}
               </tbody>
           </table>
@@ -582,85 +661,61 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
               </div>
             )}
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <button
-                type="button"
-                disabled={batchRunning || selectedDmThreadIds.length === 0}
-                onClick={() => handleRunBatchRec('all')}
-                style={{
-                  padding: '10px 14px',
-                  borderRadius: '8px',
-                  background: 'linear-gradient(135deg, #6366f1, #818cf8)',
-                  color: '#fff',
-                  fontWeight: 700,
-                  fontSize: '13px',
-                  border: 'none',
-                  cursor: batchRunning ? 'wait' : 'pointer',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                }}
-              >
-                <span>⚡ Chạy đề xuất cho {selectedDmThreadIds.length} seeker</span>
-                <span style={{ fontSize: '11px', opacity: 0.8 }}>Reply + Warmup + Event</span>
-              </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '11px', lineHeight: 1.45 }}>
+                Chọn mục đích, chỉnh nội dung chỉ dẫn nếu cần, rồi để MAS tạo bản nháp. Mọi đề xuất vẫn ở trạng thái <strong>pending</strong>, không tự gửi Facebook.
+              </div>
 
-              <button
-                type="button"
-                disabled={batchRunning}
-                onClick={() => handleRunBatchRec('reply')}
-                style={{
-                  padding: '10px 14px',
-                  borderRadius: '8px',
-                  background: 'rgba(99, 102, 241, 0.12)',
-                  border: '1px solid rgba(99, 102, 241, 0.25)',
-                  color: '#818cf8',
-                  fontWeight: 600,
-                  fontSize: '13px',
-                  cursor: batchRunning ? 'wait' : 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                💬 Đề xuất Reply tin nhắn chưa trả lời
-              </button>
+              <section style={{ padding: '12px', borderRadius: '10px', background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(129,140,248,0.24)' }}>
+                <label htmlFor="mas-reply-instruction" style={{ display: 'block', color: 'var(--text-primary)', fontSize: '13px', fontWeight: 700, marginBottom: '7px' }}>
+                  1. 💬 Soạn tin nhắn phản hồi
+                </label>
+                <textarea
+                  id="mas-reply-instruction"
+                  value={replyInstruction}
+                  onChange={event => setReplyInstruction(event.target.value)}
+                  disabled={batchRunning}
+                  rows={3}
+                  style={{ width: '100%', resize: 'vertical', padding: '9px 10px', borderRadius: '7px', background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)', fontSize: '12px', lineHeight: 1.45, outline: 'none' }}
+                />
+                <button type="button" disabled={batchRunning || selectedDmThreadIds.length === 0} onClick={() => handleRunBatchRec('reply', replyInstruction)} style={{ marginTop: '8px', width: '100%', padding: '9px 12px', borderRadius: '7px', background: '#4f46e5', color: '#fff', fontWeight: 700, fontSize: '12px', border: 'none', cursor: batchRunning ? 'wait' : 'pointer', opacity: batchRunning || !selectedDmThreadIds.length ? 0.55 : 1 }}>
+                  ⚡ Soạn phản hồi cho {selectedDmThreadIds.length} seeker
+                </button>
+              </section>
 
-              <button
-                type="button"
-                disabled={batchRunning}
-                onClick={() => handleRunBatchRec('warmup')}
-                style={{
-                  padding: '10px 14px',
-                  borderRadius: '8px',
-                  background: 'rgba(245, 158, 11, 0.12)',
-                  border: '1px solid rgba(245, 158, 11, 0.25)',
-                  color: '#fbbf24',
-                  fontWeight: 600,
-                  fontSize: '13px',
-                  cursor: batchRunning ? 'wait' : 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                📣 Đề xuất Warm-up cho Seeker im lặng
-              </button>
+              <section style={{ padding: '12px', borderRadius: '10px', background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(52,211,153,0.24)' }}>
+                <label htmlFor="mas-reminder-instruction" style={{ display: 'block', color: 'var(--text-primary)', fontSize: '13px', fontWeight: 700, marginBottom: '7px' }}>
+                  2. 🗓️ Soạn tin nhắc lịch học / sự kiện
+                </label>
+                <textarea
+                  id="mas-reminder-instruction"
+                  value={reminderInstruction}
+                  onChange={event => setReminderInstruction(event.target.value)}
+                  disabled={batchRunning}
+                  rows={3}
+                  style={{ width: '100%', resize: 'vertical', padding: '9px 10px', borderRadius: '7px', background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)', fontSize: '12px', lineHeight: 1.45, outline: 'none' }}
+                />
+                <button type="button" disabled={batchRunning || selectedDmThreadIds.length === 0} onClick={() => handleRunBatchRec('care', reminderInstruction, 'class_reminder')} style={{ marginTop: '8px', width: '100%', padding: '9px 12px', borderRadius: '7px', background: '#059669', color: '#fff', fontWeight: 700, fontSize: '12px', border: 'none', cursor: batchRunning ? 'wait' : 'pointer', opacity: batchRunning || !selectedDmThreadIds.length ? 0.55 : 1 }}>
+                  ⚡ Soạn tin nhắc cho {selectedDmThreadIds.length} seeker
+                </button>
+              </section>
 
-              <button
-                type="button"
-                disabled={batchRunning}
-                onClick={() => handleRunBatchRec('event')}
-                style={{
-                  padding: '10px 14px',
-                  borderRadius: '8px',
-                  background: 'rgba(16, 185, 129, 0.12)',
-                  border: '1px solid rgba(16, 185, 129, 0.25)',
-                  color: '#34d399',
-                  fontWeight: 600,
-                  fontSize: '13px',
-                  cursor: batchRunning ? 'wait' : 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                🗓️ Đề xuất Sự kiện theo thành phố
-              </button>
+              <section style={{ padding: '12px', borderRadius: '10px', background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(251,191,36,0.24)' }}>
+                <label htmlFor="mas-warmup-instruction" style={{ display: 'block', color: 'var(--text-primary)', fontSize: '13px', fontWeight: 700, marginBottom: '7px' }}>
+                  3. 🌱 Warm-up chủ động
+                </label>
+                <textarea
+                  id="mas-warmup-instruction"
+                  value={warmupInstruction}
+                  onChange={event => setWarmupInstruction(event.target.value)}
+                  disabled={batchRunning}
+                  rows={3}
+                  style={{ width: '100%', resize: 'vertical', padding: '9px 10px', borderRadius: '7px', background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)', fontSize: '12px', lineHeight: 1.45, outline: 'none' }}
+                />
+                <button type="button" disabled={batchRunning || selectedDmThreadIds.length === 0} onClick={() => handleRunBatchRec('care', warmupInstruction, 'warmup')} style={{ marginTop: '8px', width: '100%', padding: '9px 12px', borderRadius: '7px', background: '#d97706', color: '#fff', fontWeight: 700, fontSize: '12px', border: 'none', cursor: batchRunning ? 'wait' : 'pointer', opacity: batchRunning || !selectedDmThreadIds.length ? 0.55 : 1 }}>
+                  ⚡ Tạo warm-up cho {selectedDmThreadIds.length} seeker
+                </button>
+              </section>
             </div>
 
             <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>

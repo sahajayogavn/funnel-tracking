@@ -244,6 +244,29 @@ class TestReactionHeuristic:
         result = _select_reaction_heuristic({"content": None})
         assert result == "like"
 
+    def test_react_dry_run_never_enqueues_actions(self, monkeypatch):
+        import tools.l5_scheduler_routes as routes
+
+        monkeypatch.setattr(
+            "adk_agents.tools.l5_reaction_tools.find_unreacted_items",
+            lambda page_id: {"status": "success", "count": 1, "items": [{
+                "item_type": "message", "item_id": "message-1", "content": "Cảm ơn", "thread_name": "Lan",
+            }]},
+        )
+        monkeypatch.setattr(routes, "run_adk_reactor", lambda *args, **kwargs: "love")
+        enqueued = []
+        monkeypatch.setattr("tools.l5_action_queue.enqueue_action", lambda *args, **kwargs: enqueued.append((args, kwargs)))
+
+        result = routes.run_react_cycle("page-1", dry_run=True)
+
+        assert result == {"status": "complete", "processed": 1}
+        assert enqueued == []
+
+    def test_fetch_dry_run_never_starts_cdp_fetch(self):
+        from tools.l5_scheduler_routes import run_fetch_cycle
+
+        assert run_fetch_cycle("page-1", dry_run=True) == {"status": "skipped", "reason": "dry_run_no_fetch"}
+
 
 class TestDecisionCore:
     def test_compute_temperature_respects_manual_unsubscribed_state(self):

@@ -2,12 +2,21 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+import Link from 'next/link';
 import type { ActionQueueItem } from '@/lib/queries';
 import type { Seeker, SeekerDetail } from '@/lib/types';
 import { SeekerSidebar, SeekerSidebarEmptyState } from './seeker-sidebar';
 import { MasProgress, type MasJob } from './mas-progress';
 
 // SeekerSidebar composes SeekerJourneyTimeline for this queue view.
+
+function queueSeekerDetailUrl(item: ActionQueueItem) {
+  // Meta thread IDs are commonly larger than Number.MAX_SAFE_INTEGER. Keep the
+  // database value as a string so the route lookup receives the exact ID rather
+  // than a rounded value rendered in scientific notation.
+  const targetId = item.targetId || item.targetName || '';
+  return `/seekers/${encodeURIComponent(targetId)}`;
+}
 
 function seekerDetailUrl(seeker?: Seeker | null, fallbackId?: string | null) {
   if (seeker?.id) {
@@ -25,8 +34,12 @@ interface ParsedPayload {
   stage?: string;
   city?: string;
   eventTitle?: string;
+  count?: number;
   customer_message_timestamp?: string;
   post_id?: string;
+  session?: { program_code?: string; class_key?: string };
+  event_id?: number | string;
+  instruction?: string;
   [key: string]: unknown;
 }
 
@@ -76,6 +89,15 @@ function getMasReasonDetails(item: ActionQueueItem, payload: ParsedPayload, seek
     triggerLabel = '🔥 Đề xuất Warm-up Seeker im lặng';
     const stage = payload.stage || seekerDetail?.seeker?.leadStage || 'Intake';
     triggerDesc = `Seeker đang ở giai đoạn ${stage} và chưa có tương tác gần đây. MAS chủ động đề xuất gửi tin nhắn warm-up để kích hoạt lại mối quan tâm.`;
+  } else if (payload.type === 'class_reminder' && item.queueType === 'session_proposal') {
+    triggerLabel = '📅 Phiên nhắc lịch lớp (08:00–09:00 hằng ngày)';
+    triggerDesc = `Có ${payload.count ?? '?'} seeker đã ghi danh lớp này và còn tương tác trong 21 ngày. Mở phiên để MAS soạn nháp nhắc từng người vào queue 4; bỏ qua nếu buổi này không diễn ra.`;
+  } else if (payload.type === 'class_reminder') {
+    triggerLabel = '📅 Nhắc lịch lớp cho seeker đã ghi danh';
+    triggerDesc = 'Nháp được soạn sau khi quản trị viên mở phiên nhắc. Gửi tay trên Facebook như mọi tin khác.';
+  } else if (payload.type === 'attendance') {
+    triggerLabel = '📋 Điểm danh sau buổi học';
+    triggerDesc = 'Seeker này đã được nhắc lịch cho buổi hôm qua. "Có mặt" là bằng chứng để chuyển stage; "Vắng" đưa seeker vào chuỗi warm-up nhẹ.';
   } else if (payload.type === 'event') {
     triggerLabel = '📅 Đề xuất mời tham gia sự kiện theo khu vực';
     const evTitle = payload.eventTitle || 'Chương trình Thiền & Âm nhạc';
@@ -106,7 +128,16 @@ const QUEUES = [
   ['reply_comment', '2. Reply comments', '↩️'],
   ['proactive_comment', '3. Post comments chủ động', '📣'],
   ['proactive_message', '4. Send message chủ động', '✉️'],
+  // prd:mas-time-aware-001 — internal decision queues; approval never reaches Facebook.
+  ['session_proposal', '5. Phiên nhắc lịch lớp', '📅'],
+  ['attendance_check', '6. Điểm danh sau buổi học', '📋'],
 ] as const;
+
+// Labels for queues whose "approve" is a human decision, not a Facebook send.
+const DECISION_LABELS: Record<string, { approve: string; reject: string; approvedNote: string }> = {
+  session_proposal: { approve: 'Mở phiên nhắc', reject: 'Bỏ qua buổi này', approvedNote: 'Đã mở — MAS đang soạn nháp từng seeker' },
+  attendance_check: { approve: '✅ Có mặt', reject: '❌ Vắng', approvedNote: 'Đã ghi nhận có mặt' },
+};
 
 export default function ActionQueues({ initialItems }: { initialItems: ActionQueueItem[] }) {
   const [items, setItems] = useState(initialItems);
@@ -142,7 +173,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
   };
 
   // Approved/executing items move forward only when the worker daemon
-  // (tools/l5_scheduler.py hitl_execution_job) claims them; poll so the
+  // (tools/l5_hitl_execution.py hitl_execution_job) claims them; poll so the
   // inline status reflects that without a manual page refresh.
   const hasInFlightItems = items.some(item => item.status === 'approved' || item.status === 'executing');
   useEffect(() => {
@@ -151,7 +182,15 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
     return () => window.clearInterval(interval);
   }, [hasInFlightItems]);
 
-  const handleRunRecommendations = async (context: string, targetIds: string[], regenerate = false) => {
+  const handleRunRecommendations = async (
+    context: string,
+    targetIds: string[],
+    regenerate = false,
+    carePurpose?: 'class_reminder' | 'warmup' | 'event',
+    programCode?: string,
+    eventId?: string,
+    instruction?: string,
+  ) => {
     if (!targetIds.length) return;
     setError('');
     setSuccess('');
@@ -161,7 +200,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
       const res = await fetch('/api/action-queue/recommendations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: context, threadIds: targetIds, limit: targetIds.length, regenerate }),
+        body: JSON.stringify({ type: context, threadIds: targetIds, limit: targetIds.length, regenerate, carePurpose, programCode, eventId, instruction }),
       });
       const data = await res.json();
       if (!res.ok || !data.job) {
@@ -220,11 +259,34 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
   // queue-card button runs MAS in regenerate mode: the new draft replaces the
   // selected pending/approved one (executing items are left to the worker).
   const runSelectedQueue = (queueType: string, queueItems: ActionQueueItem[]) => {
-    const targetIds = queueItems
-      .filter(item => selectedQueueItemIds.has(item.id) && item.targetType === 'thread' && item.targetId)
-      .map(item => item.targetId as string);
-    const context = queueType === 'reply_message' ? 'reply' : queueType === 'reply_comment' ? 'comment' : queueType === 'proactive_message' ? 'warmup' : 'comment';
-    handleRunRecommendations(context, [...new Set(targetIds)], true);
+    const selected = queueItems.filter(item => selectedQueueItemIds.has(item.id) && item.targetType === 'thread' && item.targetId);
+    const targetIds = selected.map(item => item.targetId as string);
+    if (queueType !== 'proactive_message') {
+      const context = queueType === 'reply_message' ? 'reply' : 'comment';
+      void handleRunRecommendations(context, [...new Set(targetIds)], true);
+      return;
+    }
+    const payloads = selected.map(item => parsePayload(item.payloadJson));
+    const purposes = [...new Set(payloads.map(payload => payload.type).filter(
+      (type): type is 'class_reminder' | 'warmup' | 'event' => type === 'class_reminder' || type === 'warmup' || type === 'event',
+    ))];
+    if (purposes.length !== 1) {
+      setError('Chỉ regenerate cùng một mục đích Care trong một lần; hãy chọn riêng nhắc lớp, warm-up hoặc sự kiện.');
+      return;
+    }
+    const purpose = purposes[0];
+    const programCodes = [...new Set(payloads.map(payload => payload.session?.program_code || payload.session?.class_key).filter(Boolean))];
+    const eventIds = [...new Set(payloads.map(payload => payload.event_id).filter((id): id is number | string => id !== undefined && id !== null).map(String))];
+    if ((purpose === 'class_reminder' && programCodes.length !== 1) || (purpose === 'event' && eventIds.length !== 1)) {
+      setError('Chỉ regenerate các draft có cùng lớp hoặc cùng sự kiện trong một lần.');
+      return;
+    }
+    const instructions = [...new Set(payloads.map(payload => payload.instruction).filter((value): value is string => Boolean(value?.trim())))];
+    if (instructions.length > 1) {
+      setError('Chỉ regenerate các draft có cùng chỉ dẫn vận hành trong một lần.');
+      return;
+    }
+    void handleRunRecommendations('care', [...new Set(targetIds)], true, purpose, programCodes[0], eventIds[0], instructions[0]);
   };
 
   const selectedThreadIds = items
@@ -242,6 +304,25 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
     if (selectedItem?.id === id) {
       setSelectedItem(current => current ? { ...current, status: result.status, approvalSource: 'webui' } : null);
     }
+  };
+
+  const deleteQueueItems = async (ids: number[]) => {
+    const uniqueIds = [...new Set(ids)];
+    if (!uniqueIds.length) return;
+    setError('');
+    setSuccess('');
+    const results = await Promise.all(uniqueIds.map(async id => {
+      const response = await fetch(`/api/action-queue/${id}`, { method: 'DELETE' });
+      return { id, ok: response.ok };
+    }));
+    const deletedIds = new Set(results.filter(result => result.ok).map(result => result.id));
+    if (deletedIds.size) {
+      setItems(current => current.filter(item => !deletedIds.has(item.id)));
+      setSelectedQueueItemIds(current => new Set([...current].filter(id => !deletedIds.has(id))));
+      if (selectedItem && deletedIds.has(selectedItem.id)) handleCloseSidebar();
+      setSuccess(`Đã xóa ${deletedIds.size} đề xuất khỏi hàng đợi.`);
+    }
+    if (deletedIds.size !== uniqueIds.length) setError('Một số mục không thể xóa vì đã được worker xử lý.');
   };
 
   const loadSeekerData = useCallback(async (item: ActionQueueItem) => {
@@ -265,6 +346,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
         setSidebarData({
           seeker: seekerFromQueueItem(item),
           messages: [],
+          reactionEvents: [],
           comments: [],
           adSource: null,
           messageCount: 0,
@@ -444,21 +526,35 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
             const queueItems = items.filter(item => item.queueType === key);
             const selectedInQueue = queueItems.filter(item => selectedQueueItemIds.has(item.id));
             const selectableInQueue = selectedInQueue.filter(item => item.targetType === 'thread' && item.targetId);
+            const deletableInQueue = selectedInQueue.filter(item => item.status === 'pending' || item.status === 'approved');
             return <section className="queue-card" key={key}>
               <div className="queue-heading">
                 <div className="queue-heading__label">
                   <span>{icon}</span>
                   <div><h2>{title}</h2><p>{queueItems.length} đang chờ / đang xử lý</p></div>
                 </div>
-                <button
-                  type="button"
-                  className="recommendation-action recommendation-action--reply queue-heading__action"
-                  disabled={loadingContext !== null || selectableInQueue.length === 0}
-                  onClick={() => runSelectedQueue(key, queueItems)}
-                  title={selectableInQueue.length ? `Chạy lại MAS cho ${selectableInQueue.length} seeker đã chọn — đề xuất mới sẽ thay thế đề xuất hiện tại` : 'Chọn ít nhất một seeker DM trong queue này'}
-                >
-                  {loadingContext === key ? '⏳ Đang chạy MAS...' : `⚡ Chạy đề xuất MAS${selectableInQueue.length ? ` (${selectableInQueue.length})` : ''}`}
-                </button>
+                <div className="queue-heading__actions">
+                  <button
+                    type="button"
+                    className="recommendation-action recommendation-action--reply queue-heading__action"
+                    disabled={loadingContext !== null || selectableInQueue.length === 0}
+                    onClick={() => runSelectedQueue(key, queueItems)}
+                    title={selectableInQueue.length ? `Chạy lại MAS cho ${selectableInQueue.length} seeker đã chọn — đề xuất mới sẽ thay thế đề xuất hiện tại` : 'Chọn ít nhất một seeker DM trong queue này'}
+                  >
+                    {loadingContext === key ? '⏳ Đang chạy MAS...' : `⚡ Chạy đề xuất MAS${selectableInQueue.length ? ` (${selectableInQueue.length})` : ''}`}
+                  </button>
+                  <button
+                    type="button"
+                    className="queue-delete-button queue-delete-button--selected"
+                    disabled={deletableInQueue.length === 0}
+                    onClick={() => void deleteQueueItems(deletableInQueue.map(item => item.id))}
+                    aria-label={`Xóa ${deletableInQueue.length} mục đã chọn`}
+                    title={deletableInQueue.length ? `Xóa ${deletableInQueue.length} mục đã chọn` : 'Chọn mục đang chờ hoặc đã duyệt để xóa'}
+                  >
+                    <span aria-hidden="true">🗑️</span>
+                    <span>Xóa đã chọn{deletableInQueue.length ? ` (${deletableInQueue.length})` : ''}</span>
+                  </button>
+                </div>
               </div>
               {queueItems.length === 0 ? <p className="queue-empty">Không có đề xuất chờ quyết định.</p> : queueItems.map((item, index) => {
                 const isSelected = selectedItem?.id === item.id;
@@ -497,7 +593,6 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
                     <div className="queue-item-title-row">
                       <strong
                         className="queue-item-username"
-                        onClick={(e) => { e.stopPropagation(); handleTogglePin(item); }}
                         onMouseEnter={() => handleMouseEnter(item)}
                         onMouseLeave={handleMouseLeave}
                         style={{
@@ -510,20 +605,44 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
                           paddingBottom: '1px',
                           transition: 'color 0.15s ease',
                         }}
-                        title="Bấm hoặc di chuột để xem thông tin Seeker & lý do đề xuất MAS"
+                        title="Di chuột để xem thông tin Seeker & lý do đề xuất MAS"
                       >
-                        <span>{item.targetName || item.targetType}</span>
-                        <span style={{ fontSize: '11px', opacity: 0.75 }}>ℹ️</span>
+                        <Link
+                          className="queue-item-username-link"
+                          href={queueSeekerDetailUrl(item)}
+                          onClick={(event) => event.stopPropagation()}
+                          title="Mở trang chi tiết Seeker"
+                        >
+                          {item.targetName || item.targetType}
+                        </Link>
+                        <button
+                          type="button"
+                          onClick={(event) => { event.stopPropagation(); handleTogglePin(item); }}
+                          aria-label={`Xem thông tin ${item.targetName || item.targetType}`}
+                          title="Ghim hoặc bỏ ghim thông tin Seeker"
+                          style={{
+                            border: 0,
+                            background: 'transparent',
+                            color: 'inherit',
+                            cursor: 'pointer',
+                            fontSize: '11px',
+                            lineHeight: 1,
+                            padding: 0,
+                          }}
+                        >
+                          ℹ️
+                        </button>
                         {isPinned && <span style={{ fontSize: '11px', color: '#818cf8' }} title="Đã ghim">📌</span>}
                       </strong>
                       {(() => {
                         if (item.status !== 'pending' && item.status !== 'approved' && item.status !== 'executing') {
                           return null;
                         }
+                        const decisionLabels = DECISION_LABELS[item.queueType];
                         if (item.status === 'approved') {
                           return (
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 600, color: '#fbbf24', whiteSpace: 'nowrap' }}>
-                              <span>⏳</span><span>Đã duyệt — chờ worker thực thi</span>
+                              <span>⏳</span><span>{decisionLabels ? decisionLabels.approvedNote : 'Đã duyệt — chờ worker thực thi'}</span>
                             </span>
                           );
                         }
@@ -540,13 +659,23 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
                             <button
                               onClick={(event) => { event.stopPropagation(); void decide(item.id, 'approve'); }}
                             >
-                              Duyệt & xếp thực thi
+                              {decisionLabels ? decisionLabels.approve : 'Duyệt & xếp thực thi'}
                             </button>
                             <button
                               className="reject"
                               onClick={(event) => { event.stopPropagation(); void decide(item.id, 'reject'); }}
                             >
-                              Từ chối
+                              {decisionLabels ? decisionLabels.reject : 'Từ chối'}
+                            </button>
+                            <button
+                              type="button"
+                              className="queue-delete-button"
+                              onClick={(event) => { event.stopPropagation(); void deleteQueueItems([item.id]); }}
+                            aria-label={`Xóa đề xuất của ${item.targetName || item.targetType}`}
+                            title="Xóa đề xuất"
+                          >
+                            <span aria-hidden="true">🗑️</span>
+                            <span>Xóa</span>
                             </button>
                           </div>
                         );

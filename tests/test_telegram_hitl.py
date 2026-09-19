@@ -6,6 +6,8 @@ from unittest.mock import patch, MagicMock
 
 from tools.l5_telegram_hitl import (
     send_proposal_to_telegram,
+    format_inbox_proposal,
+    get_seeker_detail_url,
     poll_telegram_updates,
     check_hitl_status,
     mark_hitl_executed,
@@ -68,6 +70,57 @@ def test_send_proposal(mock_post, mock_env, mock_db):
     assert row["status"] == "pending"
     assert row["route"] == "inbox"
     assert json.loads(row["payload_json"]) == {"key": "val"}
+
+
+def test_format_inbox_proposal_is_compact_indented_and_links_to_seeker(monkeypatch):
+    monkeypatch.setattr("tools.env_manager.load_credentials", lambda: {
+        "SEEKER_WEB_BASE_URL": "https://ops.example.org/"
+    })
+    post_text = "A" * 240 + "CALL_TO_ACTION"
+    text = format_inbox_proposal(
+        thread_id="thread / 42",
+        seeker_name="Quỳnh Như",
+        messages=[
+            {"timestamp": "2026-09-11 08:45", "sender": "Auto_Page", "content": post_text},
+            {"timestamp": "2026-09-11 08:46", "sender": "Customer", "content": "Mình ở Sài Gòn"},
+        ],
+        reply_text="Dạ CLB sẽ liên hệ lại bạn ạ.",
+    )
+
+    assert "🔗 Hồ sơ seeker\n  https://ops.example.org/seekers/thread%20%2F%2042" in text
+    assert "  [2026-09-11 08:45 | Auto_Page]\n    " in text
+    assert "…" in text
+    assert "CALL_TO_ACTION" in text
+    assert post_text not in text
+    assert "🤖 Đề xuất trả lời (MAS)\n  Dạ CLB sẽ liên hệ lại bạn ạ." in text
+
+
+def test_seeker_detail_url_uses_the_canonical_local_dashboard(monkeypatch):
+    monkeypatch.setattr("tools.env_manager.load_credentials", lambda: {})
+    monkeypatch.delenv("SEEKER_WEB_BASE_URL", raising=False)
+    monkeypatch.delenv("WEB_APP_URL", raising=False)
+    assert get_seeker_detail_url("5691") == "http://localhost:9995/seekers/5691"
+
+
+def test_unconfigured_telegram_retains_escalation_in_local_hitl_queue(monkeypatch, mock_db):
+    monkeypatch.setattr("tools.env_manager.load_credentials", lambda: {})
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+
+    proposal_id = send_proposal_to_telegram(
+        route="inbox", thread_id="t-local", proposed_text="Cần người xem",
+        payload={"status": "escalated"}, escalation_reason="knowledge_gap",
+        escalation_note="Không có lịch lớp phù hợp.",
+    )
+
+    assert proposal_id.startswith("local:")
+    row = mock_db.execute(
+        "SELECT escalation_reason, escalation_note, payload_json FROM telegram_hitl_queue WHERE telegram_message_id=?",
+        (proposal_id,),
+    ).fetchone()
+    assert row["escalation_reason"] == "knowledge_gap"
+    assert row["escalation_note"] == "Không có lịch lớp phù hợp."
+    assert json.loads(row["payload_json"])["delivery_state"] == "telegram_unconfigured"
 
 
 @patch("tools.l5_telegram_hitl.requests.get")
@@ -156,3 +209,9 @@ def test_check_and_mark(mock_env, mock_db):
     
     status, _ = check_hitl_status("300")
     assert status == "executed"
+
+
+def test_missing_telegram_message_id_is_never_auto_approved(mock_env, mock_db):
+    status, feedback = check_hitl_status("")
+    assert status == "pending"
+    assert feedback == "missing_telegram_message_id"

@@ -36,7 +36,7 @@ def test_load_credentials_handles_plaintext_and_encoded():
         os.remove(temp_env_path)
 
 
-def test_llm_setup_uses_project_env_over_stale_legacy_endpoint():
+def test_llm_setup_rejects_legacy_provider_even_when_shell_has_endpoint():
     from tools.l5_inbox_mas_context import get_llm_config, setup_llm_env
 
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
@@ -55,16 +55,44 @@ def test_llm_setup_uses_project_env_over_stale_legacy_endpoint():
             },
             clear=True,
         ):
+            try:
+                get_llm_config()
+                assert False, "legacy OpenAI-compatible config must not be selected"
+            except RuntimeError as exc:
+                assert "Gemini credentials missing" in str(exc)
+    finally:
+        os.remove(temp_env_path)
+
+
+def test_llm_setup_selects_native_gemini_from_project_env():
+    from tools.l5_inbox_mas_context import get_llm_config, setup_llm_env
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
+        f.write(f"GOOGLE_API_KEY={encode_credential('AIza-test-key')}\n")
+        f.write(f"GEMINI_MODEL={encode_credential('gemini-2.5-flash-lite')}\n")
+        temp_env_path = f.name
+
+    try:
+        with patch("tools.env_manager.ENV_FILE_PATH", temp_env_path), patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_BASE": "http://stale.example/v1",
+                "OPENAI_API_KEY": "stale-key",
+                "ADK_MODEL": "openai/stale-model",
+            },
+            clear=True,
+        ):
             config = get_llm_config()
             assert config == {
-                "api_base": "https://configured.example/v1",
-                "api_key": "configured-key",
-                "model": "configured-model",
+                "provider": "google",
+                "api_key": "AIza-test-key",
+                "model": "gemini-2.5-flash-lite",
             }
 
             setup_llm_env()
-            assert os.environ["OPENAI_API_BASE"] == "https://configured.example/v1"
-            assert os.environ["OPENAI_API_KEY"] == "configured-key"
-            assert os.environ["ADK_MODEL"] == "openai/configured-model"
+            assert os.environ["GOOGLE_API_KEY"] == "AIza-test-key"
+            assert os.environ["ADK_MODEL"] == "gemini-2.5-flash-lite"
+            assert "OPENAI_API_BASE" not in os.environ
+            assert "OPENAI_API_KEY" not in os.environ
     finally:
         os.remove(temp_env_path)

@@ -10,23 +10,35 @@
           "invocation_id": "greeting_en_inv1",
           "user_content": {
             "role": "user",
-            "parts": [{"text": "Hello, I want to learn about Sahaja Yoga meditation. Can you tell me more?"}]
+            "parts": [
+              {
+                "text": "Hello, I want to learn about Sahaja Yoga meditation. Can you tell me more?"
+              }
+            ]
           },
           "final_response": {
             "role": "model",
-            "parts": [{"text": "Hello! Sahaja Yoga meditation classes are completely free and held regularly."}]
+            "parts": [
+              {
+                "text": "Hello! Sahaja Yoga meditation classes are completely free and held regularly."
+              }
+            ]
           }
         }
       ],
       "rubrics": [
         {
           "rubric_id": "greeting_warmth",
-          "rubric_content": {"text_property": "The agent's response is warm, welcoming, and mentions that meditation classes are FREE."},
+          "rubric_content": {
+            "text_property": "The agent's response is warm, welcoming, and mentions that meditation classes are FREE."
+          },
           "type": "FINAL_RESPONSE_QUALITY"
         },
         {
           "rubric_id": "greeting_language",
-          "rubric_content": {"text_property": "The agent's response is in English since the user wrote in English."},
+          "rubric_content": {
+            "text_property": "The agent's response is in English since the user wrote in English."
+          },
           "type": "FINAL_RESPONSE_QUALITY"
         }
       ]
@@ -38,23 +50,35 @@
           "invocation_id": "question_classes_inv1",
           "user_content": {
             "role": "user",
-            "parts": [{"text": "Where are the Sahaja Yoga classes held? What time do they start?"}]
+            "parts": [
+              {
+                "text": "Where are the Sahaja Yoga classes held? What time do they start?"
+              }
+            ]
           },
           "final_response": {
             "role": "model",
-            "parts": [{"text": "Our classes are held regularly in various cities. Could you tell me which city you are in so I can share the schedule?"}]
+            "parts": [
+              {
+                "text": "Our classes are held regularly in various cities. Could you tell me which city you are in so I can share the schedule?"
+              }
+            ]
           }
         }
       ],
       "rubrics": [
         {
           "rubric_id": "question_helpful",
-          "rubric_content": {"text_property": "The agent provides helpful information about classes or asks which city the user is in to give specific details."},
+          "rubric_content": {
+            "text_property": "The agent provides helpful information about classes or asks which city the user is in to give specific details."
+          },
           "type": "FINAL_RESPONSE_QUALITY"
         },
         {
           "rubric_id": "question_not_pushy",
-          "rubric_content": {"text_property": "The agent is not pushy, commercial, or salesy. The tone is genuine and welcoming."},
+          "rubric_content": {
+            "text_property": "The agent is not pushy, commercial, or salesy. The tone is genuine and welcoming."
+          },
           "type": "FINAL_RESPONSE_QUALITY"
         }
       ]
@@ -66,23 +90,35 @@
           "invocation_id": "registration_inv1",
           "user_content": {
             "role": "user",
-            "parts": [{"text": "I want to sign up for the meditation class in Ho Chi Minh City. How do I register?"}]
+            "parts": [
+              {
+                "text": "I want to sign up for the meditation class in Ho Chi Minh City. How do I register?"
+              }
+            ]
           },
           "final_response": {
             "role": "model",
-            "parts": [{"text": "That's wonderful! Could you please share your name and phone number so we can register you?"}]
+            "parts": [
+              {
+                "text": "That's wonderful! Could you please share your name and phone number so we can register you?"
+              }
+            ]
           }
         }
       ],
       "rubrics": [
         {
           "rubric_id": "registration_asks_details",
-          "rubric_content": {"text_property": "The agent asks for the user's name and/or phone number to complete registration."},
+          "rubric_content": {
+            "text_property": "The agent asks for the user's name and/or phone number to complete registration."
+          },
           "type": "FINAL_RESPONSE_QUALITY"
         },
         {
           "rubric_id": "registration_encouraging",
-          "rubric_content": {"text_property": "The agent is encouraging and positive about the user wanting to register."},
+          "rubric_content": {
+            "text_property": "The agent is encouraging and positive about the user wanting to register."
+          },
           "type": "FINAL_RESPONSE_QUALITY"
         }
       ]
@@ -94,23 +130,35 @@
           "invocation_id": "vi_greeting_inv1",
           "user_content": {
             "role": "user",
-            "parts": [{"text": "Xin chào, mình muốn tìm hiểu về thiền Sahaja Yoga. Lớp học có miễn phí không?"}]
+            "parts": [
+              {
+                "text": "Xin chào, mình muốn tìm hiểu về thiền Sahaja Yoga. Lớp học có miễn phí không?"
+              }
+            ]
           },
           "final_response": {
             "role": "model",
-            "parts": [{"text": "Chào bạn! Lớp thiền Sahaja Yoga hoàn toàn miễn phí."}]
+            "parts": [
+              {
+                "text": "Chào bạn! Lớp thiền Sahaja Yoga hoàn toàn miễn phí."
+              }
+            ]
           }
         }
       ],
       "rubrics": [
         {
           "rubric_id": "vi_language_match",
-          "rubric_content": {"text_property": "The agent's response is in Vietnamese because the user wrote in Vietnamese."},
+          "rubric_content": {
+            "text_property": "The agent's response is in Vietnamese because the user wrote in Vietnamese."
+          },
           "type": "FINAL_RESPONSE_QUALITY"
         },
         {
           "rubric_id": "vi_free_classes",
-          "rubric_content": {"text_property": "The agent mentions that classes are free (miễn phí) in the response."},
+          "rubric_content": {
+            "text_property": "The agent mentions that classes are free (miễn phí) in the response."
+          },
           "type": "FINAL_RESPONSE_QUALITY"
         }
       ]
@@ -122,18 +170,160 @@
           "invocation_id": "spam_inv1",
           "user_content": {
             "role": "user",
-            "parts": [{"text": "BUY CHEAP WATCHES NOW!!! BEST PRICE GUARANTEED visit www.scam-watches.com CLICK HERE!!!"}]
+            "parts": [
+              {
+                "text": "BUY CHEAP WATCHES NOW!!! BEST PRICE GUARANTEED visit www.scam-watches.com CLICK HERE!!!"
+              }
+            ]
           },
           "final_response": {
             "role": "model",
-            "parts": [{"text": ""}]
+            "parts": [
+              {
+                "text": ""
+              }
+            ]
           }
         }
       ],
       "rubrics": [
         {
           "rubric_id": "spam_handled",
-          "rubric_content": {"text_property": "The agent does NOT engage with the spam content. It either politely declines, gives a very brief non-committal response, or provides a generic meditation-related reply without acknowledging the spam."},
+          "rubric_content": {
+            "text_property": "The agent does NOT engage with the spam content. It either politely declines, gives a very brief non-committal response, or provides a generic meditation-related reply without acknowledging the spam."
+          },
+          "type": "FINAL_RESPONSE_QUALITY"
+        }
+      ]
+    },
+    {
+      "eval_id": "time_closer_already_answered",
+      "conversation": [
+        {
+          "invocation_id": "time_closer_already_answered_inv1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Bây giờ là Thứ Năm 17/09/2026 14:00 (giờ Việt Nam, Asia/Ho_Chi_Minh).\nThread:\n[2026-09-14 06:54 | Page] Hẹn chú Chiến vào 14h30 Chủ Nhật tuần này ạ (ngày 20/09), tại tầng 2, số 40 Vương Thừa Vũ nhé chú\n[2026-09-14 11:10 | Customer] Xin trân trọng cám ơn !\n[2026-09-14 11:10 | Page] Dạ !\nProcess this Facebook inbox thread."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "[NO_REPLY: already_answered]"
+              }
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "rubric_id": "time_closer_already_answered_rubric",
+          "rubric_content": {
+            "text_property": "The agent outputs exactly a [NO_REPLY: ...] sentinel (already_answered or closer) and does NOT write a new reply, because a human Page reply already followed the customer's thank-you."
+          },
+          "type": "FINAL_RESPONSE_QUALITY"
+        }
+      ]
+    },
+    {
+      "eval_id": "time_banner_is_not_a_message",
+      "conversation": [
+        {
+          "invocation_id": "time_banner_is_not_a_message_inv1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Bây giờ là Thứ Năm 17/09/2026 14:00 (giờ Việt Nam, Asia/Ho_Chi_Minh).\nThread:\n[2026-09-13 00:04 | Customer] Học phí ?\n[2026-09-13 00:04 | Auto_Page] Học phí: Hoàn toàn MIỄN PHÍ. Bạn để lại Họ tên và Số điện thoại để đăng ký nhé\n[2026-09-14 11:10 | Page] Dạ !\n[2026-09-13 00:04 | Customer] Quang Chien Nguyen replied to an ad.\nProcess this Facebook inbox thread."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "[NO_REPLY: already_answered]"
+              }
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "rubric_id": "time_banner_is_not_a_message_rubric",
+          "rubric_content": {
+            "text_property": "The agent recognises 'X replied to an ad.' as a system banner rather than a question and returns a [NO_REPLY: ...] sentinel instead of confirming a registration or answering."
+          },
+          "type": "FINAL_RESPONSE_QUALITY"
+        }
+      ]
+    },
+    {
+      "eval_id": "time_stale_turn",
+      "conversation": [
+        {
+          "invocation_id": "time_stale_turn_inv1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Bây giờ là Thứ Năm 17/09/2026 14:00 (giờ Việt Nam, Asia/Ho_Chi_Minh).\nThread:\n[2026-08-23 16:09 | Customer] Dạ trung tâm ơi, em tới 158 đào duy anh rồi\nProcess this Facebook inbox thread."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "[NO_REPLY: stale]"
+              }
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "rubric_id": "time_stale_turn_rubric",
+          "rubric_content": {
+            "text_property": "The customer's message is 25 days old; the agent returns [NO_REPLY: stale] and does not answer as if the seeker were still waiting at the door."
+          },
+          "type": "FINAL_RESPONSE_QUALITY"
+        }
+      ]
+    },
+    {
+      "eval_id": "time_registration_with_phone_late",
+      "conversation": [
+        {
+          "invocation_id": "time_registration_with_phone_late_inv1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Bây giờ là Thứ Năm 17/09/2026 14:00 (giờ Việt Nam, Asia/Ho_Chi_Minh).\nThread:\n[2026-09-15 16:16 | Customer] cho mình xin học với sđt 0393140362\nSeeker city: Hà Nội. registration_phone=0393140362, late_reply=true.\nProcess this Facebook inbox thread."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Dạ xin lỗi bạn vì CLB phản hồi muộn 🙏 CLB đã nhận được thông tin đăng ký của bạn (0393140362). Lớp thiền tại Hà Nội hoàn toàn miễn phí: tối Thứ Ba 20h00 tại 72 ngõ 106 Hoàng Quốc Việt hoặc 14h30 Chủ Nhật tại 40 Vương Thừa Vũ, bạn chọn buổi nào tiện nhé."
+              }
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "rubric_id": "time_registration_with_phone_late_rubric",
+          "rubric_content": {
+            "text_property": "The reply opens with a short apology for the late response, confirms that the registration/phone number has been received (allowed because the system stored it), gives Hanoi class options, and does NOT ask for the phone number again."
+          },
           "type": "FINAL_RESPONSE_QUALITY"
         }
       ]

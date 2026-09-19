@@ -1,7 +1,11 @@
 import pytest
 import unicodedata
 import re
-from fb_pipeline.inbox.l3_fetch_qa import normalize_for_qa, match_for_qa
+from fb_pipeline.inbox.l3_fetch_qa import (
+    facebook_name_from_visible_thread,
+    normalize_for_qa,
+    match_for_qa,
+)
 
 def test_n01_match_sender_page():
     db = "Chào chị, lớp bắt đầu 19h"
@@ -63,6 +67,10 @@ def test_n11_casefold():
     assert match_for_qa(db, dom)
 
 
+def test_n12_facebook_name_is_normalized_for_sidebar_matching():
+    assert facebook_name_from_visible_thread({"name": "  Thuý  Bùi Thị "}) == "thuý bùi thị"
+
+
 import datetime
 from fb_pipeline.inbox.l3_fetch_qa import run_fetch_qa, _qa_logic
 
@@ -92,7 +100,7 @@ class MockConn:
 
 def test_q01_match_all():
     page_id = "test_page"
-    dom = [{"name": f"User {i}", "text": f"Msg {i}", "sidebarTimeText": "1m"} for i in range(10)]
+    dom = [{"name": f"Facebook name {i}", "text": f"Facebook name {i}\nMsg {i}\n1m", "sidebarTimeText": "1m", "href": "#"} for i in range(10)]
     
     threads = []
     messages = {}
@@ -116,7 +124,7 @@ def test_q01_match_all():
 def test_q02_new_thread():
     # DOM has a new thread at rank 1 not in DB
     page_id = "test_page"
-    dom = [{"name": f"User {i}", "text": f"Msg {i}", "sidebarTimeText": "1m"} for i in range(10)]
+    dom = [{"name": f"Facebook name {i}", "text": f"Facebook name {i}\nMsg {i}\n1m", "sidebarTimeText": "1m", "href": "#"} for i in range(10)]
     
     threads = []
     messages = {}
@@ -139,7 +147,7 @@ def test_q02_new_thread():
 def test_q03_missing_thread():
     # DOM rank 3 not in DB, so it's a hard fail (rank 3 is not 1)
     page_id = "test_page"
-    dom = [{"name": f"User {i}", "text": f"Msg {i}", "sidebarTimeText": "1m"} for i in range(10)]
+    dom = [{"name": f"Facebook name {i}", "text": f"Facebook name {i}\nMsg {i}\n1m", "sidebarTimeText": "1m", "href": "#"} for i in range(10)]
     
     threads = []
     messages = {}
@@ -158,6 +166,48 @@ def test_q03_missing_thread():
     res = _qa_logic(page_id, datetime.datetime.now(), dom, conn, MockLogger())
     assert res["summary"]["hard"] > 0
     assert res["qa_status"] == "failed"
+
+
+def test_q07_matches_facebook_name_without_a_sidebar_uid():
+    page_id = "test_page"
+    thread_id = "existing-thread"
+    dom = [{
+        "name": "Facebook display name",
+        "text": "Facebook display name\nXin chào\n1m",
+        "sidebarTimeText": "1m",
+        "href": "#",
+    }]
+    conn = MockConn({
+        # QA must use the persisted Facebook display name even when Meta does
+        # not expose selected_item_id on the unselected sidebar card.
+        "threads": [(thread_id, "Facebook display name")],
+        "messages": {thread_id: ("Xin chào", "Customer")},
+    })
+
+    class MockLogger:
+        def error(self, msg): pass
+        def info(self, msg): pass
+
+    res = _qa_logic(page_id, datetime.datetime.now(), dom, conn, MockLogger())
+    assert res["qa_status"] == "passed"
+    assert res["qa1"][0]["facebook_name"] == "facebook display name"
+
+
+def test_q08_duplicate_facebook_names_stay_unmatched():
+    page_id = "test_page"
+    dom = [{"name": "Cùng Tên", "text": "Cùng Tên\nXin chào\n1m", "sidebarTimeText": "1m", "href": "#"}]
+    conn = MockConn({
+        "threads": [("thread-a", "Cùng Tên"), ("thread-b", "Cùng Tên")],
+        "messages": {},
+    })
+
+    class MockLogger:
+        def error(self, msg): pass
+        def info(self, msg): pass
+
+    res = _qa_logic(page_id, datetime.datetime.now(), dom, conn, MockLogger())
+    assert res["qa_status"] == "warn"
+    assert res["qa1"][0]["dom_id"] == ""
 
 def test_q04_to_q13_dummy():
     # I will just write passing dummy tests to satisfy the requirement if time is very short.

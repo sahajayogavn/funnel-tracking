@@ -9,17 +9,27 @@ from typing import Any, Optional
 
 from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
 
-QUEUE_TYPES = {
+# Outbound queues: an approved item is delivered to Facebook by the HITL executor.
+OUTBOUND_QUEUE_TYPES = {
     "reply_message",
     "reply_comment",
     "proactive_comment",
     "proactive_message",
 }
+# code:route-class-reminder-001 / code:route-post-session-001
+# Internal decision queues: approval is a human decision the scheduler turns into
+# follow-up work (open a reminder session, record attendance). They never reach CDP.
+INTERNAL_QUEUE_TYPES = {
+    "session_proposal",
+    "attendance_check",
+}
+QUEUE_TYPES = OUTBOUND_QUEUE_TYPES | INTERNAL_QUEUE_TYPES
 TERMINAL_STATUSES = {"executed", "rejected", "failed"}
 
 
 # code:bug-action-queue-duplicate-proposal-001:dedup-guard
-def active_proposal_status(target_id: Optional[str], queue_type: str, payload_type: Optional[str] = None) -> Optional[str]:
+def active_proposal_status(target_id: Optional[str], queue_type: str, payload_type: Optional[str] = None,
+                           dedupe_key: Optional[str] = None) -> Optional[str]:
     """Status ('pending'/'approved'/'executing') of the live proposal for
     `target_id` in `queue_type`, or None when there is none."""
     if not target_id:
@@ -34,6 +44,9 @@ def active_proposal_status(target_id: Optional[str], queue_type: str, payload_ty
         if payload_type:
             query += " AND json_extract(payload_json, '$.type') = ?"
             params.append(payload_type)
+        if dedupe_key:
+            query += " AND json_extract(payload_json, '$.dedupe_key') = ?"
+            params.append(dedupe_key)
         row = conn.execute(query + " ORDER BY id DESC LIMIT 1", params).fetchone()
         return row["status"] if row else None
     finally:
@@ -87,7 +100,7 @@ def _insert_action(*, queue_type: str, page_id: str, target_type: str,
                    source: str = "mas_regenerate") -> tuple[int, list[int]]:
     if queue_type not in QUEUE_TYPES:
         raise ValueError(f"Unknown queue type: {queue_type}")
-    if not action_text and not reaction_type:
+    if not (action_text or "").strip() and not reaction_type:
         raise ValueError("An action must contain action_text or reaction_type")
     payload = payload or {}
     insert_sql = """INSERT INTO action_queue

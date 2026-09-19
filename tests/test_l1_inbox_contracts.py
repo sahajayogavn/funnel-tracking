@@ -97,9 +97,9 @@ class TestDetectCitySmart(unittest.TestCase):
 
     from unittest.mock import patch
 
+    @patch("tools.l5_llm_provider.get_llm_config", return_value={"provider": "google", "api_key": "mock", "model": "gemini-test"})
     @patch("fb_pipeline.contracts.l1_city_llm.detect_city_llm")
-    @patch.dict("os.environ", {"OPENAI_API_BASE": "mock", "OPENAI_API_KEY": "mock"})
-    def test_detect_smart_returns_llm_result(self, mock_detect_llm):
+    def test_detect_smart_returns_llm_result(self, mock_detect_llm, _mock_config):
         """When LLM returns a valid city, detect_city_smart should return it without fallback."""
         mock_detect_llm.return_value = {
             "city": "Đà Nẵng",
@@ -117,9 +117,9 @@ class TestDetectCitySmart(unittest.TestCase):
         self.assertEqual(result, "Đà Nẵng")
         mock_detect_llm.assert_called_once()
 
+    @patch("tools.l5_llm_provider.get_llm_config", return_value={"provider": "google", "api_key": "mock", "model": "gemini-test"})
     @patch("fb_pipeline.contracts.l1_city_llm.detect_city_llm")
-    @patch.dict("os.environ", {"OPENAI_API_BASE": "mock", "OPENAI_API_KEY": "mock"})
-    def test_detect_smart_falls_back_on_unknown(self, mock_detect_llm):
+    def test_detect_smart_falls_back_on_unknown(self, mock_detect_llm, _mock_config):
         """When LLM returns 'Unknown', the system should fallback to keyword-based detect_city."""
         mock_detect_llm.return_value = {
             "city": "Unknown",
@@ -139,9 +139,9 @@ class TestDetectCitySmart(unittest.TestCase):
         self.assertEqual(result, "TP. Hồ Chí Minh")
         mock_detect_llm.assert_called_once()
 
+    @patch("tools.l5_llm_provider.get_llm_config", return_value={"provider": "google", "api_key": "mock", "model": "gemini-test"})
     @patch("fb_pipeline.contracts.l1_city_llm.detect_city_llm")
-    @patch.dict("os.environ", {"OPENAI_API_BASE": "mock", "OPENAI_API_KEY": "mock"})
-    def test_detect_smart_falls_back_on_timeout(self, mock_detect_llm):
+    def test_detect_smart_falls_back_on_timeout(self, mock_detect_llm, _mock_config):
         """When LLM throws an exception (e.g., timeout), the system should safely catch it and fallback."""
         mock_detect_llm.side_effect = Exception("API Timeout")
         

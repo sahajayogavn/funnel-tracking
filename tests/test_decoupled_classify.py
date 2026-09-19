@@ -96,9 +96,9 @@ def test_C_03_stale_predicate(temp_db):
     # User 1: NULL verified
     temp_db.execute("INSERT INTO users (thread_id, thread_name, last_interaction) VALUES ('t1', 'U1', ?)", (past2,))
     # User 2: verified < last_interaction
-    temp_db.execute("INSERT INTO users (thread_id, thread_name, last_interaction, classification_verified_at) VALUES ('t2', 'U2', ?, ?)", (past2, past1))
+    temp_db.execute("INSERT INTO users (thread_id, thread_name, last_interaction, classification_verified_at, contact_extracted_at) VALUES ('t2', 'U2', ?, ?, ?)", (past2, past1, past1))
     # User 3: verified >= last_interaction
-    temp_db.execute("INSERT INTO users (thread_id, thread_name, last_interaction, classification_verified_at) VALUES ('t3', 'U3', ?, ?)", (past1, past2))
+    temp_db.execute("INSERT INTO users (thread_id, thread_name, last_interaction, classification_verified_at, contact_extracted_at) VALUES ('t3', 'U3', ?, ?, ?)", (past1, past2, past2))
     
     temp_db.commit()
     
@@ -113,17 +113,13 @@ def test_C_05_unknown_is_conclusion(temp_db, monkeypatch):
     persist_thread_record(temp_db, record)
     
     def mock_detect(*args, **kwargs):
-        return [{"thread_name": "User 1", "city": "Unknown", "program_code": "SY_VN", "verified": True}]
-        
-    def mock_verify(*args, **kwargs):
-        return [{"thread_name": "User 1", "city": "Unknown", "program_code": "SY_VN", "verified": True}]
+        return {"city": "Unknown", "program_code": "SY_VN", "proof": "No city signal", "confidence": "low"}
 
     def mock_config():
         return {"api_base": "fake", "api_key": "fake", "model": "fake"}
     
     monkeypatch.setattr("tools.l5_fetch_fb_city_classify._get_llm_config_safe", mock_config)
-    monkeypatch.setattr("tools.l5_fetch_fb_city_classify.detect_city_batch_llm", mock_detect)
-    monkeypatch.setattr("tools.l5_fetch_fb_city_classify.verify_city_program_batch_llm", mock_verify)
+    monkeypatch.setattr("tools.l5_fetch_fb_city_classify.detect_city_llm", mock_detect)
     
     res = _post_scrape_llm_city_classify(temp_db, "123")
     assert res["updated"] == 1

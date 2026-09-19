@@ -79,6 +79,25 @@ def test_action_queues_seeker_sidebar_contract():
     assert "handleMouseLeave" in content
     assert "SeekerJourneyTimeline" in content
 
+
+def test_action_queue_seeker_links_preserve_meta_thread_ids():
+    action_queues_file = ROOT_DIR / "web" / "src" / "components" / "action-queues.tsx"
+    content = action_queues_file.read_text(encoding="utf-8")
+
+    # Thread IDs can exceed JavaScript's safe integer range, so links must use
+    # the original targetId string rather than a number converted from it.
+    assert "function queueSeekerDetailUrl(item: ActionQueueItem)" in content
+    assert "const targetId = item.targetId || item.targetName || '';" in content
+    assert "href={queueSeekerDetailUrl(item)}" in content
+
+
+def test_action_queue_delete_actions_have_visible_labels():
+    action_queues_file = ROOT_DIR / "web" / "src" / "components" / "action-queues.tsx"
+    content = action_queues_file.read_text(encoding="utf-8")
+
+    assert "Xóa đã chọn" in content
+    assert "<span>Xóa</span>" in content
+
 def test_queries_payload_and_seeker_lookup_contract():
     queries_file = ROOT_DIR / "web" / "src" / "lib" / "queries.ts"
     content = queries_file.read_text(encoding="utf-8")
@@ -88,3 +107,38 @@ def test_queries_payload_and_seeker_lookup_contract():
     assert "u.thread_id = ?" in content
     assert "u.thread_name = ?" in content
 
+
+def test_recommendations_refuse_template_fallback_for_care_paths():
+    route_file = ROOT_DIR / "web" / "src" / "app" / "api" / "action-queue" / "recommendations" / "route.ts"
+    content = route_file.read_text(encoding="utf-8")
+
+    assert "!['all', 'warmup', 'event', 'care'].includes(request.type)" in content
+    assert "Không tạo template outbound cho Care" in content
+
+
+def test_regenerate_preserves_proactive_purpose_and_scope():
+    action_queues_file = ROOT_DIR / "web" / "src" / "components" / "action-queues.tsx"
+    content = action_queues_file.read_text(encoding="utf-8")
+
+    assert "carePurpose?: 'class_reminder' | 'warmup' | 'event'" in content
+    assert "handleRunRecommendations('care'" in content
+    assert "payload.session?.program_code" in content
+    assert "payload.event_id" in content
+
+
+def test_message_history_ui_does_not_reassign_sender_from_prose():
+    queries_file = ROOT_DIR / "web" / "src" / "lib" / "queries.ts"
+    content = queries_file.read_text(encoding="utf-8")
+
+    assert "Sender ownership is decided at ingestion" in content
+    assert "text.includes('hoàn toàn miễn phí')" not in content
+    assert "text.includes('bạn ạ')" not in content
+
+
+def test_message_history_ui_prefers_resolved_event_time_and_renders_quote_as_evidence():
+    component_file = ROOT_DIR / "web" / "src" / "components" / "messenger-message-list.tsx"
+    content = component_file.read_text(encoding="utf-8")
+
+    assert "messengerDateLabel(message.eventAt) || messengerDateLabel(message.timestamp)" in content
+    assert "Quoted reply evidence" in content
+    assert "quotedText?: string | null" in content

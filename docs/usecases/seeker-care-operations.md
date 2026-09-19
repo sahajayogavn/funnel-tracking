@@ -50,6 +50,8 @@ Các vai trò dùng trong tài liệu:
 | UC-08 | Mời seeker tham gia sự kiện theo khu vực | Điều phối viên, Người duyệt | Đề xuất sự kiện phù hợp thành phố và lịch sử quan tâm. |
 | UC-09 | Theo dõi hành trình và chuyển stage | Điều phối viên | Stage phản ánh bằng chứng, không chỉ là suy đoán của AI. |
 | UC-10 | Xử lý ngoại lệ và phản hồi không thuộc phạm vi | Yogi chăm sóc | Không gửi nội dung thiếu an toàn; ca việc được escalated cho người thật. |
+| UC-11 | Nhắc lịch lớp trước buổi học | Người duyệt, Yogi chăm sóc | Seeker đã ghi danh được nhắc đúng buổi, qua một phiên do người mở. |
+| UC-12 | Điểm danh sau buổi học | Điều phối viên | Có bằng chứng attendance để chuyển stage, không suy đoán. |
 
 ---
 
@@ -180,6 +182,16 @@ nhiệm kiểm tra trước khi gửi.
 
 **Kết quả:** một bản nháp đã được chuẩn bị, hoặc `no_reply`/escalation nếu hệ
 thống không nên trả lời.
+
+**Tình trạng đã audit (2026-09-17, `doc:mas-execution-audit-001`):** bản nháp
+hiện được tạo cho mọi thread có tin cuối mang nhãn `Customer`, kể cả banner hệ
+thống ("X replied to an ad.") và lời cảm ơn đã được yogi đáp từ nhiều ngày
+trước, vì MAS không nhận `now` và không có lựa chọn "không cần trả lời". Đã
+khắc phục cùng ngày (`prd:mas-time-aware-001`): Time Gate + trạng thái hội thoại
+chạy trước LLM, sentinel `[NO_REPLY]`, nhãn `LATE` cho tin 1–7 ngày tuổi; tin >7
+ngày chuyển sang warm-up thay vì reply.
+MAS **được phép** xác nhận "đã nhận được đăng ký" khi tin khách thật chứa SĐT,
+vì fetch pipeline đã lưu SĐT vào `/seekers`.
 
 **Quy tắc an toàn bắt buộc:** automation không được nhấn Enter, click Send hay
 gọi một cơ chế gửi tương đương cho DM inbox — kể cả khi chạy với `--live`.
@@ -323,6 +335,58 @@ tự động.
 **Kết quả:** không có “lời hứa” hay nội dung suy luận nội bộ bị gửi cho seeker;
 quyết định nhạy cảm luôn thuộc con người.
 
+## UC-11 — Nhắc lịch lớp trước buổi học (`prd:mas-time-aware-001`, route `care`)
+
+**Mục tiêu:** seeker đã ghi danh nhận được lời nhắc đúng buổi, do yogi gửi tay,
+mà không cần ai rà danh sách thủ công mỗi ngày.
+
+**Tác nhân chính:** Hệ thống (job 08:00–09:00 hằng ngày); Người duyệt mở phiên;
+Yogi chăm sóc gửi.
+
+**Luồng chính:**
+
+1. Mỗi sáng trong khung 08:00–09:00, hệ thống đọc lịch lớp cố định từ
+   `lop-hoc.md`, tìm các buổi diễn ra trong 36 giờ tới.
+2. Với mỗi buổi, hệ thống chọn seeker `Seeker_Public_Program` /
+   `Seeker_18_Weeks` có `program_code` (hoặc city) khớp, tương tác trong 21 ngày,
+   chưa được nhắc cho buổi này.
+3. Hệ thống gửi **một** digest lên Telegram và `/queues` ("Tối nay 20:00 Hoàng
+   Quốc Việt: 6 seeker đã ghi danh — Mở phiên?"). Không gọi LLM ở bước này.
+4. Người duyệt bấm **Mở phiên** hoặc **Bỏ qua**. Chỉ khi mở phiên, hệ thống mới
+   soạn bản nháp cho từng seeker (xưng hô lấy từ tin yogi đã gõ trước đó) và đưa
+   vào hàng đợi reply như UC-06.
+5. Yogi gửi tay trên Facebook. Hệ thống ghi `reminder_log` để không nhắc lặp.
+
+**Kết quả:** mỗi seeker được nhắc tối đa một lần cho mỗi buổi; toàn bộ phiên
+có dấu vết ai mở, ai gửi.
+
+**Ranh giới:** đây là thông báo cho quản trị viên, không phải tin nhắn tự động;
+người đã ở stage `Sahaja_Yogi` trở lên không nằm trong đối tượng nhắc.
+
+---
+
+## UC-12 — Điểm danh sau buổi học (`prd:mas-time-aware-001`, route `care`)
+
+**Mục tiêu:** có bằng chứng attendance thật để chuyển stage (UC-09), thay cho
+việc stage gate bị kích bởi chính đề xuất của MAS.
+
+**Tác nhân chính:** Hệ thống; Điều phối viên.
+
+**Luồng chính:**
+
+1. Sáng hôm sau mỗi buổi đã có phiên nhắc (UC-11), hệ thống gửi checklist
+   "Hôm qua Vương Thừa Vũ có 3 người hẹn — ai đã tới?" với nút ✅/❌ từng người.
+2. Điều phối viên đánh dấu. Kết quả lưu vào bảng `attendance`.
+3. Người đã tới: hệ thống đề xuất bản nháp "cảm ơn + hẹn buổi 2"; stage gate
+   được phép xét nâng stage với bằng chứng này.
+4. Người không tới: trở thành candidate warm-up nhẹ sau 3 ngày, đi qua decision
+   core chống spam của UC-07.
+
+**Kết quả:** journey phản ánh việc có mặt thật; đề xuất chăm sóc tiếp theo dựa
+trên hành vi, không dựa trên tin nhắn đơn lẻ.
+
+---
+
 ## Tiêu chí hoàn thành từ góc nhìn người dùng
 
 - Sau khi đồng bộ, một yogi có thể tìm được seeker và hiểu các touch-point liên
@@ -342,5 +406,9 @@ quyết định nhạy cảm luôn thuộc con người.
   toàn inbox, trạng thái triển khai.
 - [MAS strategy](../../memory/mas_strategy.md) — playbook hành trình và chăm
   sóc theo stage; một số nội dung là target strategy, không phải cam kết runtime.
+- [Audit thực thi MAS 2026-09-17](../report/mas-execution-audit-2026-09-17.md) —
+  vì sao đề xuất reply bị từ chối toàn bộ; kèm truy vấn tái kiểm.
+- [MAS nhận thức thời gian](../PRDs/mas-time-aware-care-plan.md) —
+  P0→P3, UC-11/UC-12, trạng thái triển khai.
 - [QA audit](../report/qa-report.md) — các sai khác đã biết giữa docs, tests và
   implementation theo thời điểm audit.

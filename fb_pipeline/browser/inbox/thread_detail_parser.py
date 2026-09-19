@@ -1,7 +1,55 @@
 import re
+from datetime import date, datetime, timezone
 from urllib.parse import parse_qs, urlparse
 from .sender_validator import detect_sender
 from .constants import MESSAGE_REGION_SELECTOR
+
+
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7,
+    "july": 7, "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12,
+    "december": 12,
+}
+
+
+def _normalise_day_context(value: str | None) -> str | None:
+    """Return an ISO day only when the rendered separator is self-contained.
+
+    A clock label such as ``9:00 AM`` must never inherit the crawl date.  The
+    same is true of separators such as ``Sep 10`` which omit a year: retaining
+    them in ``raw_timestamp`` is useful evidence, but converting them would be
+    an unsupported inference.  This helper intentionally recognises only
+    unambiguous, year-bearing date labels.
+    """
+    text = (value or "").strip().replace("\u202f", " ").replace("\u00a0", " ")
+    iso_match = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    english_match = re.fullmatch(
+        r"([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})", text, re.IGNORECASE
+    )
+    vietnamese_match = re.fullmatch(
+        r"(?:ngày\s*)?(\d{1,2})\s*(?:tháng|thg)\s*(\d{1,2})(?:\s*(?:năm)?\s*(\d{4}))?",
+        text,
+        re.IGNORECASE,
+    )
+    try:
+        if iso_match:
+            year, month, day = (int(part) for part in iso_match.groups())
+        elif english_match:
+            month_name, day_text, year_text = english_match.groups()
+            month = _MONTHS.get(month_name.lower())
+            if month is None:
+                return None
+            year, day = int(year_text), int(day_text)
+        elif vietnamese_match and vietnamese_match.group(3):
+            day_text, month_text, year_text = vietnamese_match.groups()
+            year, month, day = int(year_text), int(month_text), int(day_text)
+        else:
+            return None
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
 
 def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fingerprint: str,
                          is_first_thread: bool, thread_record) -> tuple[str, bool]:
@@ -273,16 +321,29 @@ def scroll_up_message_panel(page, logger, name: str) -> int:
     return prev_msg_count
 
 
-def extract_thread_messages(page) -> list[dict]:
-    """Extract raw messages from DOM and process sender validation via module"""
-    raw_messages = page.evaluate(r'''() => {
+def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dict]:
+    """Extract raw Inbox events without collapsing evidence into ``text``.
+
+    ``text`` remains the backwards-compatible message body for the current
+    ingestion caller.  The accompanying fields deliberately retain what the
+    DOM actually showed (day/time labels, reply context, and reactions).  A
+    later persistence layer can store those fields without having to infer
+    them again from an ambiguous display string.
+    """
+    # Reactions are observations made while crawling, not events that happened
+    # at the timestamp displayed beside the target message.  Supplying this
+    # outside the page script also makes replay fixtures deterministic.
+    observed_at = observed_at or datetime.now(timezone.utc).isoformat()
+    raw_messages = page.evaluate(r'''(observedAt) => {
         let region = document.querySelector(
             'div[aria-label*="Message list container"], ' +
             'div[role="region"][aria-label*="message"]'
         );
         if (!region) return [];
         let results = [];
-        let currentTimestamp = "";
+        let currentDayContext = "";
+        let currentTimeLabel = "";
+        let currentTimestampRaw = "";
         let elements = region.querySelectorAll('.x14vqqas, .x1fqp7bg');
         let processedBubbles = new Set();
 
@@ -300,10 +361,256 @@ def extract_thread_messages(page) -> list[dict]:
             return hasTime || hasMonth || hasSlashDate || hasRelativeDay || hasWeekday;
         }
 
+        function timestampParts(ts) {
+            let value = (ts || '').trim();
+            let timeMatch = value.match(/\b\d{1,2}:\d{2}(?:\s*[ap]m)?\b/i);
+            let hasTime = Boolean(timeMatch);
+            let hasDate = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|tháng|thg)\b/i.test(value) ||
+                /\b\d{1,2}[\/\.-]\d{1,2}(?:[\/\.-]\d{2,4})?\b/.test(value) ||
+                /\b(today|yesterday|hôm nay|hôm qua)\b/i.test(value) ||
+                /\b(mon|tue|wed|thu|fri|sat|sun|thứ\s*[2-7]|chủ nhật)\b/i.test(value);
+            let day = hasDate ? value.replace(/\b\d{1,2}:\d{2}(?:\s*[ap]m)?\b/ig, '').replace(/[\s,]+$/g, '').trim() : '';
+            return {hasDate, hasTime, day, time: timeMatch ? timeMatch[0].trim() : ''};
+        }
+
+        function timestampSnapshot() {
+            let timestamp = currentDayContext && currentTimeLabel
+                ? currentDayContext + ' ' + currentTimeLabel
+                : (currentDayContext || currentTimeLabel || '');
+            let precision = currentDayContext && currentTimeLabel ? 'date_time'
+                : currentDayContext ? 'date_only'
+                : currentTimeLabel ? 'time_only' : 'unknown';
+            return {
+                timestamp,
+                raw_timestamp: currentTimestampRaw || timestamp,
+                day_context: currentDayContext || null,
+                time_precision: precision,
+            };
+        }
+
+        function evidenceText(node, stopAt) {
+            let values = [];
+            let current = node;
+            for (let i = 0; current && i < 7; i++, current = current.parentElement) {
+                for (let attr of ['aria-label', 'data-testid', 'data-message-id', 'data-messageid', 'data-ft']) {
+                    let value = current.getAttribute && current.getAttribute(attr);
+                    if (value) values.push(attr + '=' + value);
+                }
+                if (current === stopAt) break;
+            }
+            return values.join(' | ');
+        }
+
+        function sourceId(node, stopAt) {
+            let current = node;
+            for (let i = 0; current && i < 7; i++, current = current.parentElement) {
+                for (let attr of ['data-message-id', 'data-messageid', 'data-fbid', 'data-mid']) {
+                    let value = current.getAttribute && current.getAttribute(attr);
+                    if (value) return value;
+                }
+                let dataFt = current.getAttribute && current.getAttribute('data-ft');
+                if (dataFt) {
+                    try {
+                        let parsed = JSON.parse(dataFt);
+                        let id = parsed.message_id || parsed.mid || parsed.mf_story_key;
+                        if (id) return String(id);
+                    } catch (_) {}
+                }
+                if (current === stopAt) break;
+            }
+            return null;
+        }
+
+        function sourceIdForBody(node, bubble, bodySegments) {
+            // A Facebook ID on a wrapper which contains several visible text
+            // segments identifies the *cluster*, not any particular message.
+            // It must not be copied to each sibling, otherwise source-id
+            // upsert silently drops real turns.  Return an ID only when its
+            // owning DOM node contains precisely this candidate body segment.
+            let current = node;
+            for (let i = 0; current && i < 7; i++, current = current.parentElement) {
+                let id = sourceId(current, current);
+                if (id) {
+                    let owned = bodySegments.filter(segment => current.contains(segment.node));
+                    if (owned.length === 1 && owned[0].node === node) return id;
+                }
+                if (current === bubble) break;
+            }
+            return null;
+        }
+
+        function isReplyOrQuote(node, stopAt) {
+            // Deliberately do not inspect the common bubble wrapper.  A
+            // generic "Reply" action, or "You replied", describes the
+            // current message's relationship and is not evidence that its
+            // own body is a quotation.  Only a quote-specific label marks a
+            // subtree that must be excluded from the outgoing body.
+            let current = node;
+            for (let i = 0; current && current !== stopAt && i < 6; i++, current = current.parentElement) {
+                let evidence = evidenceText(current, current).toLowerCase();
+                if (/(?:quoted\s+reply|quoted\b|quote\b|replying\s+to|trích\s+dẫn)/i.test(evidence)) return true;
+            }
+            return false;
+        }
+
+        function reactionControl(img, bubble) {
+            let current = img;
+            for (let i = 0; current && i < 7; i++, current = current.parentElement) {
+                let evidence = evidenceText(current, current).toLowerCase();
+                if (/(?:reacted|reaction|thả cảm xúc|bày tỏ cảm xúc)/i.test(evidence)) {
+                    return current;
+                }
+                if (current === bubble) break;
+            }
+            return null;
+        }
+
+        function reactionTargetId(control, bubbleTargetId) {
+            // A reaction control can have its own data-message-id.  That is an
+            // identity for the reaction evidence, never proof that it is the
+            // message the reaction targets.  Only dedicated target attributes
+            // may override the already-bounded target bubble ID.
+            let current = control;
+            for (let i = 0; current && i < 4; i++, current = current.parentElement) {
+                for (let attr of ['data-target-message-id', 'data-reaction-target-id', 'data-target-id']) {
+                    let value = current.getAttribute && current.getAttribute(attr);
+                    if (value) return value;
+                }
+            }
+            return bubbleTargetId || null;
+        }
+
+        function parseReaction(img, bubble, targetId) {
+            let emoji = (img.getAttribute('alt') || '').trim();
+            if (!emoji || !['❤', '❤️', '👍', '😆', '😂', '😮', '😢', '😡', 'Like', 'Love', 'Haha', 'Wow', 'Sad', 'Angry'].includes(emoji)) return null;
+            let evidence = evidenceText(img, bubble);
+            let label = evidence.match(/aria-label=([^|]+)/i);
+            let observed = label ? label[1].trim() : '';
+            let actor = 'unknown';
+            let actorRole = 'unknown';
+            let actorMatch = observed.match(/^(.+?)\s+(?:reacted|đã thả cảm xúc|đã bày tỏ cảm xúc)\b/i);
+            if (actorMatch) {
+                actor = actorMatch[1].trim();
+                if (/^(you|bạn)$/i.test(actor)) actorRole = 'Page';
+            }
+            let control = reactionControl(img, bubble);
+            let resolvedTarget = reactionTargetId(control, targetId);
+            let targetType = /(?:conversation|thread|cuộc trò chuyện)/i.test(observed)
+                ? 'thread' : (resolvedTarget ? 'message' : 'unknown');
+            let targetMessageId = targetType === 'message' ? resolvedTarget : null;
+            let parseConfidence = actor !== 'unknown' && targetType !== 'unknown' ? 'explicit'
+                : (actor !== 'unknown' || targetType !== 'unknown' ? 'partial' : 'unknown');
+            return {
+                // Canonical persistence contract.
+                // Do not reuse the target bubble's message id as a reaction
+                // id.  It is absent unless Facebook actually attaches one to
+                // the reaction control itself.
+                source_id: control ? sourceId(img, control) : null,
+                actor,
+                actor_role: actorRole,
+                emoji,
+                target_type: targetType,
+                target_message_id: targetMessageId,
+                observed_at: observedAt || null,
+                occurred_at: null,
+                raw_label: observed || evidence || null,
+                parse_confidence: parseConfidence,
+                // Aliases retain compatibility for adapters that consumed
+                // the preliminary audit vocabulary.
+                target_id: targetMessageId,
+                target_scope: targetType,
+                evidence: observed || evidence || null,
+            };
+        }
+
+        function explicitSender(node, stopAt) {
+            let evidence = evidenceText(node, stopAt);
+            // Only a first-party self label is strong enough to assert Page.
+            // Bubble alignment/colour remains available as a candidate in
+            // Python, but must not be persisted as an actor fact.
+            if (/(?:^|[=\s|])(you sent|you replied|bạn đã gửi|bạn đã trả lời)\b/i.test(evidence)) {
+                return {sender: 'Page', evidence};
+            }
+            // Customer is asserted only by a platform sender label such as
+            // "Lan sent a message".  This deliberately does not inspect the
+            // message body, colour, alignment, or a guessed profile name.
+            let customerMatch = evidence.match(
+                /(?:^|[=\s|])((?!(?:you|bạn)\b)[^|=\n]{1,160}?)\s+(?:sent\s+(?:a\s+)?message|replied(?:\s+to)?|đã\s+gửi(?:\s+(?:một\s+)?tin\s+nhắn)?|đã\s+trả\s+lời)\b/i
+            );
+            if (customerMatch) return {sender: 'Customer', evidence};
+            return {sender: null, evidence: evidence || null};
+        }
+
+        function directBodyText(container, bubble) {
+            // Parent text containers often include a nested quoted-reply
+            // subtree in innerText.  Read only direct text that is not owned
+            // by a nested text container or a quote/reply subtree.
+            let values = [];
+            let walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+            let textNode;
+            while ((textNode = walker.nextNode())) {
+                let value = (textNode.nodeValue || '').trim();
+                if (!value) continue;
+                let parent = textNode.parentElement;
+                let nestedTextContainer = null;
+                let quoted = false;
+                for (let current = parent; current && current !== container; current = current.parentElement) {
+                    if (current.classList && current.classList.contains('x1y1aw1k')) nestedTextContainer = current;
+                    if (isReplyOrQuote(current, bubble)) { quoted = true; break; }
+                }
+                if (!quoted && !nestedTextContainer) values.push(value);
+            }
+            return values.join('\n').trim();
+        }
+
+        function replyTargetId(node, stopAt) {
+            let current = node;
+            for (let i = 0; current && i < 7; i++, current = current.parentElement) {
+                let target = current.getAttribute && (
+                    current.getAttribute('data-reply-to-message-id') ||
+                    current.getAttribute('data-reply-to')
+                );
+                if (target) return target;
+                if (current === stopAt) break;
+            }
+            return null;
+        }
+
+        function quotedSender(node, stopAt) {
+            let current = node;
+            for (let i = 0; current && i < 7; i++, current = current.parentElement) {
+                let direct = current.getAttribute && (
+                    current.getAttribute('data-quoted-sender') ||
+                    current.getAttribute('data-sender-name')
+                );
+                if (direct) return {sender: direct.trim(), confidence: 'explicit'};
+                let label = current.getAttribute && current.getAttribute('aria-label');
+                if (label) {
+                    let match = label.match(/(?:quoted reply from|replying to)\s+(.+)$/i);
+                    if (match && match[1].trim()) return {sender: match[1].trim(), confidence: 'explicit'};
+                }
+                if (current === stopAt) break;
+            }
+            return {sender: 'unknown', confidence: 'unknown'};
+        }
+
         for (let el of elements) {
             if (el.classList.contains('x14vqqas')) {
                 let ts = el.innerText.trim();
-                if (isValidTimestamp(ts)) currentTimestamp = ts;
+                if (isValidTimestamp(ts)) {
+                    let parts = timestampParts(ts);
+                    if (parts.hasDate) {
+                        currentDayContext = parts.day || ts;
+                        // A new date separator starts a new group.  Do not
+                        // combine it with a clock from the previous group.
+                        if (!parts.hasTime) currentTimeLabel = "";
+                    }
+                    if (parts.hasTime) currentTimeLabel = parts.time;
+                    currentTimestampRaw = parts.hasDate && !parts.hasTime
+                        ? ts
+                        : (currentDayContext && !parts.hasDate
+                            ? currentDayContext + " | " + ts : ts);
+                }
                 continue;
             }
             if (el.classList.contains('x1fqp7bg')) {
@@ -364,15 +671,25 @@ def extract_thread_messages(page) -> list[dict]:
                     htmlStr += " HAS_BG_IMAGE_INDICATOR_XX";
                 }
 
-                let textContainers = el.querySelectorAll('.x1y1aw1k');
-                let texts = [];
-                let seenSegment = new Set();
+                let textContainers = Array.from(el.querySelectorAll('.x1y1aw1k'));
+                let bodySegments = [];
+                let quoteSegments = [];
                 if (textContainers.length > 0) {
                     for (let tc of textContainers) {
-                        let t = tc.innerText.trim();
-                        if (t && !seenSegment.has(t)) {
-                            texts.push(t);
-                            seenSegment.add(t);
+                        // A container that owns another text container has an
+                        // ambiguous innerText.  Its leaf children are emitted
+                        // independently and any direct body text is extracted
+                        // below without the nested quote subtree.
+                        let hasNestedTextContainer = textContainers.some(other => other !== tc && tc.contains(other));
+                        if (!hasNestedTextContainer) {
+                            let t = tc.innerText.trim();
+                            if (t) {
+                                if (isReplyOrQuote(tc, el)) quoteSegments.push({text: t, node: tc});
+                                else bodySegments.push({text: t, node: tc});
+                            }
+                        } else {
+                            let directText = directBodyText(tc, el);
+                            if (directText) bodySegments.push({text: directText, node: tc});
                         }
                     }
                 } else {
@@ -381,14 +698,17 @@ def extract_thread_messages(page) -> list[dict]:
                     if (spans.length > 0) {
                         for (let sp of spans) {
                             let t = sp.innerText.trim();
-                            if (t && !seenSegment.has(t)) { texts.push(t); found = true; seenSegment.add(t); }
+                            if (t) {
+                                if (isReplyOrQuote(sp, el)) quoteSegments.push({text: t, node: sp});
+                                else bodySegments.push({text: t, node: sp});
+                                found = true;
+                            }
                         }
                     }
                     if (!found) {
                         let text = el.innerText.trim();
-                        if (text && text.length > 2 && text.length < 2000 && !seenSegment.has(text)) {
-                            texts.push(text);
-                            seenSegment.add(text);
+                        if (text && text.length > 2 && text.length < 2000) {
+                            bodySegments.push({text, node: el});
                         }
                     }
                 }
@@ -402,36 +722,78 @@ def extract_thread_messages(page) -> list[dict]:
                 // Any emoji `img` that is OUTSIDE the inner `.x1y1aw1k` bound is safely categorized as a reaction icon.
                 let allImgs = el.querySelectorAll('img');
                 let textImgs = Array.from(el.querySelectorAll(':scope .x1y1aw1k img'));
+                let reactions = [];
+                let bodySourceIds = bodySegments.map(segment => sourceIdForBody(segment.node, el, bodySegments));
+                // The bubble ID is a target only when the DOM has exactly one
+                // message candidate; otherwise its scope is a cluster.
+                let bubbleSourceId = bodySegments.length === 1
+                    ? bodySourceIds[0]
+                    : null;
                 for (let img of allImgs) {
                     if (!textImgs.includes(img)) {
-                        let alt = img.getAttribute('alt');
-                        if (alt && ['❤', '❤️', '👍', '😆', '😂', '😮', '😢', '😡', 'Like', 'Love', 'Haha', 'Wow', 'Sad', 'Angry'].includes(alt)) {
-                            let type = 'LIKE';
-                            if (['❤', '❤️', 'Love'].includes(alt)) type = 'LOVE';
-                            else if (['😆', '😂', 'Haha'].includes(alt)) type = 'HAHA';
-                            else if (['😮', 'Wow'].includes(alt)) type = 'WOW';
-                            else if (['😢', 'Sad'].includes(alt)) type = 'SAD';
-                            else if (['😡', 'Angry'].includes(alt)) type = 'ANGRY';
-                            let reactionTag = ':::REACTION_' + type + ':::';
-                            texts.push(reactionTag);
-                            seenSegment.add(reactionTag);
-                        }
+                        let reaction = parseReaction(img, el, bubbleSourceId);
+                        if (reaction) reactions.push(reaction);
                     }
                 }
 
-                if (texts.length > 0) {
-                    let combinedText = texts.join('\n[Quoted Reply/Link]: ');
-                    results.push({htmlStr, bg, text: combinedText, timestamp: currentTimestamp});
+                let quoteText = quoteSegments.length ? quoteSegments.map(segment => segment.text).join('\n') : null;
+                let replyTarget = null;
+                for (let quote of quoteSegments) {
+                    let target = replyTargetId(quote.node, el);
+                    if (target) { replyTarget = target; break; }
+                }
+                let quoteEvidence = quoteSegments.length ? evidenceText(quoteSegments[0].node, el) : '';
+                let quoteSenderInfo = quoteSegments.length
+                    ? quotedSender(quoteSegments[0].node, el)
+                    : {sender: 'unknown', confidence: 'unknown'};
+                let metadata = timestampSnapshot();
+                // Each text container is an individual event candidate.  Do
+                // not concatenate it with a quote or a sibling bubble: doing
+                // so makes an attribution claim the DOM did not establish.
+                for (let segment of bodySegments) {
+                    let senderInfo = explicitSender(segment.node, el);
+                    let segmentIndex = bodySegments.indexOf(segment);
+                    results.push({
+                        htmlStr, bg, text: segment.text, body: segment.text,
+                        sender: senderInfo.sender,
+                        sender_confidence: senderInfo.sender ? 'explicit' : 'unknown',
+                        sender_evidence: senderInfo.evidence,
+                        source_id: bodySourceIds[segmentIndex],
+                        reply_to_message_id: replyTarget,
+                        quoted_sender: quoteSenderInfo.sender,
+                        quoted_sender_confidence: quoteSenderInfo.confidence,
+                        quoted_text: quoteText,
+                        quote_evidence: quoteEvidence || null,
+                        reactions,
+                        ...metadata,
+                    });
+                }
+                // A reaction can be observed without a text bubble.  Keep a
+                // structured event rather than manufacturing an emoji text.
+                if (!bodySegments.length && reactions.length) {
+                    let senderInfo = explicitSender(el, htmlContainer);
+                    results.push({
+                        htmlStr, bg, text: '', body: '', source_id: bubbleSourceId,
+                        sender: senderInfo.sender,
+                        sender_confidence: senderInfo.sender ? 'explicit' : 'unknown',
+                        sender_evidence: senderInfo.evidence,
+                        reply_to_message_id: null,
+                        quoted_sender: quoteSenderInfo.sender,
+                        quoted_sender_confidence: quoteSenderInfo.confidence,
+                        quoted_text: quoteText, quote_evidence: quoteEvidence || null,
+                        reactions, ...metadata,
+                    });
                 }
             }
         }
         return results;
-    }''')
+    }''', observed_at)
 
     final_messages = []
     for raw in raw_messages:
-        text = (raw.get("text") or "").replace('\u200b', '').strip()
-        if not text:
+        text = (raw.get("body") if raw.get("body") is not None else raw.get("text") or "").replace('\u200b', '').strip()
+        reactions = raw.get("reactions") or []
+        if not text and not reactions:
             continue
             
         low_text = text.lower()
@@ -451,12 +813,45 @@ def extract_thread_messages(page) -> list[dict]:
         if "previous\n[quoted reply/link]: close\n[quoted reply/link]: next" in low_text:
             continue
 
-        sender = detect_sender(raw["htmlStr"], raw["bg"])
-        print(f"DEBUG_COLOR_VAL text='{low_text[:20]}' bg='{raw['bg']}' sender='{sender}'", flush=True)
+        raw_sender_confidence = raw.get("sender_confidence")
+        explicit_sender = raw.get("sender") if raw_sender_confidence == "explicit" else None
+        # Sender colour/alignment is not evidence of identity.  Preserve it
+        # only as a diagnostic candidate; downstream must treat the actor as
+        # unknown unless Facebook exposed an explicit self/page signal.
+        sender_candidate = detect_sender(raw.get("htmlStr", ""), raw.get("bg", ""))
+        sender = explicit_sender or "Unknown"
+        sender_confidence = "explicit" if explicit_sender else "unknown"
+        raw_day_context = raw.get("day_context")
+        day_context = _normalise_day_context(raw_day_context)
+        time_precision = raw.get("time_precision", "unknown")
+        # A non-ISO day label is evidence, not a resolved calendar day.  Keep
+        # the label in raw_timestamp/timestamp, but make the uncertainty
+        # machine-readable for persistence and downstream formatters.
+        if raw_day_context and not day_context and time_precision == "date_time":
+            time_precision = "unresolved_day_time"
+        elif raw_day_context and not day_context and time_precision == "date_only":
+            time_precision = "unresolved_day"
+        print(f"DEBUG_COLOR_VAL text='{low_text[:20]}' bg='{raw.get('bg', '')}' sender='{sender}' confidence='{sender_confidence}' candidate='{sender_candidate}'", flush=True)
         final_messages.append({
             "sender": sender,
             "text": text,
-            "timestamp": raw["timestamp"]
+            "body": text,
+            "sender_confidence": sender_confidence,
+            "sender_candidate": sender_candidate,
+            "sender_evidence": raw.get("sender_evidence"),
+            "source_id": raw.get("source_id"),
+            "timestamp": raw.get("timestamp", ""),
+            "raw_timestamp": raw.get("raw_timestamp") or raw.get("timestamp", ""),
+            "day_context": day_context,
+            "time_precision": time_precision,
+            "reply_to_message_id": raw.get("reply_to_message_id"),
+            "quoted_sender": raw.get("quoted_sender") or "unknown",
+            "quoted_sender_confidence": raw.get("quoted_sender_confidence") or (
+                "explicit" if raw.get("quoted_sender") else "unknown"
+            ),
+            "quoted_text": raw.get("quoted_text"),
+            "quote_evidence": raw.get("quote_evidence"),
+            "reactions": reactions,
         })
 
     return final_messages

@@ -43,7 +43,7 @@ All Python tools strictly run in an isolated environment.
 
 To prevent accidentally leaking sensitive keys to Git, the system utilizes an encode/decode workflow for `.env`.
 
-- **Target Credentials**: `OPENAI_COMPATIBLE_URL`, `OPENAI_COMPATIBLE_KEY`, `OPENAI_COMPATIBLE_MODELS`, `GOOGLE_SHEET_CREDENTIALS`, `FACEBOOK_FANPAGE_APP_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+- **Target Credentials**: `GOOGLE_API_KEY`, `GEMINI_MODEL`, `OPENAI_COMPATIBLE_URL`, `OPENAI_COMPATIBLE_KEY`, `OPENAI_COMPATIBLE_MODELS`, `GOOGLE_SHEET_CREDENTIALS`, `FACEBOOK_FANPAGE_APP_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 - **Guardrail Script**: Scripts use `tools/env_manager.py` to securely load these values.
 - **Workflow**: Credentials are obfuscated via Base64 encoding into the `.env` file using the `save_credentials()` function and loaded seamlessly into `os.environ` via `load_credentials()` during script execution. Never commit raw `.env` files.
 
@@ -94,22 +94,22 @@ Universal IDs must be explicitly embedded within the entities they represent:
 
 ## 8. Google ADK Testing
 
-The `adk_agents/` package uses Google ADK 1.27+ with LiteLLM for OpenAI-compatible LLM routing.
+The `adk_agents/` package uses Google ADK with native Gemini routing. Legacy LiteLLM/OpenAI-compatible routing remains available as a fallback.
 
 ### Prerequisites
 
 - `google-adk` and `litellm` must be installed in `.venv`
-- LLM credentials must be decoded from Base64 and set as env vars:
+- Gemini credentials must be decoded from Base64 and set as env vars:
   ```bash
-  export OPENAI_API_BASE=$(echo "aHR0cHM6Ly9hcGlrZXkuY2xpY2svdjE=" | base64 -d)
-  export OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base64 -d)
+  export GOOGLE_API_KEY=$(echo "<base64-encoded-Google-key>" | base64 -d)
+  export ADK_MODEL=gemini-3.8-flash
   ```
 
 ### Interactive Testing (ADK Web UI)
 
 ```bash
-OPENAI_API_BASE=$(echo "aHR0cHM6Ly9hcGlrZXkuY2xpY2svdjE=" | base64 -d) \
-OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base64 -d) \
+GOOGLE_API_KEY=$(echo "<base64-encoded-Google-key>" | base64 -d) \
+ADK_MODEL=gemini-3.8-flash \
 .venv/bin/adk web .
 ```
 
@@ -120,8 +120,8 @@ OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base6
 ### Automated E2E Tests (pytest)
 
 ```bash
-OPENAI_API_BASE=$(echo "aHR0cHM6Ly9hcGlrZXkuY2xpY2svdjE=" | base64 -d) \
-OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base64 -d) \
+GOOGLE_API_KEY=$(echo "<base64-encoded-Google-key>" | base64 -d) \
+ADK_MODEL=gemini-3.8-flash \
 .venv/bin/python -m pytest tests/test_adk_e2e.py -v
 ```
 
@@ -132,8 +132,8 @@ OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base6
 ### ADK Eval (Rubric-Based LLM-as-Judge)
 
 ```bash
-OPENAI_API_BASE=$(echo "aHR0cHM6Ly9hcGlrZXkuY2xpY2svdjE=" | base64 -d) \
-OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base64 -d) \
+GOOGLE_API_KEY=$(echo "<base64-encoded-Google-key>" | base64 -d) \
+ADK_MODEL=gemini-3.8-flash \
 .venv/bin/adk eval adk_agents/ adk_agents/inbox_mas.evalset.json --print_detailed_results
 ```
 
@@ -143,7 +143,7 @@ OPENAI_API_KEY=$(echo "c2stRS1vMEYyWHFEMnJSd3JNdk80dl9zM09lcnZqWXUxS0I=" | base6
 ### ADK Agent Instruction Tips
 
 - Use `{var_name?}` (with `?` suffix) for optional template variables in agent instructions — they resolve to empty string if not in session state, preventing `KeyError` crashes during interactive testing.
-- The model is configured via `ADK_MODEL` env var, defaulting to `openai/gpt-5.4`.
+- The model is configured via `ADK_MODEL` env var, defaulting to `gemini-3.8-flash`.
 
 ## 9. QR Code Generation (Zalo Group Links)
 
@@ -214,3 +214,10 @@ These rules are **absolute** and must never be violated:
 
 - Any modifications to the inbox extraction, normalization, persistence, or MAS runner orchestrator must pass the strict Layer Validation Gates (`doc:architecture-validation-001`).
 - All validation tests enforcing these gates must carry the universal ID tag `# code:test-validation-001:<layer-name>`.
+
+### 10.6 InboxOrchestrator — Loop Budget and Escalation (code:agent-mas-002)
+
+- `adk_agents.agent.root_agent` is `InboxOrchestrator`, an `LlmAgent` that drives ConversationAnalyst → KnowledgeLibrarian → ReplyComposer → ReplyQAReviewer as tool calls in a loop, re-running specialists until QA passes or escalates.
+- The loop is capped at **30** specialist calls, enforced in Python by `_orchestrator_loop_guard` (`before_tool_callback` on the orchestrator) — never trust the model to count its own tool calls; once the budget is spent, further loop calls are short-circuited and the orchestrator is forced to emit `[ESCALATE: non_convergence] ...`.
+- The orchestrator may correct a seeker's `city`/`program_code`/`thread_name` mid-loop via `propose_seeker_update` (`adk_agents/tools/l5_orchestrator_tools.py`). A confidence ≥ 0.75 proposal is applied immediately (`users.city_source`/`program_code_source` becomes `'mas'`); below that it is only recorded in `seeker_field_changes` for a human to review. **A field already marked `source='human'` may only be changed again by another human correction** — MAS must never silently overwrite an operator-confirmed value.
+- `ReplyQAReviewer` returns `ESCALATE: <reason_code>: <note>` (not `REPAIR`) when a rewrite cannot fix the problem — see `memory/mas_strategy.md` §10.5 for the full reason-code taxonomy (`knowledge_gap`, `contradiction`, `sensitive`, `adversarial`, `policy_uncertain`, `identity_change_low_conf`, `non_convergence`). An escalated thread is never silently dropped as a bare `no_reply`: it is logged to `mas_decisions` (route `inbox_escalation`) and queued to Telegram as a distinct card (`telegram_hitl_queue.escalation_reason`/`escalation_note`) for a human to read and answer directly — there is no reply for an operator to approve-and-send.

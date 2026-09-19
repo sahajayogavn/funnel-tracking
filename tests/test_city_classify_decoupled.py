@@ -5,6 +5,8 @@
 import os
 import sqlite3
 import sys
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -28,8 +30,8 @@ def _db():
 def _seed(conn, tid, name, last_interaction, verified_at=None, text="em ở Hà Nội"):
     conn.execute("INSERT INTO threads (id, page_id, thread_name) VALUES (?, ?, ?)", (tid, PAGE, name))
     conn.execute(
-        "INSERT INTO users (thread_id, thread_name, city, last_interaction, classification_verified_at) VALUES (?, ?, 'Unknown', ?, ?)",
-        (tid, name, last_interaction, verified_at),
+        "INSERT INTO users (thread_id, thread_name, city, last_interaction, classification_verified_at, contact_extracted_at) VALUES (?, ?, 'Unknown', ?, ?, ?)",
+        (tid, name, last_interaction, verified_at, verified_at),
     )
     conn.execute("INSERT INTO messages (thread_id, sender, content, seq) VALUES (?, 'Customer', ?, 0)", (tid, text))
     conn.commit()
@@ -49,23 +51,19 @@ class TestStalePredicate(unittest.TestCase):
         _seed(conn, "t_fresh", "C", "2026-09-15 10:00:00", "2026-09-16 09:00:00")
         sent = []
 
-        def fake_detect(batch_payload, **_k):
-            sent.append(batch_payload)
-            return [{"thread_name": "A", "city": "Hà Nội", "program_code": None, "confidence": "high"}]
-
-        def fake_verify(batch_payload, proposed_results, **_k):
-            return [dict(r, verified=True, proof="Signal 1: em ở Hà Nội") for r in proposed_results]
+        def fake_detect(**kwargs):
+            sent.append(kwargs)
+            return {"city": "Hà Nội", "program_code": None, "confidence": "high", "proof": "em ở Hà Nội"}
 
         with patch.object(classify, "_get_llm_config_safe", return_value={"api_base": "x", "api_key": "y", "model": "m"}), \
-             patch.object(classify, "detect_city_batch_llm", side_effect=fake_detect), \
-             patch.object(classify, "verify_city_program_batch_llm", side_effect=fake_verify):
+             patch.object(classify, "detect_city_llm", side_effect=fake_detect):
             result = classify._post_scrape_llm_city_classify(conn, PAGE, only_stale=True)
 
         self.assertEqual(result["total"], 1)
         self.assertEqual(result["updated"], 1)
         self.assertEqual(len(sent), 1)
-        self.assertIn("Seeker: A", sent[0])
-        self.assertNotIn("Seeker: C", sent[0])
+        self.assertEqual(sent[0]["thread_name"], "A")
+        self.assertEqual(sent[0]["subject_id"], "t_never")
         row = conn.execute("SELECT city, classification_verified_at FROM users WHERE thread_id='t_never'").fetchone()
         self.assertEqual(row["city"], "Hà Nội")
         self.assertIsNotNone(row["classification_verified_at"])
@@ -77,10 +75,113 @@ class TestStalePredicate(unittest.TestCase):
         for i in range(3):
             _seed(conn, f"t{i}", f"N{i}", f"2026-09-1{i} 10:00:00", None)
         with patch.object(classify, "_get_llm_config_safe", return_value={"api_base": "x", "api_key": "y", "model": "m"}), \
-             patch.object(classify, "detect_city_batch_llm", return_value=[]), \
-             patch.object(classify, "verify_city_program_batch_llm", return_value=[]):
+             patch.object(classify, "detect_city_llm", return_value={"city": "Unknown", "program_code": None, "proof": "", "confidence": "low"}):
             result = classify._post_scrape_llm_city_classify(conn, PAGE, only_stale=True, max_users=2)
         self.assertEqual(result["total"], 2)
+
+    def test_missing_real_name_pass_targets_only_empty_real_name(self):
+        conn = _db()
+        _seed(conn, "t_missing", "Missing Name", "2026-09-10 10:00:00", "2026-09-11 10:00:00")
+        _seed(conn, "t_known", "Known Name", "2026-09-10 10:00:00", "2026-09-11 10:00:00")
+        conn.execute("UPDATE users SET real_name=? WHERE thread_id='t_known'", ("Nguyễn An",))
+        conn.commit()
+        sent = []
+
+        def fake_detect(**kwargs):
+            sent.append(kwargs["thread_name"])
+            return {"city": "Hà Nội", "program_code": None, "full_name": None,
+                    "phone": None, "confidence": "high", "proof": "em ở Hà Nội"}
+
+        with patch.object(classify, "_get_llm_config_safe", return_value={"provider": "google", "api_key": "k", "model": "m"}), \
+             patch.object(classify, "detect_city_llm", side_effect=fake_detect):
+            result = classify._post_scrape_llm_city_classify(conn, PAGE, only_missing_real_name=True)
+
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(sent, ["Missing Name"])
+
+    def test_workers_limits_concurrent_llm_requests(self):
+        conn = _db()
+        for i in range(3):
+            _seed(conn, f"t{i}", f"N{i}", f"2026-09-1{i} 10:00:00", None)
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def fake_detect(**kwargs):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return {"city": "Unknown", "program_code": None, "proof": "", "confidence": "low"}
+
+        with patch.object(classify, "_get_llm_config_safe", return_value={"api_base": "x", "api_key": "y", "model": "m"}), \
+             patch.object(classify, "detect_city_llm", side_effect=fake_detect):
+            result = classify._post_scrape_llm_city_classify(conn, PAGE, only_stale=True, workers=2)
+
+        self.assertEqual(result["updated"], 3)
+        self.assertEqual(peak, 2)
+
+    def test_llm_contact_data_preserves_facebook_name_and_stores_real_name(self):
+        conn = _db()
+        _seed(conn, "t_contact", "Thuy Bui", "2026-09-10 10:00:00", None,
+              text="Bùi thị Thúy, SĐT: o904069868")
+        detected = {
+            "city": "Hà Nội", "program_code": None,
+            "full_name": "Bùi Thị Thúy", "phone": "0904069868",
+            "confidence": "high", "proof": "Bùi thị Thúy, SĐT: o904069868",
+        }
+        with patch.object(classify, "_get_llm_config_safe", return_value={"api_base": "x", "api_key": "y", "model": "m"}), \
+             patch.object(classify, "detect_city_llm", return_value=detected):
+            classify._post_scrape_llm_city_classify(conn, PAGE, only_stale=True)
+
+        user = conn.execute("SELECT thread_name, real_name, phone FROM users WHERE thread_id='t_contact'").fetchone()
+        thread = conn.execute("SELECT thread_name FROM threads WHERE id='t_contact'").fetchone()
+        self.assertEqual(user["thread_name"], "Thuy Bui")
+        self.assertEqual(user["real_name"], "Bùi Thị Thúy")
+        self.assertEqual(user["phone"], "0904069868")
+        self.assertEqual(thread["thread_name"], "Thuy Bui")
+
+    def test_api_error_remains_stale_and_does_not_overwrite_existing_profile(self):
+        conn = _db()
+        _seed(conn, "t_retry", "Known Seeker", "2026-09-10 10:00:00", "2026-09-11 10:00:00")
+        conn.execute(
+            "UPDATE users SET city=?, program_code=?, real_name=?, phone=?, classification_proof=? WHERE thread_id=?",
+            ("Hà Nội", "14h30-CN-Vương Thừa Vũ-HN", "Nguyễn An", "0904000000",
+             "API error: 401 Unauthorized", "t_retry"),
+        )
+        conn.commit()
+        self.assertEqual(classify.count_stale_users(conn, PAGE), 1)
+
+        failed = {
+            "city": "Unknown", "program_code": None, "full_name": None, "phone": None,
+            "confidence": "low", "reasoning": "API error: 401 Unauthorized",
+        }
+        with patch.object(classify, "_get_llm_config_safe", return_value={"provider": "google", "api_key": "k", "model": "m"}), \
+             patch.object(classify, "detect_city_llm", return_value=failed):
+            result = classify._post_scrape_llm_city_classify(conn, PAGE, only_stale=True)
+
+        self.assertEqual(result["updated"], 0)
+        self.assertEqual(result["errors"], 1)
+        row = conn.execute(
+            "SELECT city, program_code, real_name, phone, classification_proof FROM users WHERE thread_id='t_retry'"
+        ).fetchone()
+        self.assertEqual((row["city"], row["program_code"], row["real_name"], row["phone"]),
+                         ("Hà Nội", "14h30-CN-Vương Thừa Vũ-HN", "Nguyễn An", "0904000000"))
+        self.assertTrue(row["classification_proof"].startswith("RETRYABLE_LLM_FAILURE:"))
+        self.assertEqual(classify.count_stale_users(conn, PAGE), 1)
+
+    def test_historical_free_text_fallback_is_retried_for_missing_program_and_contact(self):
+        conn = _db()
+        _seed(conn, "t_partial", "Partial JSON", "2026-09-10 10:00:00", "2026-09-11 10:00:00")
+        conn.execute(
+            "UPDATE users SET city=?, classification_proof=? WHERE thread_id=?",
+            ("Hà Nội", "Extracted from free-text response", "t_partial"),
+        )
+        conn.commit()
+        self.assertEqual(classify.count_stale_users(conn, PAGE), 1)
 
 
 class TestFetchDoesNotClassifyUnderLock(unittest.TestCase):

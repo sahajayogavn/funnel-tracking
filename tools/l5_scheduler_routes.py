@@ -31,6 +31,9 @@ logger = logging.getLogger("scheduler_routes")
 
 def run_fetch_cycle(page_id: str, dry_run: bool = True):
     """Fetch new inbox messages and comments from Facebook via CDP."""
+    if dry_run:
+        logger.info("[FETCH] [DRY-RUN] Skipping CDP fetch; dry-run must not contact Facebook.")
+        return {"status": "skipped", "reason": "dry_run_no_fetch"}
     # code:inbox-activity-lock-001:scheduler-fetch
     with scheduler_browser_cycle("[FETCH]", page_id, logger) as may_run:
         if not may_run:
@@ -60,16 +63,17 @@ def run_react_cycle(page_id: str, dry_run: bool = True):
 
         processed = 0
         for item in unreacted["items"]:
-            reaction_type = run_adk_reactor(item, dry_run=True) or _select_reaction_heuristic(item)
-            from tools.l5_action_queue import enqueue_action
-            # Reactions share the queue for their source so the UI retains only
-            # the four requested decision groups.
-            queue_type = "reply_comment" if item["item_type"] == "comment" else "reply_message"
-            enqueue_action(
-                queue_type=queue_type, page_id=page_id, target_type=item["item_type"],
-                target_id=item["item_id"], target_name=item.get("thread_name"),
-                reaction_type=reaction_type, payload={"source": "reactor"},
-            )
+            reaction_type = run_adk_reactor(item, dry_run=True, page_id=page_id) or _select_reaction_heuristic(item)
+            if not dry_run:
+                from tools.l5_action_queue import enqueue_action
+                # Reactions share the queue for their source so the UI retains
+                # only the four requested decision groups.
+                queue_type = "reply_comment" if item["item_type"] == "comment" else "reply_message"
+                enqueue_action(
+                    queue_type=queue_type, page_id=page_id, target_type=item["item_type"],
+                    target_id=item["item_id"], target_name=item.get("thread_name"),
+                    reaction_type=reaction_type, payload={"source": "reactor"},
+                )
             processed += 1
             logger.info(
                 f"[REACT] {'[DRY-RUN]' if dry_run else '[SENT]'} "
@@ -134,16 +138,17 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
     logger.info(f"[WARMUP] {'[DRY-RUN]' if dry_run else '[LIVE]'} Starting warmup cycle...")
     try:
         from tools.l5_fetch_fb_messages import fetch_messages
-        logger.info(f"[WARMUP] Executing JIT Pre-Flight Cache validation for page {page_id}...")
-        try:
-            fetch_result = fetch_messages(page_id, credential_id="env", time_range="3d", force_refresh=False, use_cdp=True)
-            if fetch_result.get("method") == "dynamic_cache_hit":
-                logger.info("[WARMUP] JIT Cache perfect. Proceeding to MAS.")
-            else:
-                new_msgs = fetch_result.get("data", {}).get("stats", {}).get("new_messages", 0)
-                logger.info(f"[WARMUP] JIT Synchronized {new_msgs} new messages.")
-        except Exception as e:
-            logger.warning(f"[WARMUP] JIT Validation failed (continuing with DB state): {e}")
+        if not dry_run:
+            logger.info(f"[WARMUP] Executing JIT Pre-Flight Cache validation for page {page_id}...")
+            try:
+                fetch_result = fetch_messages(page_id, credential_id="env", time_range="3d", force_refresh=False, use_cdp=True)
+                if fetch_result.get("method") == "dynamic_cache_hit":
+                    logger.info("[WARMUP] JIT Cache perfect. Proceeding to MAS.")
+                else:
+                    new_msgs = fetch_result.get("data", {}).get("stats", {}).get("new_messages", 0)
+                    logger.info(f"[WARMUP] JIT Synchronized {new_msgs} new messages.")
+            except Exception as e:
+                logger.warning(f"[WARMUP] JIT Validation failed (continuing with DB state): {e}")
 
         from adk_agents.tools.l5_warmup_tools import (
             find_dormant_seekers, was_recently_warmed_up,
@@ -224,7 +229,8 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
                         dry_run=dry_run,
                         payload={**payload, "temperature": next_temperature, "cool_step": 0},
                     )
-                    _update_user_decision_state(thread_id, next_temperature, warmup_sent=False, cool_step=0)
+                    if not dry_run:
+                        _update_user_decision_state(thread_id, next_temperature, warmup_sent=False, cool_step=0)
                     skipped += 1
                     continue
 
@@ -248,6 +254,7 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
                     strategy,
                     knowledge_context,
                     dry_run=True,
+                    page_id=page_id,
                 ) or strategy.get("template", "")
             else:
                 if was_recently_warmed_up(thread_id, days=7):
@@ -270,6 +277,7 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
                     strategy,
                     knowledge_context,
                     dry_run=True,
+                    page_id=page_id,
                 ) or strategy.get("template", "")
 
             if message_text:
@@ -297,7 +305,7 @@ def run_warmup_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 5):
                 })
                 processed += 1
 
-        if proposals:
+        if proposals and not dry_run:
             from tools.l5_telegram_hitl import send_proposal_to_telegram
             logger.info(f"[WARMUP] Proposing {len(proposals)} individual messages to Telegram HITL.")
             for p in proposals:
@@ -326,16 +334,17 @@ def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
     logger.info(f"[EVENT] {'[DRY-RUN]' if dry_run else '[LIVE]'} Starting event cycle...")
     try:
         from tools.l5_fetch_fb_messages import fetch_messages
-        logger.info(f"[EVENT] Executing JIT Pre-Flight Cache validation for page {page_id}...")
-        try:
-            fetch_result = fetch_messages(page_id, credential_id="env", time_range="3d", force_refresh=False, use_cdp=True)
-            if fetch_result.get("method") == "dynamic_cache_hit":
-                logger.info("[EVENT] JIT Cache perfect. Proceeding to MAS.")
-            else:
-                new_msgs = fetch_result.get("data", {}).get("stats", {}).get("new_messages", 0)
-                logger.info(f"[EVENT] JIT Synchronized {new_msgs} new messages.")
-        except Exception as e:
-            logger.warning(f"[EVENT] JIT Validation failed (continuing with DB state): {e}")
+        if not dry_run:
+            logger.info(f"[EVENT] Executing JIT Pre-Flight Cache validation for page {page_id}...")
+            try:
+                fetch_result = fetch_messages(page_id, credential_id="env", time_range="3d", force_refresh=False, use_cdp=True)
+                if fetch_result.get("method") == "dynamic_cache_hit":
+                    logger.info("[EVENT] JIT Cache perfect. Proceeding to MAS.")
+                else:
+                    new_msgs = fetch_result.get("data", {}).get("stats", {}).get("new_messages", 0)
+                    logger.info(f"[EVENT] JIT Synchronized {new_msgs} new messages.")
+            except Exception as e:
+                logger.warning(f"[EVENT] JIT Validation failed (continuing with DB state): {e}")
 
         from adk_agents.tools.l5_event_tools import (
             get_upcoming_events, find_target_seekers_for_event,
@@ -407,6 +416,7 @@ def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
                     seeker,
                     knowledge_context,
                     dry_run=True,
+                    page_id=page_id,
                 ) or fallback_message_text
                 if message_text:
                     log_mas_decision(
@@ -431,7 +441,7 @@ def run_event_cycle(page_id: str, dry_run: bool = True, max_seekers: int = 10):
                     })
                     total_sent += 1
 
-        if proposals:
+        if proposals and not dry_run:
             from tools.l5_telegram_hitl import send_proposal_to_telegram
             summary = f"Event proposal for {len(proposals)} seekers:\\n"
             for i, p in enumerate(proposals[:5], 1):

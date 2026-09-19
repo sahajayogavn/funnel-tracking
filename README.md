@@ -32,6 +32,47 @@ Initialized according to Agile XP methodology for AI Agents. All core guidelines
 | `logs/`                | Iteration handover reports and execution logs                                           |
 | `docs/`                | Architecture documentation (`ARCHITECTURE.md`)                                          |
 
+## 🕰 Time-Aware Seeker Care (`prd:mas-time-aware-001`)
+
+The inbox MAS runs a pure-Python **conversation gate** before any LLM call
+(`fb_pipeline/contracts/l1_conversation_state.py`): system banners and reactions
+are excluded (`messages.kind`), every message has an absolute `message_at`, and
+threads that a human already closed, thank-you closers, or turns older than 7 days
+never produce a reply draft. The model receives `now_context`, timestamped lines,
+city-scoped knowledge (~4K chars instead of ~49K) and may answer `[NO_REPLY: …]`.
+
+Proactive care runs as the scheduler route `care` (notifications first, drafts only
+after a human opens a session):
+
+```bash
+# Daily bundle at 08:30 (morning brief, attendance checklist, class-reminder digest),
+# session/attendance pollers every 2 min, registration-SLA alert every 30 min.
+.venv/bin/python tools/l5_scheduler.py --page-id 1548373332058326 --routes care --care-time 08:30 --live
+
+# One dry-run pass
+.venv/bin/python tools/l5_scheduler.py --page-id 1548373332058326 --routes care --run-once
+```
+
+New `/queues` tabs: **5. Phiên nhắc lịch lớp** (`session_proposal`, approve = open the
+session) and **6. Điểm danh** (`attendance_check`, approve = attended, reject = absent).
+`tools/run_inbox_mas_loop.sh pipeline` now skips the MAS step when the fetch stored no new
+messages (`FUNNEL_MAS_ALWAYS=1` restores unconditional runs).
+
+## ✅ Human-approved action executor (HITL)
+
+HITL delivery is a separate process: it only polls approvals and executes
+already-approved outbound actions. It does not run fetch, classification, or MAS.
+
+```bash
+# Preview approved actions only; never opens Facebook or changes queue state.
+FUNNEL_PAGE_ID=1548373332058326 ./tools/run_hitl_execution_loop.sh dry-run
+
+# Execute approved outbound actions every 30 seconds through the CDP browser.
+FUNNEL_PAGE_ID=1548373332058326 ./tools/run_hitl_execution_loop.sh live
+```
+
+Set `FUNNEL_HITL_INTERVAL_SECONDS` to change the polling interval.
+
 ## 🔧 Facebook Message Fetcher (`tools/fetch_fb_messages.py`)
 
 A Playwright-based CLI tool that fetches messages from Facebook Business Inbox.

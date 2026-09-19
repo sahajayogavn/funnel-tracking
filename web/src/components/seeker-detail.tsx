@@ -5,6 +5,7 @@ import type { SeekerDetail } from '@/lib/types';
 import { sortFacebookMessages } from '@/lib/funnel-filters';
 import { SevenStarProgress } from './seven-star-progress';
 import { SeekerJourneyTimeline } from './seeker-journey-timeline';
+import { MessengerMessageList } from './messenger-message-list';
 
 const PAGE_ID = '1548373332058326';
 
@@ -33,7 +34,7 @@ function fbPostUrl(postUrl: string) {
 }
 
 export function SeekerDetailView({ detail }: Props) {
-  const { seeker, messages, comments, adSource } = detail;
+  const { seeker, messages, comments, adSource, reactionEvents } = detail;
   const chronologicalMessages = sortFacebookMessages(
     messages.filter(message => !message.content?.includes('[AD SOURCE]'))
   );
@@ -170,97 +171,39 @@ export function SeekerDetailView({ detail }: Props) {
               </a>
             )}
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '600px', overflowY: 'auto' }}>
-            {chronologicalMessages.map((msg, i) => {
-              const isPage = msg.sender === 'Page' || msg.sender === 'Auto_Page';
-
-              // ── Date separator logic ──
-              // Parse date from messageTimestamp (formats: "Feb 27, 2026, 6:53 PM", "3/29/25, 9:50 PM", "Jan 22, 2026, 11:36 AM")
-              let msgDate: string | null = null;
-              const ts = msg.messageTimestamp || '';
-              // Match "Mon DD, YYYY" (e.g., "Feb 27, 2026, 6:53 PM" or "Jan 22, 2026, 11:36 AM")
-              const longMatch = ts.match(/([A-Z][a-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
-              // Match "M/D/YY" (e.g., "3/29/25, 9:50 PM")
-              const shortMatch = ts.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
-              if (longMatch) {
-                const months: Record<string, string> = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' };
-                const mm = months[longMatch[1]] || '01';
-                const dd = longMatch[2].padStart(2, '0');
-                msgDate = `${longMatch[3]}.${mm}.${dd}`;
-              } else if (shortMatch) {
-                const yr = shortMatch[3].length === 2 ? `20${shortMatch[3]}` : shortMatch[3];
-                const mm = shortMatch[1].padStart(2, '0');
-                const dd = shortMatch[2].padStart(2, '0');
-                msgDate = `${yr}.${mm}.${dd}`;
-              }
-
-              // Find the previous non-ad message to compare dates
-              let prevDate: string | null = null;
-              for (let j = i - 1; j >= 0; j--) {
-                if (messages[j].content?.includes('[AD SOURCE]')) continue;
-                const pts = messages[j].messageTimestamp || '';
-                const pLong = pts.match(/([A-Z][a-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
-                const pShort = pts.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
-                if (pLong) {
-                  const months: Record<string, string> = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' };
-                  prevDate = `${pLong[3]}.${months[pLong[1]] || '01'}.${pLong[2].padStart(2, '0')}`;
-                } else if (pShort) {
-                  const yr = pShort[3].length === 2 ? `20${pShort[3]}` : pShort[3];
-                  prevDate = `${yr}.${pShort[1].padStart(2, '0')}.${pShort[2].padStart(2, '0')}`;
-                }
-                break;
-              }
-
-              const showDateSep = msgDate && msgDate !== prevDate;
-
-              return (
-                <div key={i}>
-                  {/* Date separator */}
-                  {showDateSep && (
-                    <div style={{
-                      display: 'flex', alignItems: 'center', gap: '12px',
-                      margin: '12px 0 8px',
-                    }}>
-                      <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.08)' }} />
-                      <div style={{
-                        fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)',
-                        padding: '3px 12px', borderRadius: '10px',
-                        background: 'rgba(255,255,255,0.05)',
-                        letterSpacing: '0.05em', whiteSpace: 'nowrap',
-                      }}>
-                        {msgDate}
-                      </div>
-                      <div style={{ flex: 1, height: '1px', background: 'rgba(255,255,255,0.08)' }} />
-                    </div>
-                  )}
-                  {/* Message bubble */}
-                  <div style={{
-                    display: 'flex',
-                    justifyContent: isPage ? 'flex-end' : 'flex-start',
-                  }}>
-                    <div style={{
-                      maxWidth: '75%',
-                      padding: '10px 14px',
-                      borderRadius: isPage ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
-                      background: isPage ? 'rgba(99, 102, 241, 0.15)' : 'rgba(255, 255, 255, 0.06)',
-                      border: isPage ? 'none' : '1px solid rgba(255, 255, 255, 0.08)',
-                    }}>
-                      <div style={{ fontSize: '10px', fontWeight: 700, color: isPage ? '#818cf8' : '#f59e0b', marginBottom: '4px' }}>
-                        {msg.sender === 'Auto_Page' ? '@Auto_Page' : (isPage ? 'Page' : seeker.name)}
-                      </div>
-                      <div style={{ fontSize: '13px', color: 'var(--text-primary)', lineHeight: 1.5, wordBreak: 'break-word' }}>
-                        {msg.content || '(empty)'}
-                      </div>
-                      <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', textAlign: isPage ? 'right' : 'left' }}>
-                        {msg.messageTimestamp || ''}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          <MessengerMessageList
+            maxHeight={600}
+            messages={chronologicalMessages.map(message => ({
+              id: message.id,
+              sender: message.sender === 'Auto_Page' ? '@Auto_Page' : (message.sender === 'Page' ? 'Page' : (message.sender === 'Customer' ? seeker.name : (message.sender || 'Unknown'))),
+              content: message.content,
+              timestamp: message.messageTimestamp,
+              eventAt: message.messageAt,
+              quotedSender: message.quotedSender,
+              quotedText: message.quotedText,
+              replyToMessageId: message.replyToMessageId,
+              reactions: message.reactions,
+              outgoing: message.sender === 'Page' || message.sender === 'Auto_Page',
+            }))}
+          />
         </div>
+      )}
+
+      {reactionEvents.length > 0 && (
+        <section className="card" aria-label="Reaction evidence" style={{ padding: '16px 20px' }}>
+          <div style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '8px' }}>
+            Reaction evidence
+          </div>
+          <div style={{ display: 'grid', gap: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
+            {reactionEvents.map((event) => (
+              <div key={event.id}>
+                <strong style={{ color: 'var(--text-primary)' }}>{event.emoji || '•'}</strong>{' '}
+                actor: {event.actor || 'unknown'}; scope: {event.targetScope || event.targetType || 'unknown'};
+                target: {event.targetMessageId || 'unknown'}; observed: {event.observedAt || 'unknown'}
+              </div>
+            ))}
+          </div>
+        </section>
       )}
 
       {/* ── Comments Section ── */}

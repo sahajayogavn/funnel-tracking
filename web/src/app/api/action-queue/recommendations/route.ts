@@ -76,10 +76,14 @@ function formatJob(row: Record<string, unknown>): RecommendationJob {
 // The script only enqueues pending proposals; it never opens a browser or sends messages.
 // With `regenerate` (queue-card "Chạy đề xuất MAS" on already-queued items) the
 // script replaces the seeker's current pending/approved draft instead of skipping it.
-function runMasEngine(opts: { type: string; threadIds: string[]; city?: string; regenerate?: boolean; jobId?: number }): Promise<MasResult> {
+function runMasEngine(opts: { type: string; threadIds: string[]; city?: string; programCode?: string; eventId?: string; instruction?: string; carePurpose?: string; regenerate?: boolean; jobId?: number }): Promise<MasResult> {
   const args = [MAS_SCRIPT, '--thread-ids', opts.threadIds.join(','), '--type', opts.type, '--page-id', DEFAULT_PAGE_ID];
   if (opts.jobId) args.push('--job-id', String(opts.jobId));
   if (opts.city && opts.city !== 'all') args.push('--city', opts.city);
+  if (opts.programCode && opts.programCode !== 'all') args.push('--program-code', opts.programCode);
+  if (opts.eventId) args.push('--event-id', opts.eventId);
+  if (opts.instruction?.trim()) args.push('--instruction', opts.instruction.trim());
+  if (opts.carePurpose) args.push('--purpose', opts.carePurpose);
   if (opts.regenerate) args.push('--regenerate');
   return new Promise(resolve => {
     execFile(
@@ -430,15 +434,15 @@ async function runRecommendationJob(jobId: number) {
 
   const row = db.prepare('SELECT request_json FROM mas_recommendation_jobs WHERE id = ?').get(jobId) as { request_json: string } | undefined;
   if (!row) return;
-  const request = JSON.parse(row.request_json) as { type: string; threadId?: string; threadIds: string[]; seekerName?: string; city?: string; limit: number; regenerate?: boolean };
+  const request = JSON.parse(row.request_json) as { type: string; threadId?: string; threadIds: string[]; seekerName?: string; city?: string; programCode?: string; eventId?: string; instruction?: string; carePurpose?: string; limit: number; regenerate?: boolean };
   const setPhase = (phase: string) => db.prepare("UPDATE mas_recommendation_jobs SET phase = ?, updated_at = datetime('now') WHERE id = ?").run(phase, jobId);
 
   try {
     const selectedOnly = request.threadIds.length > 0;
     let result: Record<string, unknown>;
-    if (selectedOnly && ['all', 'reply', 'warmup', 'event'].includes(request.type)) {
+    if (selectedOnly && ['all', 'reply', 'warmup', 'event', 'care'].includes(request.type)) {
       setPhase('waiting_for_llm');
-      const mas = await runMasEngine({ type: request.type, threadIds: request.threadIds, city: request.city, regenerate: request.regenerate, jobId });
+      const mas = await runMasEngine({ type: request.type, threadIds: request.threadIds, city: request.city, programCode: request.programCode, eventId: request.eventId, instruction: request.instruction, carePurpose: request.carePurpose, regenerate: request.regenerate, jobId });
       if (mas.status === 'ok') {
         setPhase('saving_recommendations');
         const proposals = mas.proposals || [];
@@ -451,7 +455,7 @@ async function runRecommendationJob(jobId: number) {
           message: `MAS đã tạo ${proposals.length} đề xuất mới vào hàng đợi chờ duyệt (status: pending).${supersededNote}${skippedNote}`,
           llmTraceUrl: `/llm?trace=${jobId}`,
         };
-      } else {
+      } else if (!['all', 'warmup', 'event', 'care'].includes(request.type)) {
         setPhase('creating_safe_fallback');
         const fallbackResult = runTemplateEngine(db, { type: request.type, threadId: request.threadId, targetThreadIds: request.threadIds, selectedOnly, seekerName: request.seekerName, city: request.city, limit: request.limit });
         const fallback = fallbackResult.created;
@@ -469,8 +473,13 @@ async function runRecommendationJob(jobId: number) {
           skipped: fallbackSkipped,
           message: `Đã tạo ${fallback.length} đề xuất an toàn bằng template vào hàng đợi chờ duyệt.${skippedNote}`,
         };
+      } else {
+        throw new Error(mas.error || 'MAS không thể hoàn tất workflow đã kiểm chứng; không tạo template thay thế.');
       }
     } else {
+      if (['all', 'warmup', 'event', 'care'].includes(request.type)) {
+        throw new Error('Không tạo template outbound cho Care; hãy chọn seeker và chạy workflow MAS đã kiểm chứng.');
+      }
       setPhase('creating_safe_fallback');
       const { created, existing } = runTemplateEngine(db, { type: request.type, threadId: request.threadId, targetThreadIds: request.threadIds, selectedOnly, seekerName: request.seekerName, city: request.city, limit: request.limit });
       result = existing
@@ -506,6 +515,10 @@ export async function POST(request: NextRequest) {
       threadIds,
       seekerName,
       city,
+      programCode,
+      eventId,
+      instruction,
+      carePurpose,
       limit = 5,
       regenerate = false,
     } = body;
@@ -517,7 +530,10 @@ export async function POST(request: NextRequest) {
 
     const db = getDb();
     ensureRecommendationJobsTable(db);
-    const jobRequest = { type, threadId, threadIds: targetThreadIds, seekerName, city, limit, selectedOnly, regenerate: selectedOnly && regenerate === true };
+    if (type === 'care' && (!['class_reminder', 'warmup', 'event'].includes(carePurpose) || (!regenerate && (typeof instruction !== 'string' || !instruction.trim())))) {
+      return NextResponse.json({ error: 'Care cần mục đích hợp lệ; lệnh mới cần thêm chỉ dẫn vận hành.' }, { status: 400 });
+    }
+    const jobRequest = { type, threadId, threadIds: targetThreadIds, seekerName, city, programCode, eventId, instruction: typeof instruction === 'string' ? instruction.trim() : '', carePurpose, limit, selectedOnly, regenerate: selectedOnly && regenerate === true };
     const result = db.prepare("INSERT INTO mas_recommendation_jobs (status, phase, request_json) VALUES ('queued', 'queued', ?)")
       .run(JSON.stringify(jobRequest));
     const jobId = Number(result.lastInsertRowid);

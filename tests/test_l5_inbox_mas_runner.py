@@ -8,17 +8,23 @@ sys.path.insert(0, PROJECT_ROOT)
 
 
 class DummySession:
-    def __init__(self):
+    def __init__(self, state=None):
         self.id = "session-1"
+        self.state = state or {}
 
 
 class DummySessionService:
     def __init__(self):
         self.calls = []
+        self._session = None
 
     async def create_session(self, **kwargs):
         self.calls.append(kwargs)
-        return DummySession()
+        self._session = DummySession(state=dict(kwargs.get("state") or {}))
+        return self._session
+
+    async def get_session(self, **kwargs):
+        return self._session
 
 
 class DummyRunner:
@@ -69,8 +75,7 @@ class TestRunAdkPipeline:
 
         with patch("google.adk.sessions.InMemorySessionService", return_value=session_service), \
              patch("google.adk.runners.Runner", side_effect=runner_factory), \
-             patch("google.genai.types", DummyTypes), \
-             patch.object(runner_mod, "load_knowledge_context", return_value="KB BODY"):
+             patch("google.genai.types", DummyTypes):
             result = runner_mod.run_adk_pipeline(
                 thread_messages=[
                     {"sender": "Customer", "content": "Xin chào"},
@@ -81,17 +86,134 @@ class TestRunAdkPipeline:
 
         assert session_service.calls, "create_session was not called"
         state = session_service.calls[0]["state"]
-        assert "[Customer] Xin chào" in state["thread_messages"]
-        assert "[Page] Chào bạn" in state["thread_messages"]
+        assert "| Customer] Xin chào" in state["thread_messages"]
+        assert "| Page] Chào bạn" in state["thread_messages"]
         assert '"name": "Lan"' in state["seeker_context"]
-        assert state["knowledge_context"] == "KB BODY"
+        assert state["knowledge_context"] == ""
 
         assert runner_instances, "Runner was not created"
         assert runner_instances[0].kwargs["session_service"] is session_service
         assert runner_instances[0].run_calls[0]["session_id"] == "session-1"
 
         assert result["thread_messages"] == state["thread_messages"]
-        assert result["knowledge_context"] == "KB BODY"
+        assert result["knowledge_context"] == ""
+
+    def test_run_adk_pipeline_injects_separate_reaction_events_as_metadata(self):
+        from tools import l5_inbox_mas_pipeline as runner_mod
+
+        session_service = DummySessionService()
+        with patch("google.adk.sessions.InMemorySessionService", return_value=session_service), \
+             patch("google.adk.runners.Runner", side_effect=lambda **kw: DummyRunner(**kw)), \
+             patch("google.genai.types", DummyTypes):
+            runner_mod.run_adk_pipeline(
+                [{"sender": "Customer", "content": "Xin chào"}],
+                {"name": "Lan"},
+                reaction_events=[{"emoji": "👍", "actor": "Lan", "target_type": "thread"}],
+            )
+
+        text = session_service.calls[0]["state"]["thread_messages"]
+        assert "[Reaction event metadata] emoji: 👍; actor: Lan; target: thread/unknown" in text
+        assert "not a message body" in text
+
+    def test_run_adk_care_pipeline_injects_shared_care_session_state(self):
+        from tools import l5_inbox_mas_pipeline as mod
+
+        session_service = DummySessionService()
+        with patch("google.adk.sessions.InMemorySessionService", return_value=session_service), \
+             patch("google.adk.runners.Runner", side_effect=lambda **kw: DummyRunner(**kw)), \
+             patch("google.genai.types", DummyTypes):
+            result = mod.run_adk_care_pipeline(
+                [{"sender": "Customer", "content": "Em bận tuần này"}],
+                {"name": "Lan", "city": "Hà Nội", "lead_stage": "Seeker"},
+                care_purpose="warmup",
+                care_brief={"warmup_strategy": {"type": "manual_warmup"}, "operator_instruction": "Hỏi thăm nhẹ nhàng"},
+            )
+
+        state = session_service.calls[0]["state"]
+        assert state["care_purpose"] == "warmup"
+        assert '"manual_warmup"' in state["care_brief"]
+        assert '"manual_warmup"' in state["warmup_brief"]
+        assert '"name": "Lan"' in state["warmup_brief"]
+        assert state["reminder_brief"] == ""
+        assert result["thread_messages"] == state["thread_messages"]
+
+    def test_orchestrator_pass_reads_final_reply_and_breakdown_state(self, monkeypatch):
+        """PASS: the orchestrator's own final turn is the reply; the specialists'
+        output_key writes (forwarded into orchestrator session state by ADK's
+        AgentTool, code:agent-mas-002:orchestrator) populate the audit fields."""
+        from tools import l5_inbox_mas_pipeline as mod
+
+        session_service = DummySessionService()
+
+        def events(_runner, **_kwargs):
+            # Simulates AgentTool forwarding each specialist's output_key state_delta
+            # into the orchestrator's own session before its final turn.
+            session_service._session.state.update({
+                "conversation_analysis": "intent: hỏi lịch học",
+                "knowledge_brief": "Lớp Hà Nội tối thứ 3",
+                "draft_reply": "Dạ chào bạn",
+                "qa_verdict": "PASS",
+            })
+            yield type("E", (), {"author": "InboxOrchestrator",
+                                 "content": DummyContent(parts=[DummyPart("Dạ chào bạn")])})()
+
+        monkeypatch.setattr(mod, "run_runner", events)
+        with patch("google.adk.sessions.InMemorySessionService", return_value=session_service), \
+             patch("google.adk.runners.Runner", side_effect=lambda **kw: DummyRunner(**kw)), \
+             patch("google.genai.types", DummyTypes):
+            result = mod.run_adk_pipeline([{"sender": "Customer", "content": "Xin chào"}], {"name": "Thuy Do", "city": "Hà Nội"})
+        assert result["reply_text"] == "Dạ chào bạn"
+        assert result["classification"] == "intent: hỏi lịch học"
+        assert result["draft_reply"] == "Dạ chào bạn"
+        assert result["qa_verdict"] == "PASS"
+        assert result["escalation_reason"] == ""
+
+    def test_orchestrator_escalate_sets_escalation_fields_not_reply(self, monkeypatch):
+        """ESCALATE: no reply is drafted; the sentinel is parsed into
+        escalation_reason/escalation_note instead of being sanitized as a reply."""
+        from tools import l5_inbox_mas_pipeline as mod
+
+        session_service = DummySessionService()
+
+        def events(_runner, **_kwargs):
+            session_service._session.state.update({"qa_verdict": "ESCALATE: sensitive: seeker hỏi về sức khỏe tâm thần"})
+            yield type("E", (), {"author": "InboxOrchestrator",
+                                 "content": DummyContent(parts=[DummyPart(
+                                     "[ESCALATE: sensitive] Seeker hỏi về sức khỏe tâm thần, cần người phụ trách."
+                                 )])})()
+
+        monkeypatch.setattr(mod, "run_runner", events)
+        with patch("google.adk.sessions.InMemorySessionService", return_value=session_service), \
+             patch("google.adk.runners.Runner", side_effect=lambda **kw: DummyRunner(**kw)), \
+             patch("google.genai.types", DummyTypes):
+            result = mod.run_adk_pipeline([{"sender": "Customer", "content": "Câu hỏi nhạy cảm"}], {"name": "Thuy Do", "city": "Hà Nội"})
+        assert result["escalation_reason"] == "sensitive"
+        assert "sức khỏe tâm thần" in result["escalation_note"]
+        assert not result["reply_text"].startswith("[ESCALATE")
+
+    def test_loop_budget_exhaustion_surfaces_non_convergence(self, monkeypatch):
+        """The Python-enforced loop guard (_orchestrator_loop_guard,
+        code:agent-mas-002:loop-budget), not the model, is what must stop an
+        unbounded loop; this only checks the pipeline correctly parses whatever
+        sentinel the model emits once that guard has spoken."""
+        from tools import l5_inbox_mas_pipeline as mod
+
+        session_service = DummySessionService()
+
+        def events(_runner, **_kwargs):
+            session_service._session.state.update({"_orchestrator_loop_count": 31})
+            yield type("E", (), {"author": "InboxOrchestrator",
+                                 "content": DummyContent(parts=[DummyPart(
+                                     "[ESCALATE: non_convergence] Không hội tụ được câu trả lời phù hợp sau 30 lượt thử."
+                                 )])})()
+
+        monkeypatch.setattr(mod, "run_runner", events)
+        with patch("google.adk.sessions.InMemorySessionService", return_value=session_service), \
+             patch("google.adk.runners.Runner", side_effect=lambda **kw: DummyRunner(**kw)), \
+             patch("google.genai.types", DummyTypes):
+            result = mod.run_adk_pipeline([{"sender": "Customer", "content": "Lịch học?"}], {"name": "Thuy Do", "city": "Hà Nội"})
+        assert result["escalation_reason"] == "non_convergence"
+        assert result["loop_count"] == 31
 
 
 class TestSanitizeReply:
@@ -208,7 +330,7 @@ class TestMainCompatibility:
         monkeypatch.setattr(runner, "setup_llm_env", lambda: None)
         monkeypatch.setattr(runner, "parse_page_id", lambda value: value)
         called = {}
-        monkeypatch.setattr(runner, "run_inbox_cycle", lambda page_id, dry_run=True, max_threads=5, target_thread=None: called.update({
+        monkeypatch.setattr(runner, "run_inbox_cycle", lambda page_id, dry_run=True, max_threads=5, target_thread=None, target_city=None: called.update({
             "page_id": page_id,
             "dry_run": dry_run,
             "max_threads": max_threads,
@@ -219,3 +341,16 @@ class TestMainCompatibility:
 
         assert called["dry_run"] is True
         assert "ignored" in caplog.text
+
+
+def test_grounded_draft_is_not_discarded_for_spurious_qa_knowledge_gap():
+    from tools.l5_inbox_mas_pipeline import _is_spurious_knowledge_gap
+
+    assert _is_spurious_knowledge_gap("knowledge_gap", {
+        "conversation_analysis": "Seeker asks about the online class.",
+        "knowledge_context": "Online class: Tue/Thu/Sat, 21:00.",
+        "draft_reply": "Dạ chúng cháu gửi cô thông tin lớp online ạ.",
+    })
+    assert not _is_spurious_knowledge_gap("knowledge_gap", {
+        "conversation_analysis": "", "knowledge_context": "", "draft_reply": "",
+    })

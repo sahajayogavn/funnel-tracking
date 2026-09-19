@@ -169,6 +169,4 @@ class TestCoolSequence:
         assert decisions[0]["reason"] == "cool_sequence_exhausted"
         assert decisions[0]["payload"]["temperature"] == "cold"
         assert decisions[0]["payload"]["cool_step"] == 0
-        assert updates[0][0] == ("thread-9", "cold")
-        assert updates[0][1]["warmup_sent"] is False
-        assert updates[0][1]["cool_step"] == 0
+        assert updates == []

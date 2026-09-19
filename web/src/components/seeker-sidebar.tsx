@@ -5,6 +5,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import type { Seeker, SeekerDetail } from '@/lib/types';
 import { sortFacebookMessages } from '@/lib/funnel-filters';
 import { SeekerJourneyTimeline } from './seeker-journey-timeline';
+import { MessengerMessageList } from './messenger-message-list';
 
 const PAGE_ID = '1548373332058326';
 
@@ -21,16 +22,6 @@ const SIDEBAR_CRITICAL_CSS = `
   .seeker-sidebar-loading { padding:20px; color:var(--text-muted); font-size:12px; text-align:center; }
   .seeker-sidebar-section { margin-bottom:12px; }
   .seeker-sidebar-section-title { margin-bottom:8px; color:var(--text-muted); font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
-  .sidebar-recent-messages { display:flex; flex-direction:column; gap:4px; max-height:260px; overflow-y:auto; padding-right:6px; }
-  .seeker-sidebar-date-separator { display:flex; align-items:center; gap:8px; margin:6px 0 4px; }
-  .seeker-sidebar-date-separator > div { flex:1; height:1px; background:rgba(255,255,255,.06); }
-  .seeker-sidebar-date-separator > span { padding:2px 8px; border-radius:8px; background:rgba(255,255,255,.04); color:var(--text-muted); font-size:9px; font-weight:700; letter-spacing:.05em; white-space:nowrap; }
-  .seeker-sidebar-message { padding:8px 10px; margin-bottom:4px; border-radius:8px 8px 8px 2px; background:rgba(255,255,255,.04); border-left:2px solid #f59e0b; }
-  .seeker-sidebar-message.is-page { border-left:0; border-radius:8px 8px 2px 8px; background:rgba(99,102,241,.08); }
-  .seeker-sidebar-message-sender { color:#f59e0b; font-size:9px; font-weight:700; }
-  .seeker-sidebar-message.is-page .seeker-sidebar-message-sender { color:#818cf8; }
-  .seeker-sidebar-message-content, .seeker-sidebar-comment-text { display:-webkit-box; overflow:hidden; margin-top:2px; color:var(--text-primary); font-size:12px; line-height:1.4; text-overflow:ellipsis; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
-  .seeker-sidebar-message-time { margin-top:2px; color:var(--text-muted); font-size:9px; }
   .seeker-sidebar-comment { padding:8px 10px; margin-bottom:4px; border:1px solid rgba(245,158,11,.1); border-radius:8px; background:rgba(245,158,11,.04); }
   .seeker-sidebar-comment-link { display:inline-block; margin-top:4px; color:#60a5fa; font-size:10px; text-decoration:none; }
   .seeker-sidebar-comment-link:hover { text-decoration:underline; }
@@ -102,20 +93,6 @@ function facebookInboxUrl(seeker: Seeker) {
 
 function defaultDetailHref(seeker: Seeker) {
   return seeker.source === 'dm' ? `/seekers/${seeker.id}` : `/seekers/comment-${seeker.id}`;
-}
-
-function parseDate(ts: string): string | null {
-  const longMatch = ts.match(/([A-Z][a-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
-  const shortMatch = ts.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
-  if (longMatch) {
-    const months: Record<string, string> = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' };
-    return `${longMatch[3]}.${months[longMatch[1]] || '01'}.${longMatch[2].padStart(2, '0')}`;
-  }
-  if (shortMatch) {
-    const year = shortMatch[3].length === 2 ? `20${shortMatch[3]}` : shortMatch[3];
-    return `${year}.${shortMatch[1].padStart(2, '0')}.${shortMatch[2].padStart(2, '0')}`;
-  }
-  return null;
 }
 
 export function SeekerSidebar({
@@ -260,34 +237,27 @@ export function SeekerSidebar({
               {detail.messages?.length > 0 && (
                 <div className="seeker-sidebar-section">
                   <div className="seeker-sidebar-section-title">Recent Messages</div>
-                  <div className="sidebar-recent-messages">
-                    {sortFacebookMessages(
+                  <MessengerMessageList
+                    className="sidebar-recent-messages"
+                    compact
+                    maxHeight={260}
+                    messages={sortFacebookMessages(
                       detail.messages.filter(message => !message.content?.includes('[AD SOURCE]'))
                     )
                       .slice(-20)
-                      .map((message, index, visibleMessages) => {
-                        const messageDate = parseDate(message.messageTimestamp || '');
-                        const previousDate = index > 0 ? parseDate(visibleMessages[index - 1].messageTimestamp || '') : null;
-                        return (
-                          <div key={index}>
-                            {messageDate && messageDate !== previousDate && (
-                              <div className="seeker-sidebar-date-separator">
-                                <div />
-                                <span>{messageDate}</span>
-                                <div />
-                              </div>
-                            )}
-                            <div className={`seeker-sidebar-message ${message.sender === 'Page' ? 'is-page' : 'is-seeker'}`}>
-                              <div className="seeker-sidebar-message-sender">
-                                {message.sender === 'Page' ? 'Page' : seeker.name}
-                              </div>
-                              <div className="seeker-sidebar-message-content">{message.content || '(empty)'}</div>
-                              {message.messageTimestamp && <div className="seeker-sidebar-message-time">{message.messageTimestamp}</div>}
-                            </div>
-                          </div>
-                        );
-                      })}
-                  </div>
+                      .map(message => ({
+                        id: message.id,
+                        sender: message.sender === 'Page' || message.sender === 'Auto_Page' ? (message.sender === 'Auto_Page' ? '@Auto_Page' : 'Page') : (message.sender === 'Customer' ? seeker.name : (message.sender || 'Unknown')),
+                        content: message.content,
+                        timestamp: message.messageTimestamp,
+                        eventAt: message.messageAt,
+                        quotedSender: message.quotedSender,
+                        quotedText: message.quotedText,
+                        replyToMessageId: message.replyToMessageId,
+                        reactions: message.reactions,
+                        outgoing: message.sender === 'Page' || message.sender === 'Auto_Page',
+                      }))}
+                  />
                 </div>
               )}
 

@@ -2,7 +2,7 @@
 """Unit tests for tools/l5_mas_recommend.py with ADK agents mocked out.
 
 Verifies that the web-triggered MAS entrypoint:
-- routes selected threads through the batch/warmup/event agents,
+- routes each selected thread through an isolated inbox MAS action,
 - sanitizes replies and blocks reasoning leaks / OUT_OF_SCOPE,
 - only writes pending proposals tagged source='inbox_mas',
 - never duplicates a pending proposal of the same kind.
@@ -55,33 +55,38 @@ def test_db(monkeypatch, tmp_path):
 @pytest.fixture
 def mocked_llm(monkeypatch):
     """Bypass credentials/reachability and replace ADK agents with canned outputs."""
-    monkeypatch.setattr(rec, "setup_llm_env", lambda: None)
-    monkeypatch.setenv("OPENAI_API_BASE", "http://mock")
-    monkeypatch.setenv("OPENAI_API_KEY", "mock")
+    monkeypatch.setattr(rec, "setup_llm_env", lambda: {"provider": "google"})
+    monkeypatch.setenv("GOOGLE_API_KEY", "mock-gemini-key")
     monkeypatch.setattr(rec, "_check_llm_reachable", lambda timeout=5.0: None)
-    monkeypatch.setattr(rec, "load_knowledge_context", lambda: "KB")
+    # The unified workflow may source knowledge inside its Python coordinator;
+    # retain this seam for legacy adapters without requiring the symbol.
+    monkeypatch.setattr(rec, "load_knowledge_context", lambda: "KB", raising=False)
 
-    calls = {"batch": [], "warmup": [], "event": []}
+    calls = {"inbox": [], "care": []}
 
-    def fake_batch(batch_payload, feedback=None):
-        calls["batch"].append(batch_payload)
-        return [{
-            "thread_id": t["thread_id"],
+    def fake_inbox(messages, seeker, **kwargs):
+        calls["inbox"].append((messages, seeker, kwargs))
+        draft = f"Chào {seeker.get('name', 'bạn')}! Lớp thiền ở Hà Nội hoàn toàn miễn phí ạ 🙏"
+        return {
             "classification": "Intent: question, Language: vi, Urgency: low, Stage: Intake",
-            "reply_text": f"Chào {t['thread_name']}! Lớp thiền ở Hà Nội hoàn toàn miễn phí ạ 🙏",
-        } for t in batch_payload]
+            "draft_reply": draft,
+            "reply_text": draft,
+            "qa_verdict": "PASS",
+        }
 
-    def fake_warmup(seeker, strategy, knowledge_context, dry_run=True, feedback=None):
-        calls["warmup"].append((seeker, strategy))
-        return "Bạn ơi, tuần này có buổi thiền miễn phí, bạn ghé nhé 🌿"
+    def fake_care(messages, seeker, *, care_purpose, care_brief, **kwargs):
+        calls["care"].append((messages, seeker, care_purpose, care_brief, kwargs))
+        draft = f"Chào {seeker.get('name', 'bạn')}, đây là draft {care_purpose} đã được QA. 🙏"
+        return {
+            "conversation_analysis": "Seeker is eligible for this operator-opened care session.",
+            "knowledge_context": "Verified care facts.",
+            "draft_reply": draft,
+            "reply_text": draft,
+            "qa_verdict": "PASS",
+        }
 
-    def fake_event(event, seeker, knowledge_context, dry_run=True, feedback=None):
-        calls["event"].append((event, seeker))
-        return f"Mời bạn tham gia '{event['name']}' tại {event['city']} nhé ✨"
-
-    monkeypatch.setattr(rec, "run_adk_batch_pipeline", fake_batch)
-    monkeypatch.setattr(rec, "run_adk_warmup_composer", fake_warmup)
-    monkeypatch.setattr(rec, "run_adk_event_advertiser", fake_event)
+    monkeypatch.setattr(rec, "run_adk_pipeline", fake_inbox)
+    monkeypatch.setattr(rec, "run_adk_care_pipeline", fake_care)
     return calls
 
 
@@ -92,15 +97,15 @@ def _pending(conn_factory):
     return [dict(r) for r in rows]
 
 
-def test_reply_goes_through_batch_agent_and_enqueues_pending(test_db, mocked_llm):
+def test_reply_runs_one_isolated_mas_action_and_enqueues_pending(test_db, mocked_llm):
     result = rec.run([HUNG_BUI], "reply")
 
     assert result["status"] == "ok"
     assert result["engine"] == "inbox_mas"
     assert result["count"] == 1
-    assert len(mocked_llm["batch"]) == 1
-    assert mocked_llm["batch"][0][0]["thread_id"] == HUNG_BUI
-    assert mocked_llm["batch"][0][0]["messages"][0]["content"].startswith("Em muốn hỏi")
+    assert len(mocked_llm["inbox"]) == 1
+    assert mocked_llm["inbox"][0][0][0]["content"].startswith("Em muốn hỏi")
+    assert mocked_llm["inbox"][0][2]["subject_id"] == HUNG_BUI
 
     rows = _pending(test_db)
     assert len(rows) == 1
@@ -109,6 +114,54 @@ def test_reply_goes_through_batch_agent_and_enqueues_pending(test_db, mocked_llm
     payload = json.loads(rows[0]["payload_json"])
     assert payload["source"] == "inbox_mas"
     assert payload["classification"].startswith("Intent: question")
+
+
+def test_reply_forwards_operator_instruction_to_inbox_mas(test_db, mocked_llm):
+    instruction = "Ưu tiên xác nhận lịch lớp phù hợp trước khi trả lời."
+
+    result = rec.run([HUNG_BUI], "reply", instruction=instruction)
+
+    assert result["count"] == 1
+    assert mocked_llm["inbox"][0][2]["feedback"] == instruction
+
+
+def test_operator_care_command_creates_personalized_class_pending_message(test_db, mocked_llm):
+    conn = test_db()
+    conn.execute("UPDATE users SET program_code=?, lead_stage=? WHERE thread_id=?",
+                 ("14h30-CN-Vương Thừa Vũ-HN", "Seeker_Public_Program", HUNG_BUI))
+    conn.commit()
+    conn.close()
+
+    result = rec.run(
+        [HUNG_BUI], "care", city="Hà Nội",
+        instruction="Nhắc lịch lớp 14h30 Chủ Nhật tuần này nhé",
+        program_code="14h30-CN-Vương Thừa Vũ-HN",
+        care_purpose="class_reminder",
+    )
+
+    assert result["status"] == "ok"
+    assert result["count"] == 1
+    assert len(mocked_llm["care"]) == 1
+    assert mocked_llm["care"][0][2] == "class_reminder"
+    assert mocked_llm["care"][0][3]["verified_session"]["program_code"] == "14h30-CN-Vương Thừa Vũ-HN"
+    row = _pending(test_db)[0]
+    assert row["queue_type"] == "proactive_message"
+    assert json.loads(row["payload_json"])["trigger"] == "operator_care_command"
+
+
+def test_two_operator_care_commands_can_coexist_for_one_seeker(test_db, mocked_llm):
+    first = rec.run([HUNG_BUI], "care", instruction="Hỏi thăm nhẹ nhàng tuần này", trace_id="job-1",
+                    care_purpose="warmup")
+    second = rec.run([HUNG_BUI], "care", instruction="Gửi một lời chào nhẹ nhàng khác tuần này", trace_id="job-2",
+                     care_purpose="warmup")
+
+    assert first["count"] == 1
+    assert second["count"] == 1
+    rows = _pending(test_db)
+    assert len(rows) == 2
+    assert {json.loads(row["payload_json"])["dedupe_key"] for row in rows} == {
+        "operator-care:warmup:job-1", "operator-care:warmup:job-2",
+    }
 
 
 def test_all_runs_reply_warmup_event(test_db, mocked_llm):
@@ -125,17 +178,109 @@ def test_all_runs_reply_warmup_event(test_db, mocked_llm):
     assert result["count"] == 3
     kinds = sorted(p["kind"] for p in result["proposals"])
     assert kinds == ["event", "reply", "warmup"]
-    assert len(mocked_llm["warmup"]) == 1 and len(mocked_llm["event"]) == 1
+    # Contract: every operator-triggered outbound draft has the same Care
+    # workflow.  `all` must not retain the legacy composer-only bypasses.
+    assert [call[2] for call in mocked_llm["care"]] == ["warmup", "event"]
     payloads = [json.loads(r["payload_json"]) for r in _pending(test_db)]
     assert all(p["source"] == "inbox_mas" for p in payloads)
     assert {p.get("type") for p in payloads} == {None, "warmup", "event"}
+
+
+@pytest.mark.parametrize("qa_verdict", ["", "REPAIR: incorrect date", "ESCALATE: knowledge_gap"])
+def test_care_qa_must_pass_before_any_draft_is_enqueued(test_db, mocked_llm, monkeypatch, qa_verdict):
+    """A normal-looking final turn is never authority to bypass QA.
+
+    This protects the fail-closed boundary in the recommendation adapter as
+    well as the runtime: no missing, repair, or escalation verdict may create
+    an outbound queue item.
+    """
+    monkeypatch.setattr(rec, "run_adk_care_pipeline", lambda *args, **kwargs: {
+        "conversation_analysis": "Eligible warm-up.",
+        "knowledge_context": "Verified facts.",
+        "draft_reply": "Mời bạn ghé lớp thiền nhé.",
+        "reply_text": "Mời bạn ghé lớp thiền nhé.",
+        "qa_verdict": qa_verdict,
+    })
+
+    result = rec.run([HUNG_BUI], "care", instruction="Hỏi thăm nhẹ nhàng", care_purpose="warmup")
+
+    assert result["count"] == 0
+    assert _pending(test_db) == []
+
+
+def test_care_pass_on_an_old_draft_cannot_enqueue_new_final_text(test_db, mocked_llm, monkeypatch):
+    """QA approval is bound to the exact draft, never merely to a session."""
+    monkeypatch.setattr(rec, "run_adk_care_pipeline", lambda *args, **kwargs: {
+        "conversation_analysis": "Eligible warm-up.",
+        "knowledge_context": "Verified facts.",
+        "draft_reply": "Mời bạn đến lớp lúc 19h nhé.",
+        "reply_text": "Mời bạn đến lớp lúc 20h nhé.",
+        "qa_verdict": "PASS",
+    })
+
+    result = rec.run([HUNG_BUI], "care", instruction="Hỏi thăm nhẹ nhàng", care_purpose="warmup")
+
+    assert result["count"] == 0
+    assert _pending(test_db) == []
+
+
+@pytest.mark.parametrize("sentinel", ["[OUT_OF_SCOPE]", "[NO_REPLY: stale]", "[NO_SEND: opted out]"])
+def test_care_control_sentinels_never_enter_outbound_queue(test_db, mocked_llm, monkeypatch, sentinel):
+    monkeypatch.setattr(rec, "run_adk_care_pipeline", lambda *args, **kwargs: {
+        "draft_reply": sentinel, "reply_text": sentinel, "qa_verdict": "PASS",
+    })
+
+    result = rec.run([HUNG_BUI], "care", instruction="Hỏi thăm nhẹ nhàng", care_purpose="warmup")
+
+    assert result["count"] == 0
+    assert _pending(test_db) == []
+
+
+def test_care_forwards_deterministic_conversation_state_to_pipeline(test_db, mocked_llm):
+    result = rec.run([HUNG_BUI], "care", instruction="Hỏi thăm nhẹ nhàng", care_purpose="warmup")
+
+    assert result["count"] == 1
+    assert mocked_llm["care"][0][3]["conversation_state"]["state"]
+
+
+def test_explicit_care_purpose_wins_over_program_filter(test_db, mocked_llm):
+    """A UI class filter is eligibility scope, not an implicit reminder intent."""
+    result = rec.run(
+        [HUNG_BUI], "care",
+        instruction="Nhắc bạn về hoạt động cuối tuần.",
+        program_code="14h30-CN-Vương Thừa Vũ-HN",
+        care_purpose="warmup",
+    )
+
+    assert result["count"] == 1
+    assert mocked_llm["care"][0][2] == "warmup"
+    payload = json.loads(_pending(test_db)[0]["payload_json"])
+    assert payload["type"] == "warmup"
+
+
+@pytest.mark.parametrize("rec_type, expected_purpose", [("warmup", "warmup"), ("event", "event")])
+def test_legacy_operator_types_use_care_workflow_not_composer_bypass(
+        test_db, mocked_llm, rec_type, expected_purpose):
+    if rec_type == "event":
+        conn = test_db()
+        conn.execute(
+            "INSERT INTO events (name, city, event_date) VALUES (?, ?, date('now', '+3 days'))",
+            ("Thiền & Âm nhạc", "Hà Nội"),
+        )
+        conn.commit()
+        conn.close()
+
+    result = rec.run([HUNG_BUI], rec_type, city="Hà Nội")
+
+    assert result["count"] == 1
+    assert [call[2] for call in mocked_llm["care"]] == [expected_purpose]
 
 
 def test_event_skipped_when_no_events(test_db, mocked_llm):
     result = rec.run([HUNG_BUI], "event")
     assert result["count"] == 0
     assert result["skipped"] == [{"threadId": HUNG_BUI, "reason": "no_event"}]
-    assert mocked_llm["event"] == []
+    assert mocked_llm["care"] == []
 
 
 def test_no_duplicate_pending_of_same_kind(test_db, mocked_llm):
@@ -144,8 +289,19 @@ def test_no_duplicate_pending_of_same_kind(test_db, mocked_llm):
 
     assert second["count"] == 0
     assert second["skipped"][0]["reason"] == "pending_reply_exists"
-    assert len(mocked_llm["batch"]) == 1  # LLM not called again
+    assert len(mocked_llm["inbox"]) == 1  # LLM not called again
     assert len(_pending(test_db)) == 1
+
+
+def test_manual_website_mas_bypasses_scheduler_processed_marker(test_db, mocked_llm):
+    """An operator-selected regeneration remains possible after the scheduler
+    has consumed that exact customer message."""
+    assert seeker_tools.claim_scheduled_inbox_message(HUNG_BUI) is True
+
+    result = rec.run([HUNG_BUI], "reply")
+
+    assert result["count"] == 1
+    assert len(mocked_llm["inbox"]) == 1
 
 
 # code:bug-action-queue-duplicate-proposal-001:regression
@@ -166,7 +322,7 @@ def test_no_duplicate_after_first_proposal_is_approved(test_db, mocked_llm):
     second = rec.run([HUNG_BUI], "reply")
     assert second["count"] == 0
     assert second["skipped"][0]["reason"] == "pending_reply_exists"
-    assert len(mocked_llm["batch"]) == 1  # LLM not called again
+    assert len(mocked_llm["inbox"]) == 1  # LLM not called again
 
     rows = _pending(test_db)
     assert len(rows) == 1
@@ -189,7 +345,7 @@ def test_regenerate_replaces_pending_or_approved_draft(test_db, mocked_llm):
     assert second["count"] == 1
     assert second["supersededCount"] == 1
     assert second["proposals"][0]["supersededIds"] == [old_id]
-    assert len(mocked_llm["batch"]) == 2
+    assert len(mocked_llm["inbox"]) == 2
     conn = test_db()
     rows = {r["id"]: dict(r) for r in conn.execute("SELECT id, status, error_text FROM action_queue")}
     conn.close()
@@ -203,8 +359,7 @@ def test_regenerate_replaces_pending_or_approved_draft(test_db, mocked_llm):
 def test_regenerate_keeps_old_draft_when_llm_gives_nothing(test_db, mocked_llm, monkeypatch):
     first = rec.run([HUNG_BUI], "reply")
     old_id = first["proposals"][0]["id"]
-    monkeypatch.setattr(rec, "run_adk_batch_pipeline",
-                        lambda batch, feedback=None: [{"thread_id": HUNG_BUI, "reply_text": ""}])
+    monkeypatch.setattr(rec, "run_adk_pipeline", lambda *args, **kwargs: {"reply_text": ""})
 
     second = rec.run([HUNG_BUI], "reply", regenerate=True)
 
@@ -225,7 +380,7 @@ def test_regenerate_never_touches_executing_draft(test_db, mocked_llm):
 
     assert second["count"] == 0
     assert second["skipped"][0]["reason"] == "executing_reply_exists"
-    assert len(mocked_llm["batch"]) == 1
+    assert len(mocked_llm["inbox"]) == 1
     rows = _pending(test_db)
     assert len(rows) == 1 and rows[0]["status"] == "executing"
 
@@ -256,10 +411,10 @@ def test_regenerate_warmup_only_supersedes_same_payload_type(test_db, mocked_llm
 
 def test_reasoning_leak_and_out_of_scope_are_blocked(test_db, mocked_llm, monkeypatch):
     outputs = iter([
-        [{"thread_id": HUNG_BUI, "classification": "x", "reply_text": "**Crafting a warm reply**\nLet me think about this"}],
-        [{"thread_id": HUNG_BUI, "classification": "spam", "reply_text": "[OUT_OF_SCOPE]"}],
+        {"classification": "x", "reply_text": "**Crafting a warm reply**\nLet me think about this"},
+        {"classification": "spam", "draft_reply": "[OUT_OF_SCOPE]", "reply_text": "[OUT_OF_SCOPE]", "qa_verdict": "PASS"},
     ])
-    monkeypatch.setattr(rec, "run_adk_batch_pipeline", lambda batch, feedback=None: next(outputs))
+    monkeypatch.setattr(rec, "run_adk_pipeline", lambda *args, **kwargs: next(outputs))
 
     leak = rec.run([HUNG_BUI], "reply")
     assert leak["count"] == 0 and leak["skipped"][0]["reason"] == "no_reply"
@@ -270,10 +425,25 @@ def test_reasoning_leak_and_out_of_scope_are_blocked(test_db, mocked_llm, monkey
     assert _pending(test_db) == []
 
 
+def test_escalation_note_is_never_enqueued_as_a_reply(test_db, mocked_llm, monkeypatch):
+    monkeypatch.setattr(rec, "run_adk_pipeline", lambda *args, **kwargs: {
+        "reply_text": "No verified facts were provided.",
+        "escalation_reason": "knowledge_gap",
+        "escalation_note": "A volunteer needs to verify the schedule.",
+        "classification": "Intent: question",
+    })
+
+    result = rec.run([HUNG_BUI], "reply")
+
+    assert result["count"] == 0
+    assert result["skipped"][0]["reason"] == "escalated_knowledge_gap"
+    assert _pending(test_db) == []
+
+
 def test_unknown_thread_returns_error_without_llm_call(test_db, mocked_llm):
     result = rec.run(["1548373332058326_does_not_exist"], "all")
     assert result["status"] == "error"
-    assert mocked_llm["batch"] == []
+    assert mocked_llm["inbox"] == []
 
 
 def test_unreachable_llm_returns_error_without_writing(test_db, mocked_llm, monkeypatch):

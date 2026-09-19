@@ -23,14 +23,12 @@ Usage:
     python tools/scheduler.py --page-id 119587786260266 --fetch-interval 10 --warmup-time 08:30
 """
 import argparse
-import asyncio
 import json
 import logging
 import os
 import signal
 import sys
 import time
-from datetime import datetime, timedelta
 
 # Setup paths
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,13 +42,11 @@ except ImportError:
 
 from fb_pipeline.contracts.l1_inbox import parse_page_id
 
-from fb_pipeline.session.l2_activity_lock import scheduler_browser_cycle
 from tools.l5_scheduler_routes import (
     run_fetch_cycle, run_reply_cycle, run_react_cycle, run_warmup_cycle, run_event_cycle,
     run_classify_cycle,
 )
 from tools.l5_scheduler_core import _update_user_decision_state
-from tools.l5_scheduler_adk import run_adk_warmup_composer, run_adk_event_advertiser
 # Setup logging
 os.makedirs(os.path.join(PROJECT_ROOT, 'logs'), exist_ok=True)
 logging.basicConfig(
@@ -66,17 +62,18 @@ logger = logging.getLogger("scheduler")
 # --- Constants ---
 DEFAULT_FETCH_INTERVAL = 15   # minutes
 DEFAULT_WARMUP_TIME = "09:00"
+DEFAULT_CARE_TIME = "08:30"
 DEFAULT_EVENT_TIME = "10:00"
 DEFAULT_CLASSIFY_INTERVAL = 30  # minutes; LLM city/program pass, no browser
-ALL_ROUTES = {"react", "reply", "event", "classify"}
+ALL_ROUTES = {"react", "reply", "event", "classify", "care"}
 
 # --- Graceful shutdown ---
 _shutdown_requested = False
 
 
-def _signal_handler(signum, frame):
+def _signal_handler(signum, _frame):
     global _shutdown_requested
-    logger.info(f"Received signal {signum}. Requesting graceful shutdown...")
+    logger.info("Received signal %s. Requesting scheduler shutdown...", signum)
     _shutdown_requested = True
 
 
@@ -89,7 +86,8 @@ signal.signal(signal.SIGTERM, _signal_handler)
 
 def setup_schedule(page_id: str, dry_run: bool, routes: set,
                    fetch_interval: int, warmup_time: str, event_time: str,
-                   classify_interval: int = DEFAULT_CLASSIFY_INTERVAL):
+                   classify_interval: int = DEFAULT_CLASSIFY_INTERVAL,
+                   care_time: str = DEFAULT_CARE_TIME):
     """Register scheduled jobs based on enabled routes."""
     registered = []
 
@@ -130,6 +128,21 @@ def setup_schedule(page_id: str, dry_run: bool, routes: set,
         )
         registered.append(f"event daily at {event_time}")
 
+    if "care" in routes:
+        # prd:mas-time-aware-001 P2 — one daily bundle (brief + attendance checklist +
+        # class-reminder digest) in the 08:00–09:00 window, plus light pollers that
+        # turn human decisions into follow-up work and raise SLA alerts.
+        from tools.l5_proactive_routes import (
+            run_daily_care_cycle, run_session_open_cycle, run_attendance_sync, run_registration_sla_cycle,
+        )
+        schedule.every().day.at(care_time).do(run_daily_care_cycle, page_id=page_id, dry_run=dry_run)
+        registered.append(f"care daily at {care_time}")
+        schedule.every(2).minutes.do(run_session_open_cycle, page_id=page_id, dry_run=dry_run)
+        schedule.every(2).minutes.do(run_attendance_sync, page_id=page_id, dry_run=dry_run)
+        registered.append("session_open + attendance_sync every 2min")
+        schedule.every(30).minutes.do(run_registration_sla_cycle, page_id=page_id, dry_run=dry_run)
+        registered.append("registration_sla every 30min")
+
     return registered
 
 
@@ -160,9 +173,9 @@ def main():
         help="Send replies/reactions for real (default is dry-run)"
     )
     parser.add_argument(
-        "--routes", default="react,reply,event,classify",
+        "--routes", default="react,reply,event,classify,care",
         help="Comma-separated routes to enable (default: all). "
-             "Options: react, reply, event, classify"
+             "Options: react, reply, event, classify, care"
     )
     parser.add_argument(
         "--classify-interval", type=int, default=DEFAULT_CLASSIFY_INTERVAL,
@@ -179,6 +192,10 @@ def main():
     parser.add_argument(
         "--event-time", default=DEFAULT_EVENT_TIME,
         help=f"Daily event advertising time HH:MM (default: {DEFAULT_EVENT_TIME})"
+    )
+    parser.add_argument(
+        "--care-time", default=DEFAULT_CARE_TIME,
+        help=f"Daily seeker-care bundle time HH:MM, keep within 08:00–09:00 (default: {DEFAULT_CARE_TIME})"
     )
     parser.add_argument(
         "--num", type=int, default=None,
@@ -204,7 +221,7 @@ def main():
         sys.exit(1)
 
     # Setup LLM env if any agent route is enabled
-    if routes & {"reply", "react", "warmup", "event", "classify"}:
+    if routes & {"reply", "react", "warmup", "event", "classify", "care"}:
         try:
             from tools.l5_inbox_mas_runner import setup_llm_env
             setup_llm_env()
@@ -233,6 +250,10 @@ def main():
         if "classify" in routes:
             results["classify"] = run_classify_cycle(page_id, dry_run=dry_run, max_users=max_limit,
                                                      background=False)
+        if "care" in routes:
+            from tools.l5_proactive_routes import run_daily_care_cycle, run_registration_sla_cycle
+            results["care"] = run_daily_care_cycle(page_id, dry_run=dry_run)
+            results["sla"] = run_registration_sla_cycle(page_id, dry_run=dry_run)
         print(json.dumps(results, indent=2, ensure_ascii=False))
         return
 
@@ -241,6 +262,7 @@ def main():
         fetch_interval=args.fetch_interval,
         warmup_time=args.warmup_time, event_time=args.event_time,
         classify_interval=args.classify_interval,
+        care_time=args.care_time,
     )
     logger.info(f"Registered jobs: {', '.join(registered)}")
 

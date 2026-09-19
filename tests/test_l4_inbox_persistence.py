@@ -214,6 +214,47 @@ class TestMasSchemaMigrations(unittest.TestCase):
         self.assertEqual(row["reply_text"], "Draft reply")
         self.assertEqual(row["customer_message_timestamp"], "2026-03-25T10:00:00")
 
+    # code:test-message-history-evidence-001:backwards-compatible-migration
+    def test_setup_database_migrates_legacy_messages_to_evidence_schema(self):
+        self.conn.execute('''
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT,
+                sender TEXT,
+                content TEXT,
+                message_timestamp TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(thread_id, sender, content, message_timestamp)
+            )
+        ''')
+        self.conn.execute(
+            "INSERT INTO messages (thread_id, sender, content, message_timestamp) VALUES (?, ?, ?, ?)",
+            ("legacy-thread", "Customer", "Dạ", "Sep 10, 2026, 9:00 AM"),
+        )
+        self.conn.commit()
+
+        setup_database(self.conn)
+
+        columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        self.assertTrue({
+            "source_id", "sender_confidence", "raw_timestamp", "day_context",
+            "time_precision", "reply_to_message_id", "quoted_sender", "quoted_text",
+        }.issubset(columns))
+        row = self.conn.execute(
+            "SELECT thread_id, sender, content, message_timestamp, seq FROM messages"
+        ).fetchone()
+        self.assertEqual(
+            (row["thread_id"], row["sender"], row["content"], row["message_timestamp"], row["seq"]),
+            ("legacy-thread", "Customer", "Dạ", "Sep 10, 2026, 9:00 AM", 0),
+        )
+        reaction_columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(crawled_message_reactions)").fetchall()
+        }
+        self.assertTrue({"actor", "emoji", "target_type", "target_message_id", "source_id"}.issubset(reaction_columns))
+
     def test_log_mas_decision_persists_payload_json(self):
         setup_database(self.conn)
 

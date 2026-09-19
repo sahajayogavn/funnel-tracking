@@ -22,10 +22,32 @@ CITY_KEYWORDS = {
 
 @dataclass
 class InboxMessage:
+    """One observed Inbox message, with evidence kept separate from body text.
+
+    Fields are deliberately nullable/unknown-friendly: a browser snapshot
+    without a Facebook message id or reply target must not manufacture one.
+    ``reactions`` contains observed reaction dictionaries and is not part of
+    the conversational body sent to MAS.
+    """
     sender: str
     content: str
     message_timestamp: str = ""
     seq: int = 0
+    source_id: str | None = None
+    sender_confidence: str = "unknown"
+    raw_timestamp: str = ""
+    day_context: str = ""
+    time_precision: str = "unknown"
+    reply_to_message_id: str | None = None
+    quoted_sender: str | None = None
+    quoted_sender_confidence: str = "unknown"
+    quoted_text: str | None = None
+    # DOM/source evidence is audit data, not conversational prose.  It must
+    # travel with the observation so later persistence and MAS handoff never
+    # have to recreate attribution from colour or message content.
+    sender_evidence: str | None = None
+    quote_evidence: str | None = None
+    reactions: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -35,7 +57,9 @@ class ThreadRecord:
     thread_name: str
     preview_text: str
     thread_lines: list[str]
-    dom_index: int
+    # Only Stage 1 sidebar discovery has an Inbox position.  Detail-only
+    # refreshes must leave this unset so they cannot replace the saved order.
+    dom_index: int | None
     sidebar_time_text: str = ""
     sidebar_timestamp_ms: float | None = None
     sidebar_time_kind: str = ""
@@ -133,12 +157,12 @@ def detect_city(ad_context: str, page_messages: list) -> str:
 
 # code:tool-citydetect-001:smart-detect
 def detect_city_smart(ad_context: str, page_messages: list,
-                      thread_name: str = "", customer_messages: list | None = None) -> str:
+                      thread_name: str = "", customer_messages: list | None = None,
+                      subject_id: str | None = None) -> str:
     """Detect city using LLM first, with rule-based fallback.
 
-    Tries LLM-based classification (3-signal priority) if OPENAI_API_BASE
-    and OPENAI_API_KEY env vars are set. Falls back to keyword-based
-    detect_city() if LLM is unavailable or returns Unknown.
+    Tries the shared Gemini configuration first. Falls back to keyword-based
+    ``detect_city()`` if Gemini is unavailable or returns Unknown.
 
     Args:
         ad_context: Ad content text the user interacted with.
@@ -151,94 +175,81 @@ def detect_city_smart(ad_context: str, page_messages: list,
         City name string (e.g. "Hà Nội", "TP. Hồ Chí Minh", "Unknown").
     """
     import logging
-    import os
     logger = logging.getLogger("city_smart")
+    try:
+        from fb_pipeline.contracts.l1_city_llm import detect_city_llm
+        from tools.l5_llm_provider import get_llm_config
+        llm_config = get_llm_config()
 
-    api_base = os.environ.get("OPENAI_API_BASE", "")
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+        # Extract text lists for the LLM prompt
+        cust_texts = []
+        page_texts = []
+        if customer_messages:
+            for m in customer_messages:
+                content = m.get("content", "") or m.get("text", "")
+                if content and m.get("sender") == "Customer":
+                    cust_texts.append(content)
+        for m in page_messages:
+            content = m.get("content", "") or m.get("text", "")
+            if content and m.get("sender") == "Page":
+                page_texts.append(content)
 
-    if api_base and api_key:
-        try:
-            from fb_pipeline.contracts.l1_city_llm import detect_city_llm
-
-            # Extract text lists for the LLM prompt
-            cust_texts = []
-            page_texts = []
-            if customer_messages:
-                for m in customer_messages:
-                    content = m.get("content", "") or m.get("text", "")
-                    if content and m.get("sender") == "Customer":
-                        cust_texts.append(content)
+        # Also extract customer messages from page_messages list if not provided separately
+        if not cust_texts:
             for m in page_messages:
                 content = m.get("content", "") or m.get("text", "")
-                if content and m.get("sender") == "Page":
-                    page_texts.append(content)
+                if content and m.get("sender") == "Customer":
+                    cust_texts.append(content)
 
-            # Also extract customer messages from page_messages list if not provided separately
-            if not cust_texts:
-                for m in page_messages:
-                    content = m.get("content", "") or m.get("text", "")
-                    if content and m.get("sender") == "Customer":
-                        cust_texts.append(content)
+        result = detect_city_llm(
+            thread_name=thread_name, customer_messages=cust_texts,
+            page_messages=page_texts, ad_content=ad_context,
+            llm_config=llm_config, subject_id=subject_id or thread_name,
+        )
 
-            model = os.environ.get("ADK_MODEL", "openai/gpt-5.4")
-            # Strip "openai/" prefix for raw API call
-            if model.startswith("openai/"):
-                model = model[7:]
+        llm_city = result.get("city", "Unknown")
+        confidence = result.get("confidence", "low")
+        logger.debug(
+            f"LLM city for '{thread_name}': {llm_city} "
+            f"(confidence={confidence}, reasoning={result.get('reasoning', '')})"
+        )
 
-            result = detect_city_llm(
-                thread_name=thread_name,
-                customer_messages=cust_texts,
-                page_messages=page_texts,
-                ad_content=ad_context,
-                api_base=api_base,
-                api_key=api_key,
-                model=model,
-            )
+        if llm_city != "Unknown":
+            return llm_city
 
-            llm_city = result.get("city", "Unknown")
-            confidence = result.get("confidence", "low")
-            logger.debug(
-                f"LLM city for '{thread_name}': {llm_city} "
-                f"(confidence={confidence}, reasoning={result.get('reasoning', '')})"
-            )
-
-            if llm_city != "Unknown":
-                return llm_city
-
-            # LLM returned Unknown — fall through to keyword-based
-            logger.debug(f"LLM returned Unknown for '{thread_name}', falling back to keywords")
-
-        except Exception as e:
-            logger.warning(f"LLM city detection failed for '{thread_name}': {e}, falling back to keywords")
+        # LLM returned Unknown — fall through to keyword-based
+        logger.debug(f"LLM returned Unknown for '{thread_name}', falling back to keywords")
+    except Exception as e:
+        logger.warning(f"LLM city detection failed for '{thread_name}': {e}, falling back to keywords")
 
     # Fallback: keyword-based detection
     return detect_city(ad_context, page_messages)
 
 
 def detect_city_and_program_smart(ad_context: str, page_messages: list,
-                                  thread_name: str = "", customer_messages: list | None = None) -> dict:
+                                  thread_name: str = "", customer_messages: list | None = None,
+                                  subject_id: str | None = None) -> dict:
     """LLM-first city/class selection, with a safe keyword-only fallback."""
-    import os
-    if os.environ.get("OPENAI_API_BASE", "") and os.environ.get("OPENAI_API_KEY", ""):
-        try:
-            from fb_pipeline.contracts.l1_city_llm import detect_city_llm
-            messages = customer_messages or page_messages
-            customer_texts = [
-                m.get("content", "") or m.get("text", "") for m in messages
-                if m.get("sender") == "Customer" and (m.get("content", "") or m.get("text", ""))
-            ]
-            page_texts = [
-                m.get("content", "") or m.get("text", "") for m in page_messages
-                if m.get("sender") == "Page" and (m.get("content", "") or m.get("text", ""))
-            ]
-            model = os.environ.get("ADK_MODEL", "openai/gpt-5.4").removeprefix("openai/")
-            result = detect_city_llm(thread_name, customer_texts, page_texts, ad_context,
-                                     os.environ["OPENAI_API_BASE"], os.environ["OPENAI_API_KEY"], model)
-            if result.get("city") != "Unknown":
-                return {"city": result["city"], "program_code": result.get("program_code")}
-        except Exception:
-            pass
+    try:
+        from fb_pipeline.contracts.l1_city_llm import detect_city_llm
+        from tools.l5_llm_provider import get_llm_config
+        messages = customer_messages or page_messages
+        customer_texts = [
+            m.get("content", "") or m.get("text", "") for m in messages
+            if m.get("sender") == "Customer" and (m.get("content", "") or m.get("text", ""))
+        ]
+        page_texts = [
+            m.get("content", "") or m.get("text", "") for m in page_messages
+            if m.get("sender") == "Page" and (m.get("content", "") or m.get("text", ""))
+        ]
+        result = detect_city_llm(
+            thread_name, customer_texts, page_texts, ad_context,
+            llm_config=get_llm_config(), subject_id=subject_id or thread_name,
+        )
+        if result.get("city") != "Unknown":
+            return {"city": result["city"], "program_code": result.get("program_code")}
+    except Exception:
+        pass
     return {"city": detect_city(ad_context, page_messages), "program_code": None}
 
 

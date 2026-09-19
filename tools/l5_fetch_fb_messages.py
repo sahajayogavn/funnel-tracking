@@ -553,9 +553,9 @@ def main():
                         help="Stop after the page has this many messages in the local database.")
     parser.add_argument("--cdp", action="store_true", help="Scrape directly via CDP connection to Chrome on port 9222 (no cookie export/import).")
     parser.add_argument("--no-early-exit", action="store_true", help="Disable the targeted early-exit algorithm, allowing deep retroactive UI scrolls.")
-    parser.add_argument("--workers", type=int, default=5,
-                        help="Number of CDP tabs (1 orchestrator + N-1 Stage-2 worker tabs) for --cdp mode. "
-                             "Clamped to [1, 8]. --workers 1 keeps the legacy sequential path.")
+    parser.add_argument("--workers", type=int, default=10,
+                        help="Concurrent workers for classify_city_llm (default: 10). For --cdp fetches, this is "
+                             "the number of tabs and is clamped to [1, 8].")
     parser.add_argument("--skip-qa", action="store_true", help="Skip the QA check after fetching.")
     parser.add_argument("--classify-city", action="store_true",
                         help="After fetch_messages, run the LLM city/program pass on the threads this run "
@@ -563,6 +563,8 @@ def main():
                              "--action classify_city_llm or the scheduler [CLASSIFY] route instead.")
     parser.add_argument("--all-users", action="store_true",
                         help="classify_city_llm: re-classify every user of the page instead of only stale ones.")
+    parser.add_argument("--missing-real-name", action="store_true",
+                        help="classify_city_llm: explicitly retry City/Program/Name/Phone extraction only for DM seekers whose real_name is empty.")
 
     args = parser.parse_args()
     page_id = parse_page_id(args.pageId)
@@ -594,7 +596,10 @@ def main():
         result = propagate_city_from_ads(page_id)
     elif args.action == "classify_city_llm":
         conn = get_db_connection()
-        llm_result = _post_scrape_llm_city_classify(conn, page_id, only_stale=not args.all_users)
+        llm_result = _post_scrape_llm_city_classify(
+            conn, page_id, only_stale=not args.all_users and not args.missing_real_name,
+            only_missing_real_name=args.missing_real_name, workers=args.workers,
+        )
         conn.close()
         result = {"success": True, "action": "classify_city_llm", **llm_result}
     else:

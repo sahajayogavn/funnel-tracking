@@ -143,15 +143,15 @@ export async function GET(request: Request) {
       }
       userInfo.fb_url = fullFbUrl;
 
-      let messages: { sender: string; content: string; message_timestamp: string }[] = [];
+      let messages: { sender: string; content: string; message_timestamp: string; message_at: string | null }[] = [];
       if (userInfo.thread_id && tableExists(db, 'messages')) {
         messages = db.prepare(`
-          SELECT sender, content, message_timestamp 
+          SELECT sender, content, message_timestamp, message_at
           FROM messages 
-          WHERE thread_id = ?
-          ORDER BY message_timestamp ASC, seq ASC
+          WHERE thread_id = ? AND kind = 'message'
+          ORDER BY COALESCE(message_at, timestamp) ASC, seq ASC
           LIMIT 50
-        `).all(userInfo.thread_id) as { sender: string; content: string; message_timestamp: string }[];
+        `).all(userInfo.thread_id) as { sender: string; content: string; message_timestamp: string; message_at: string | null }[];
       }
 
       return NextResponse.json({

@@ -33,9 +33,12 @@ ID không thay đổi khi đổi tên hoặc di chuyển tệp; chỉ cập nh�
 | `doc:llm-observability-001` | `docs/design/llm-observability.md` | active; bảng `llm_calls` + trang `/llm`, warmup thủ công; thoả mãn `prd:llm-observability-001`. |
 | `doc:llm-observability-test-plan-001` | `docs/tests/test-plan-llm-observability.md` | active; test code tag `code:test-llm-obs-001:*`. |
 | `doc:mas-strategy-test-plan-001` | `docs/tests/test-plan.md` | active |
+| `doc:mas-execution-audit-001` | `docs/report/mas-execution-audit-2026-09-17.md` | active; audit route inbox MAS (mù thời gian, banner, NO_REPLY, knowledge 60 KB/call). Kế hoạch tại `prd:mas-time-aware-001`. |
+| `doc:mas-debugging-playbook-001` | `docs/architect/mas-debugging-playbook.md` | active; điều tra case MAS cụ thể qua `tools/l5_mas_trace_debug.py` (`code:mas-debug-001`), bản đồ codebase, nhật ký kỹ thuật. |
 | `doc:prd-001` | `docs/PRDs/PRD.md` | placeholder; reserve this ID for the first PRD or retire it intentionally. |
 | `prd:inbox-parallel-fetch-001` | `docs/PRDs/prd-inbox-parallel-fetch.md` | active; first traceable PRD (`prd:` type per CLAUDE.md §6), satisfied by `doc:inbox-fetch-pipeline-001` and `code:inbox-parallel-fetch-001:*`. |
 | `prd:inbox-decoupled-jobs-001` | `docs/PRDs/prd-inbox-decoupled-jobs.md` | active; thành phần `:classify-001`, `:city-spinner-001`, `:fetch-qa-001`, `:propose-001`. Thiết kế `doc:inbox-decoupled-jobs-001`. |
+| `prd:mas-time-aware-001` | `docs/PRDs/mas-time-aware-care-plan.md` | implemented 2026-09-17; P0 dữ liệu sạch (`code:inbox-msg-kind-001`, `code:inbox-msg-abs-time-001`, `code:stage-gate-decouple-001`, `code:events-import-001`), P1 gate (`code:inbox-conv-state-001`, `code:agent-mas-001:time-context`, `:no-reply-sentinel`), P2 proactive (`code:route-class-reminder-001`, `code:route-post-session-001`, `code:route-registration-sla-001`, `code:route-morning-brief-001`), P3 retrieval (`code:tool-inbox-mas-001:knowledge-retrieval`). |
 | `prd:llm-observability-001` | `docs/PRDs/prd-llm-observability.md` | active; thành phần `:warmup-manual-001`, `:trace-001`, `:page-001`, `:stats-001`. Chứa bảng rà soát các điểm kích hoạt MAS/LLM (2026-09-17). |
 | `doc:qa-audit-001` | `docs/report/qa-report.md` | active |
 | `doc:readme-architecture-001` | `docs/architect/README.md` | active |

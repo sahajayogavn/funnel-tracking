@@ -473,12 +473,268 @@ class TestInboxContracts(unittest.TestCase):
         self.assertEqual(first["messages_added"], 2)
         senders = [r[0] for r in self.conn.execute(
             "SELECT sender FROM messages WHERE thread_id = ? ORDER BY seq", (first["thread_id"],))]
-        self.assertEqual(senders, ["Customer", "Auto_Page"])
+        # Persistence must not infer an Auto_Page sender from canned wording.
+        self.assertEqual(senders, ["Customer", "Page"])
 
         second = persist_thread_record(self.conn, _record(), detect_city)
         self.assertEqual(second["messages_added"], 0)
         count = self.conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id = ?", (first["thread_id"],)).fetchone()[0]
         self.assertEqual(count, 2)
+
+    # code:test-message-history-evidence-001:repeat-is-event
+    def test_persist_retains_repeated_customer_text_after_an_intervening_turn(self):
+        """A later "Dạ" is a new event, not a global sender/body duplicate."""
+        def _record(messages):
+            return enrich_thread_record(
+                build_thread_record("page1", {"name": "User Repeat", "text": "User Repeat\nDạ"}),
+                messages,
+                extract_user_info,
+                detect_city,
+            )
+
+        first = _record([
+            {"sender": "Customer", "text": "Dạ", "timestamp": "Sep 10, 2026, 9:00 AM"},
+            {"sender": "Page", "text": "Hẹn gặp bạn", "timestamp": "Sep 10, 2026, 9:01 AM"},
+        ])
+        persist_thread_record(self.conn, first, detect_city)
+
+        full_resync = _record([
+            {"sender": "Customer", "text": "Dạ", "timestamp": "Sep 10, 2026, 9:00 AM"},
+            {"sender": "Page", "text": "Hẹn gặp bạn", "timestamp": "Sep 10, 2026, 9:01 AM"},
+            {"sender": "Customer", "text": "Dạ", "timestamp": "Sep 19, 2026, 9:00 AM"},
+        ])
+        result = persist_thread_record(self.conn, full_resync, detect_city)
+
+        self.assertEqual(result["messages_added"], 1)
+        rows = self.conn.execute(
+            "SELECT sender, content, message_timestamp FROM messages WHERE thread_id=? ORDER BY seq, id",
+            (first.thread_id,),
+        ).fetchall()
+        self.assertEqual(
+            [(row["sender"], row["content"], row["message_timestamp"]) for row in rows],
+            [
+                ("Customer", "Dạ", "Sep 10, 2026, 9:00 AM"),
+                ("Page", "Hẹn gặp bạn", "Sep 10, 2026, 9:01 AM"),
+                ("Customer", "Dạ", "Sep 19, 2026, 9:00 AM"),
+            ],
+        )
+
+    def test_persist_keeps_same_body_on_distinct_observed_days_without_source_id(self):
+        def _record(day_context, timestamp):
+            return enrich_thread_record(
+                build_thread_record("page1", {"name": "User Same Body", "text": "User Same Body\nDạ"}),
+                [{
+                    "sender": "Customer", "text": "Dạ", "timestamp": timestamp,
+                    "raw_timestamp": "9:00 AM", "day_context": day_context,
+                    "time_precision": "minute",
+                }],
+                extract_user_info, detect_city,
+            )
+
+        first = _record("2026-09-10", "Sep 10, 2026, 9:00 AM")
+        persist_thread_record(self.conn, first, detect_city)
+        later = _record("2026-09-19", "Sep 19, 2026, 9:00 AM")
+        result = persist_thread_record(self.conn, later, detect_city)
+
+        self.assertEqual(result["messages_added"], 1)
+        self.assertEqual(
+            [row["day_context"] for row in self.conn.execute(
+                "SELECT day_context FROM messages WHERE thread_id=? ORDER BY seq", (first.thread_id,)
+            ).fetchall()],
+            ["2026-09-10", "2026-09-19"],
+        )
+
+    def test_persist_does_not_anchor_clock_only_message_to_crawl_day(self):
+        record = enrich_thread_record(
+            build_thread_record("page1", {"name": "User Clock", "text": "User Clock\nDạ"}),
+            [{
+                "sender": "Customer", "text": "Dạ", "timestamp": "9:00 AM",
+                "raw_timestamp": "9:00 AM", "time_precision": "time_only",
+            }],
+            extract_user_info, detect_city,
+        )
+
+        persist_thread_record(self.conn, record, detect_city)
+
+        row = self.conn.execute(
+            "SELECT message_at, message_at_approx FROM messages WHERE thread_id=?",
+            (record.thread_id,),
+        ).fetchone()
+        self.assertIsNone(row["message_at"])
+        self.assertEqual(row["message_at_approx"], 1)
+
+    # code:test-message-history-evidence-001:identity-upsert
+    def test_persist_uses_source_id_for_idempotent_evidence_update(self):
+        def _record(message):
+            return enrich_thread_record(
+                build_thread_record("page1", {"name": "User Evidence", "text": "User Evidence\nHello"}),
+                [message], extract_user_info, detect_city,
+            )
+
+        persist_thread_record(self.conn, _record({
+            "sender": "Unknown", "sender_confidence": "unknown", "text": "Hello",
+            "timestamp": "9:00 AM", "source_id": "fb-message-1",
+            "raw_timestamp": "9:00 AM", "day_context": "2026-09-19",
+            "time_precision": "minute",
+        }), detect_city)
+        result = persist_thread_record(self.conn, _record({
+            "sender": "Unknown", "sender_confidence": "low", "text": "Hello corrected",
+            "timestamp": "9:00 AM", "source_id": "fb-message-1",
+            "raw_timestamp": "9:00 AM", "day_context": "2026-09-19",
+            "time_precision": "minute", "reply_to_message_id": "fb-message-0",
+            "quoted_sender": "Page", "quoted_text": "Original question",
+        }), detect_city)
+
+        self.assertEqual(result["messages_added"], 0)
+        rows = self.conn.execute(
+            """SELECT sender, sender_confidence, content, source_id, day_context,
+                      reply_to_message_id, quoted_sender, quoted_text
+               FROM messages WHERE thread_id=?""",
+            (build_thread_record("page1", {"name": "User Evidence", "text": "User Evidence\nHello"}).thread_id,),
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(dict(rows[0]), {
+            "sender": "Unknown", "sender_confidence": "low", "content": "Hello corrected",
+            "source_id": "fb-message-1", "day_context": "2026-09-19",
+            "reply_to_message_id": "fb-message-0", "quoted_sender": "Page",
+            "quoted_text": "Original question",
+        })
+
+    # code:test-message-history-evidence-001:source-id-collision
+    def test_persist_keeps_all_bodies_when_one_snapshot_reuses_a_wrapper_id(self):
+        """A wrapper id is not a message identity when sibling bodies share it."""
+        def _record():
+            return enrich_thread_record(
+                build_thread_record("page1", {"name": "User Collision", "text": "User Collision\nDòng hai"}),
+                [
+                    {
+                        "sender": "Customer", "text": "Dòng một",
+                        "timestamp": "Sep 11, 2026, 9:00 AM", "day_context": "2026-09-11",
+                        "time_precision": "minute", "source_id": "wrapper-m3",
+                    },
+                    {
+                        "sender": "Customer", "text": "Dòng hai",
+                        "timestamp": "Sep 11, 2026, 9:01 AM", "day_context": "2026-09-11",
+                        "time_precision": "minute", "source_id": "wrapper-m3",
+                    },
+                ],
+                extract_user_info, detect_city,
+            )
+
+        first = _record()
+        result = persist_thread_record(self.conn, first, detect_city)
+        self.assertEqual(result["messages_added"], 2)
+        rows = self.conn.execute(
+            "SELECT content, source_id FROM messages WHERE thread_id=? ORDER BY seq, id",
+            (first.thread_id,),
+        ).fetchall()
+        # The source evidence is ambiguous, so it is not persisted as a false
+        # per-message Facebook id.  Crucially, neither body is discarded.
+        self.assertEqual(
+            [(row["content"], row["source_id"]) for row in rows],
+            [("Dòng một", None), ("Dòng hai", None)],
+        )
+        self.assertEqual(persist_thread_record(self.conn, _record(), detect_city)["messages_added"], 0)
+
+    # code:test-message-history-evidence-001:source-time-upsert
+    def test_source_id_recrawl_replaces_canonical_time_for_resolved_and_unresolved_evidence(self):
+        def _record(message):
+            return enrich_thread_record(
+                build_thread_record("page1", {"name": "User Time Evidence", "text": "User Time Evidence\nDạ"}),
+                [message], extract_user_info, detect_city,
+            )
+
+        persist_thread_record(self.conn, _record({
+            "sender": "Customer", "text": "Dạ", "source_id": "fb-message-time-1",
+            "timestamp": "9:00 AM", "raw_timestamp": "9:00 AM",
+            "time_precision": "time_only",
+        }), detect_city)
+        first = self.conn.execute(
+            "SELECT message_at, message_at_approx FROM messages WHERE source_id='fb-message-time-1'"
+        ).fetchone()
+        self.assertEqual((first["message_at"], first["message_at_approx"]), (None, 1))
+
+        result = persist_thread_record(self.conn, _record({
+            "sender": "Customer", "text": "Dạ", "source_id": "fb-message-time-1",
+            "timestamp": "Sep 11, 2026, 10:00 AM", "raw_timestamp": "Sep 11, 2026, 10:00 AM",
+            "day_context": "2026-09-11", "time_precision": "minute",
+        }), detect_city)
+        self.assertEqual(result["messages_added"], 0)
+        resolved = self.conn.execute(
+            """SELECT message_timestamp, raw_timestamp, day_context, time_precision,
+                      message_at, message_at_approx
+               FROM messages WHERE source_id='fb-message-time-1'"""
+        ).fetchone()
+        self.assertEqual(dict(resolved), {
+            "message_timestamp": "Sep 11, 2026, 10:00 AM",
+            "raw_timestamp": "Sep 11, 2026, 10:00 AM",
+            "day_context": "2026-09-11",
+            "time_precision": "minute",
+            "message_at": "2026-09-11 10:00:00",
+            "message_at_approx": 0,
+        })
+
+        persist_thread_record(self.conn, _record({
+            "sender": "Customer", "text": "Dạ", "source_id": "fb-message-time-1",
+            "timestamp": "10:01 AM", "raw_timestamp": "10:01 AM",
+            "time_precision": "unresolved_day_time",
+        }), detect_city)
+        unresolved = self.conn.execute(
+            """SELECT message_timestamp, raw_timestamp, day_context, time_precision,
+                      message_at, message_at_approx
+               FROM messages WHERE source_id='fb-message-time-1'"""
+        ).fetchone()
+        self.assertEqual(dict(unresolved), {
+            "message_timestamp": "10:01 AM",
+            "raw_timestamp": "10:01 AM",
+            "day_context": "",
+            "time_precision": "unresolved_day_time",
+            "message_at": None,
+            "message_at_approx": 1,
+        })
+
+    # code:test-message-history-evidence-001:reaction-separate-from-body
+    def test_persist_stores_crawled_reaction_as_structured_evidence(self):
+        record = enrich_thread_record(
+            build_thread_record("page1", {"name": "User Reaction", "text": "User Reaction\nCảm ơn"}),
+            [{
+                "sender": "Unknown", "sender_confidence": "unknown", "text": "Cảm ơn",
+                "timestamp": "9:00 AM", "source_id": "fb-message-2",
+                "raw_timestamp": "9:00 AM", "day_context": "2026-09-19",
+                "time_precision": "minute",
+                "reactions": [{
+                    "actor": "Customer", "emoji": "❤️", "target_type": "message",
+                    "target_message_id": "fb-page-message-1", "observed_at": "2026-09-19 09:01:00",
+                    "raw_label": "Customer reacted Love", "parse_confidence": "high",
+                }],
+            }],
+            extract_user_info, detect_city,
+        )
+        persist_thread_record(self.conn, record, detect_city)
+        # Same snapshot must not multiply a reaction event.
+        persist_thread_record(self.conn, record, detect_city)
+
+        message = self.conn.execute(
+            "SELECT sender, source_id FROM messages WHERE thread_id=?", (record.thread_id,)
+        ).fetchone()
+        self.assertEqual((message["sender"], message["source_id"]), ("Unknown", "fb-message-2"))
+        reaction = self.conn.execute(
+            """SELECT source_id, actor, emoji, target_type, target_message_id, observed_at,
+                      raw_label, parse_confidence
+               FROM crawled_message_reactions WHERE thread_id=?""",
+            (record.thread_id,),
+        ).fetchone()
+        self.assertEqual(dict(reaction), {
+            "source_id": "fb-message-2", "actor": "Customer", "emoji": "❤️", "target_type": "message",
+            "target_message_id": "fb-page-message-1", "observed_at": "2026-09-19 09:01:00",
+            "raw_label": "Customer reacted Love", "parse_confidence": "high",
+        })
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM crawled_message_reactions WHERE thread_id=?", (record.thread_id,)
+            ).fetchone()[0],
+            1,
+        )
 
     def test_persist_thread_record_writes_all_boundaries(self):
         thread_record = enrich_thread_record(

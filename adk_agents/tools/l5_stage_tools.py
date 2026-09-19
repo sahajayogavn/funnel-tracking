@@ -65,7 +65,7 @@ def _get_thread_messages(thread_id: str) -> list[dict]:
     conn = get_db_connection()
     try:
         rows = conn.execute(
-            "SELECT sender, content, message_timestamp FROM messages WHERE thread_id = ? ORDER BY seq ASC, id ASC",
+            "SELECT sender, content, message_timestamp FROM messages WHERE thread_id = ? AND kind = 'message' ORDER BY seq ASC, id ASC",
             (thread_id,),
         ).fetchall()
         return [dict(row) for row in rows]
@@ -76,10 +76,12 @@ def _get_thread_messages(thread_id: str) -> list[dict]:
 # code:tool-stage-001:auto-promotion
 
 def _has_touchpoint(thread_id: str) -> bool:
+    # code:stage-gate-decouple-001 — a touch-point is a genuine customer turn,
+    # never an Inbox banner ("replied to an ad.") or a Page-only thread.
     conn = get_db_connection()
     try:
         row = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM messages WHERE thread_id = ?",
+            "SELECT COUNT(*) AS cnt FROM messages WHERE thread_id = ? AND sender = 'Customer' AND kind = 'message'",
             (thread_id,),
         ).fetchone()
         return bool(row and row["cnt"] >= 1)

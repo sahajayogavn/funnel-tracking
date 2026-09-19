@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 import concurrent.futures
 
 from fb_pipeline.browser.inbox.thread_list_parser import extract_visible_threads
-from fb_pipeline.inbox.l3_pipeline import build_thread_record
 
 
 def strip_reaction_suffix(t: str) -> str:
@@ -23,6 +22,18 @@ def normalize_for_qa(text: str) -> str:
     t = re.sub(r"^(Bạn|You):\s*", "", t)
     t = t.rstrip("…").rstrip("...")
     return re.sub(r"\s+", " ", t).strip().casefold()
+
+
+def facebook_name_from_visible_thread(visible_thread: dict) -> str:
+    """Return the Facebook display name rendered on a sidebar card.
+
+    Meta's current Inbox cards expose neither a hovercard UID nor a
+    ``selected_item_id`` until a card has been opened.  Fetch-QA therefore
+    uses the persisted Facebook display name (``threads.thread_name``), not a
+    CRM name and not an unstable DOM URL.  Callers must treat duplicate names
+    as ambiguous rather than choosing one arbitrarily.
+    """
+    return normalize_for_qa(str(visible_thread.get("name") or ""))
 
 def match_for_qa(db_text: str, dom_text: str) -> bool:
     if db_text == "[attachment]" and not dom_text:
@@ -68,17 +79,23 @@ def _qa_logic(page_id: str, fetch_started_at: datetime, page, conn, logger) -> d
         # Evaluate DOM script
         visible_threads = extract_visible_threads(page)[:10]
 
-    # Convert to canonical thread IDs and previews
+    # Meta's sidebar normally exposes Facebook display names but not a stable
+    # PSID until a card is opened.  Preserve that actual Facebook name here;
+    # it is resolved against the persisted ``threads.thread_name`` below.
     dom_top_10 = []
     for rank, vt in enumerate(visible_threads):
-        tr = build_thread_record(page_id, vt)
+        preview_text = vt.get("previewText")
+        if preview_text is None:
+            lines = [line.strip() for line in (vt.get("text") or "").split("\n") if line.strip()]
+            sidebar_time = (vt.get("sidebarTimeText") or "").strip()
+            preview_text = " ".join(line for line in lines[1:] if line != sidebar_time)
         dom_top_10.append({
             "rank": rank,
-            "dom_id": tr.thread_id,
-            "preview_raw": tr.preview_text or "",
-            "preview_norm": normalize_for_qa(tr.preview_text or ""),
+            "facebook_name": facebook_name_from_visible_thread(vt),
+            "preview_raw": preview_text or "",
+            "preview_norm": normalize_for_qa(preview_text or ""),
             "time_label": vt.get("sidebarTimeText", ""),
-            "sender_dom": "Page" if (tr.preview_text or "").lower().startswith(("bạn:", "you:")) else "Customer"
+            "sender_dom": "Page" if (preview_text or "").lower().startswith(("bạn:", "you:")) else "Customer"
         })
         
     # Get DB top 10 from the persisted sidebar snapshot.  Never allow NULL
@@ -87,7 +104,7 @@ def _qa_logic(page_id: str, fetch_started_at: datetime, page, conn, logger) -> d
     # partial/interrupted fetch.  Missing ranks must fail honestly instead.
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT id, thread_name 
+        SELECT id, thread_name
         FROM threads 
         WHERE page_id=? AND inbox_sort_index IS NOT NULL
         ORDER BY inbox_sort_index ASC
@@ -95,6 +112,21 @@ def _qa_logic(page_id: str, fetch_started_at: datetime, page, conn, logger) -> d
     """, (page_id,))
     db_top_10_rows = cursor.fetchall()
     db_top_10_ids = [row[0] for row in db_top_10_rows]
+
+    # Resolve a Facebook name against the whole page, then independently
+    # verify that its ID is present in the persisted top-N snapshot.  Looking
+    # only inside the snapshot turns a partial fetch into a misleading
+    # "unknown name" report even when the thread exists in the database.
+    cursor.execute(
+        "SELECT id, thread_name FROM threads WHERE page_id=?",
+        (page_id,),
+    )
+    db_page_rows = cursor.fetchall()
+    db_ids_by_facebook_name: dict[str, list[str]] = {}
+    for row in db_page_rows:
+        name = normalize_for_qa(row[1] or "")
+        if name:
+            db_ids_by_facebook_name.setdefault(name, []).append(row[0])
     
     qa1_results = []
     qa2_results = []
@@ -103,11 +135,15 @@ def _qa_logic(page_id: str, fetch_started_at: datetime, page, conn, logger) -> d
     db_id_to_rank = {tid: i for i, tid in enumerate(db_top_10_ids)}
     
     for dom_idx, d_thread in enumerate(dom_top_10):
-        dom_id = d_thread["dom_id"]
+        matching_ids = db_ids_by_facebook_name.get(d_thread["facebook_name"], [])
+        # A name is sufficient only when it identifies one persisted Facebook
+        # conversation in this top-N snapshot.  Same-name conversations stay
+        # unmatched, preventing a silent comparison against the wrong thread.
+        dom_id = matching_ids[0] if len(matching_ids) == 1 else ""
         rank = dom_idx + 1
         
         # QA-1 logic
-        if dom_id not in db_top_10_ids:
+        if not dom_id or dom_id not in db_top_10_ids:
             # check freshness
             # time label parsing is complex, we will just assume if it's "vừa xong" or "1 phút" it might be soft.
             # to be safe, if we can't find it, we'll mark soft if it's very new, but we can just use time > fetch_started_at.
@@ -119,7 +155,7 @@ def _qa_logic(page_id: str, fetch_started_at: datetime, page, conn, logger) -> d
             if rank == 1:
                 verdict1 = "soft"
             summary[verdict1] += 1
-            qa1_results.append({"rank": rank, "dom_id": dom_id, "db_id": None, "verdict": verdict1})
+            qa1_results.append({"rank": rank, "facebook_name": d_thread["facebook_name"], "dom_id": dom_id, "db_id": dom_id or None, "verdict": verdict1})
             continue
             
         db_idx = db_id_to_rank[dom_id]
@@ -132,7 +168,7 @@ def _qa_logic(page_id: str, fetch_started_at: datetime, page, conn, logger) -> d
             
         if verdict1 != "pass":
             summary[verdict1] += 1
-        qa1_results.append({"rank": rank, "dom_id": dom_id, "db_id": dom_id, "verdict": verdict1})
+        qa1_results.append({"rank": rank, "facebook_name": d_thread["facebook_name"], "dom_id": dom_id, "db_id": dom_id, "verdict": verdict1})
         
         # QA-2 logic
         # System banners are Inbox UI events, not the message preview that

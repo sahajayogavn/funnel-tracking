@@ -3,7 +3,10 @@
 
 export interface Seeker {
   id: number;
+  // Facebook's display name, used to locate the person in Meta Inbox.
   name: string;
+  // Registration name explicitly supplied by the seeker in the conversation.
+  realName?: string | null;
   threadId?: string;  // users.thread_id for DM seekers
   // Zero-based position from the Meta inbox sidebar. Lower is newer.
   inboxSortIndex?: number | null;
@@ -24,6 +27,10 @@ export interface Seeker {
   lastMessageTimestampText?: string | null;
   lastMessageDate?: string | null;
   classificationStatus?: 'pending' | 'done' | 'unknown';
+  // Latest active outbound draft, surfaced in the table so an operator does
+  // not need to open the seeker sidebar just to review MAS output.
+  pendingMessage?: string | null;
+  pendingMessageKind?: string | null;
 }
 
 export interface Post {
@@ -61,10 +68,42 @@ export interface MessageRow {
   sender: string | null;
   content: string | null;
   messageTimestamp: string | null;
+  // Absolute Facebook event time resolved during ingestion. This is distinct
+  // from `timestamp`, which is when the scraper wrote the row to SQLite.
+  messageAt?: string | null;
+  sourceId?: string | null;
+  senderConfidence?: string | null;
+  timePrecision?: string | null;
+  replyToMessageId?: string | null;
+  quotedSender?: string | null;
+  quotedText?: string | null;
+  reactions?: {
+    actor?: string | null;
+    actorRole?: string | null;
+    emoji?: string | null;
+    targetType?: string | null;
+    targetScope?: string | null;
+    targetId?: string | null;
+  }[];
   // Sequence captured from Facebook's message panel. It is only a tie-breaker
   // after a Facebook timestamp has been interpreted chronologically.
   seq?: number | null;
   timestamp: string;
+}
+
+/** A crawler observation that may target a message, an entire thread, or an
+ * unknown target.  It is deliberately separate from message text. */
+export interface CrawledReactionEvent {
+  id: number;
+  actor: string | null;
+  actorRole: string | null;
+  emoji: string | null;
+  targetType: string | null;
+  targetScope: string | null;
+  targetMessageId: string | null;
+  observedAt: string | null;
+  evidence: string | null;
+  parseConfidence: string | null;
 }
 
 export type JourneyStage =
@@ -90,6 +129,7 @@ export interface TouchPoint {
 export interface SeekerDetail {
   seeker: Seeker;
   messages: MessageRow[];
+  reactionEvents: CrawledReactionEvent[];
   comments: (CommentRow & { postName?: string; postUrl?: string })[];
   adSource: { content: string; matchedPostId?: string; matchedPostName?: string } | null;
   messageCount: number;

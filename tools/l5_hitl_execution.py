@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Independent executor for human-approved outbound Facebook actions.
+"""Poll HITL decisions without sending Facebook DMs.
 
-This process intentionally owns only the delivery boundary: it polls Telegram
-approval reactions, claims approved ``action_queue`` items, and drives the
-already-authorized Facebook CDP browser.  It does not fetch Inbox data, run
-MAS/ADK, classify seekers, or run proactive scheduler routes.
+Approval accepts one draft version for human review; Facebook delivery remains
+a manual yogi action. This worker may observe Telegram decisions, but it must
+never claim or execute outbound DM items through CDP.
 """
 import argparse
 import logging
@@ -22,12 +21,10 @@ from fb_pipeline.session.l2_activity_lock import scheduler_browser_cycle
 
 logger = logging.getLogger("hitl_execution")
 _shutdown_requested = False
-OUTBOUND_QUEUE_TYPES = (
-    "reply_message",
-    "reply_comment",
-    "proactive_comment",
-    "proactive_message",
-)
+# Deliberately empty: automated delivery is disabled by the care contract.
+# Keep the loop entry point so deployments do not fail at import time, while
+# removing the route that previously turned an approval into a CDP send.
+OUTBOUND_QUEUE_TYPES: tuple[str, ...] = ()
 
 
 def _signal_handler(signum, _frame):
@@ -44,9 +41,11 @@ def telegram_poller_job() -> None:
 
 
 def hitl_execution_job(page_id: str, dry_run: bool = True) -> None:
-    """Claim and execute only FIFO action-queue items humans approved."""
+    """Observe the disabled delivery boundary without changing queue state."""
     from tools.l5_action_queue import claim_next_action, finish_action, peek_next_approved
 
+    _ = (page_id, dry_run, claim_next_action, finish_action, peek_next_approved)
+    logger.info("HITL delivery is manual-only; no approved action is claimed or sent.")
     for queue_type in OUTBOUND_QUEUE_TYPES:
         if dry_run:
             # A dry run never claims work or attaches to the browser.
@@ -74,45 +73,9 @@ def hitl_execution_job(page_id: str, dry_run: bool = True) -> None:
                 finish_action(item["id"])
 
 def _execute_approved_action(item: dict, fallback_page_id: str, dry_run: bool = False) -> None:
-    """The sole CDP delivery boundary; approval was already persisted."""
-    if item.get("reaction_type"):
-        raise RuntimeError("Live Facebook reaction executor is not configured")
-    if item["queue_type"] in {"reply_comment", "proactive_comment"}:
-        raise RuntimeError("Live Facebook comment executor is not configured")
-
-    from playwright.sync_api import sync_playwright
-    from fb_pipeline.session.l2_bootstrap import attach_to_authorized_session, stamp_tab_role
-    from fb_pipeline.browser.l2_actions import navigate_to_thread, send_reply_via_cdp, commit_reply_via_cdp
-
-    page_id = item.get("page_id") or fallback_page_id
-    with sync_playwright() as playwright:
-        session = attach_to_authorized_session(
-            playwright, page_id, f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}",
-            tab_role=f"outbound:{item['id']}",
-        )
-        try:
-            if not navigate_to_thread(session.page, page_id, item.get("target_name") or "", item.get("target_id")):
-                raise RuntimeError("Facebook inbox thread could not be opened")
-            if not send_reply_via_cdp(session.page, item.get("action_text") or "", dry_run=dry_run):
-                raise RuntimeError("Facebook composer could not be filled")
-            if dry_run:
-                logger.info("[DRY-RUN] Skipping send for action queue item %s", item["id"])
-                return
-            if not commit_reply_via_cdp(session.page):
-                raise RuntimeError("Facebook message could not be sent")
-            if item["queue_type"] == "reply_message":
-                from adk_agents.tools.l5_facebook_tools import log_auto_reply
-
-                log_auto_reply(
-                    item.get("target_id") or "", item.get("action_text") or "",
-                    agent_name="human_approved_executor", dry_run=False,
-                    customer_message_timestamp=item.get("payload", {}).get("customer_message_timestamp"),
-                )
-        finally:
-            # Full Facebook navigations wipe the role marker. Re-stamp before
-            # the next poll so this action reuses its tab instead of creating a
-            # growing set of fresh tabs with partially initialized Meta state.
-            stamp_tab_role(session.page, session.tab_role)
+    """Reject direct delivery calls: approval is not authorization to send."""
+    _ = (item, fallback_page_id, dry_run)
+    raise RuntimeError("Automated Facebook delivery is disabled; send the approved draft manually.")
 
 
 def run_hitl_loop(page_id: str, dry_run: bool, interval_seconds: int = 30) -> None:

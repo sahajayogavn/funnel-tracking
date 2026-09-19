@@ -107,18 +107,46 @@ class TestParseLlmResponse(unittest.TestCase):
         result = _parse_llm_response(raw)
         self.assertEqual(result["city"], "Online")
 
+    def test_program_city_overrides_conflicting_model_city(self):
+        raw = '{"city":"Hà Nội","program_code":"20h30-Online-HCM","confidence":"high"}'
+        result = _parse_llm_response(raw)
+        self.assertEqual(result["city"], "TP. Hồ Chí Minh")
+        self.assertEqual(result["program_code"], "20h30-Online-HCM")
+
+    def test_recovers_completed_contact_and_program_fields_from_truncated_json(self):
+        raw = (
+            '{"city": "Hà Nội", "program_code": "14h30-CN-Vương Thừa Vũ-HN", '
+            '"full_name": "Nguyễn Thị Hải Yến", "phone": "0938241999", '
+            '"confidence": "high", "proof'
+        )
+        result = _parse_llm_response(raw)
+        self.assertEqual(result["city"], "Hà Nội")
+        self.assertEqual(result["program_code"], "14h30-CN-Vương Thừa Vũ-HN")
+        self.assertEqual(result["full_name"], "Nguyễn Thị Hải Yến")
+        self.assertEqual(result["phone"], "0938241999")
+        self.assertEqual(result["reasoning"], "Partial JSON response recovered.")
+
 
 class TestDetectCityLlm(unittest.TestCase):
     """Tests for the main LLM call function (mocked API)."""
 
-    @patch("fb_pipeline.contracts.l1_city_llm.requests.post")
+    def tearDown(self):
+        from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+        real_conn = get_db_connection()
+        real_conn.execute("DELETE FROM llm_calls WHERE subject_label IN ('Test User', 'Test')")
+        real_conn.commit()
+        real_conn.close()
+
+
+    @patch("tools.l5_llm_provider.requests.post")
     def test_successful_call(self, mock_post):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
-            "choices": [{"message": {"content":
+            "candidates": [{"content": {"parts": [{"text":
                 '{"city": "Đà Nẵng", "confidence": "high", "reasoning": "user said Đà Nẵng"}'
-            }}]
+            }]}}],
+            "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 8},
         }
         mock_resp.raise_for_status = MagicMock()
         mock_post.return_value = mock_resp
@@ -135,10 +163,39 @@ class TestDetectCityLlm(unittest.TestCase):
         self.assertEqual(result["city"], "Đà Nẵng")
         self.assertEqual(result["confidence"], "high")
         mock_post.assert_called_once()
+        request_url = mock_post.call_args.args[0]
+        request_headers = mock_post.call_args.kwargs["headers"]
+        request_payload = mock_post.call_args.kwargs["json"]
+        self.assertIn("generativelanguage.googleapis.com/v1beta/models/gpt-5.4:generateContent", request_url)
+        self.assertEqual(request_headers["x-goog-api-key"], "test-key")
+        self.assertIn("system_instruction", request_payload)
+        self.assertNotIn("messages", request_payload)
+        self.assertEqual(request_payload["generationConfig"]["maxOutputTokens"], 1024)
+        self.assertEqual(request_payload["generationConfig"]["thinkingConfig"], {"thinkingLevel": "LOW"})
+
+    @patch("tools.l5_llm_provider.requests.post")
+    def test_max_tokens_response_is_fail_closed_and_retryable(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "candidates": [{
+                "finishReason": "MAX_TOKENS",
+                "content": {"parts": [{"text": '{"city":"Hà Nội"'}]},
+            }],
+        }
+        mock_post.return_value = mock_resp
+
+        result = detect_city_llm(
+            thread_name="Test", customer_messages=["Em ở Hà Nội"],
+            page_messages=[], ad_content="", api_key="test-key", model="gemini-test",
+        )
+        self.assertEqual(result["city"], "Unknown")
+        self.assertIn("maxoutputtokens", result["reasoning"].lower())
+        self.assertEqual(mock_post.call_count, 1)
 
     # code:tool-citydetect-001:llm-retry
     @patch("fb_pipeline.contracts.l1_city_llm.time.sleep")
-    @patch("fb_pipeline.contracts.l1_city_llm.requests.post")
+    @patch("tools.l5_llm_provider.requests.post")
     def test_api_timeout(self, mock_post, mock_sleep):
         import requests
         mock_post.side_effect = requests.exceptions.Timeout("timeout")
@@ -156,7 +213,7 @@ class TestDetectCityLlm(unittest.TestCase):
                          [3.0 * 2 ** i for i in range(9)])
 
     @patch("fb_pipeline.contracts.l1_city_llm.time.sleep")
-    @patch("fb_pipeline.contracts.l1_city_llm.requests.post")
+    @patch("tools.l5_llm_provider.requests.post")
     def test_api_error(self, mock_post, mock_sleep):
         import requests
         mock_post.side_effect = requests.exceptions.ConnectionError("refused")
@@ -170,13 +227,13 @@ class TestDetectCityLlm(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 10)
 
     @patch("fb_pipeline.contracts.l1_city_llm.time.sleep")
-    @patch("fb_pipeline.contracts.l1_city_llm.requests.post")
+    @patch("tools.l5_llm_provider.requests.post")
     def test_api_recovers_after_transient_failure(self, mock_post, mock_sleep):
         import requests
         ok = MagicMock()
         ok.raise_for_status = MagicMock()
-        ok.json.return_value = {"choices": [{"message": {"content":
-            '{"city": "Hà Nội", "program_code": null, "confidence": "high", "reasoning": "x"}'}}]}
+        ok.json.return_value = {"candidates": [{"content": {"parts": [{"text":
+            '{"city": "Hà Nội", "program_code": null, "confidence": "high", "reasoning": "x"}'}]}}]}
         mock_post.side_effect = [requests.exceptions.ConnectionError("refused"),
                                  requests.exceptions.Timeout("timeout"), ok]
 
@@ -234,6 +291,12 @@ class TestGatherSignals(unittest.TestCase):
         self.conn.commit()
 
     def tearDown(self):
+        from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+        real_conn = get_db_connection()
+        real_conn.execute("DELETE FROM llm_calls WHERE subject_label IN ('Test User', 'Test')")
+        real_conn.commit()
+        real_conn.close()
+
         self.conn.close()
 
     def test_gather_all_signals(self):
@@ -256,11 +319,14 @@ class TestGatherSignals(unittest.TestCase):
 
         signals = gather_signals_for_user(self.conn, "t2")
         self.assertEqual(signals["ad_content"], "")
+
     def test_gather_excludes_contaminated_shared_ad_context(self):
         cursor = self.conn.cursor()
-        cursor.execute("INSERT INTO user_ad_ids VALUES ('t1', 'unsafe-ad')")
         cursor.execute(
-            "INSERT INTO ad_posts VALUES ('unsafe-ad', ?)",
+            "INSERT INTO user_ad_ids VALUES ('t1', 'unsafe-ad')"
+        )
+        cursor.execute(
+            "INSERT INTO ad_posts VALUES ('unsafe-ad', ?)" ,
             ("Another Person replied to an ad.\nSent by\nAn operator",),
         )
         self.conn.commit()
@@ -304,18 +370,21 @@ class TestClassifyUser(unittest.TestCase):
         self.conn.commit()
 
     def tearDown(self):
+        from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+        real_conn = get_db_connection()
+        real_conn.execute("DELETE FROM llm_calls WHERE subject_label IN ('Test User', 'Test')")
+        real_conn.commit()
+        real_conn.close()
+
         self.conn.close()
 
-    @patch("fb_pipeline.contracts.l1_city_llm.requests.post")
+    @patch("tools.l5_llm_provider.requests.post")
     def test_dry_run_no_update(self, mock_post):
         from tools.classify_city import classify_user
 
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "choices": [{"message": {"content":
-                '{"city": "Đà Nẵng", "confidence": "high", "reasoning": "user said ĐN"}'
-            }}]
-        }
+        mock_resp.json.return_value = {"candidates": [{"content": {"parts": [{"text":
+            '{"city": "Đà Nẵng", "confidence": "high", "reasoning": "user said ĐN"}'}]}}]}
         mock_resp.raise_for_status = MagicMock()
         mock_post.return_value = mock_resp
 
@@ -331,16 +400,13 @@ class TestClassifyUser(unittest.TestCase):
         row = self.conn.execute("SELECT city FROM users WHERE thread_id = 't1'").fetchone()
         self.assertEqual(row["city"], "Unknown")
 
-    @patch("fb_pipeline.contracts.l1_city_llm.requests.post")
+    @patch("tools.l5_llm_provider.requests.post")
     def test_write_mode_updates_db(self, mock_post):
         from tools.classify_city import classify_user
 
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "choices": [{"message": {"content":
-                '{"city": "Đà Nẵng", "confidence": "high", "reasoning": "user said ĐN"}'
-            }}]
-        }
+        mock_resp.json.return_value = {"candidates": [{"content": {"parts": [{"text":
+            '{"city": "Đà Nẵng", "confidence": "high", "reasoning": "user said ĐN"}'}]}}]}
         mock_resp.raise_for_status = MagicMock()
         mock_post.return_value = mock_resp
 

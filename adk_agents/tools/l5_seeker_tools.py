@@ -35,7 +35,7 @@ def lookup_seeker(thread_id: str) -> dict:
     try:
         conn = get_db_connection()
         row = conn.execute(
-            "SELECT thread_name, phone, email, fb_url, city, lead_stage, "
+            "SELECT thread_name, phone, email, fb_url, city, lead_stage, program_code, temperature, "
             "first_seen, last_interaction FROM users WHERE thread_id = ?",
             (thread_id,)
         ).fetchone()
@@ -49,6 +49,8 @@ def lookup_seeker(thread_id: str) -> dict:
                 "email": row["email"],
                 "city": row["city"],
                 "lead_stage": row["lead_stage"] or "Intake",
+                "program_code": row["program_code"],
+                "temperature": row["temperature"],
                 "first_seen": row["first_seen"],
                 "last_interaction": row["last_interaction"],
             }
@@ -59,23 +61,64 @@ def lookup_seeker(thread_id: str) -> dict:
 
 
 def get_thread_messages(thread_id: str, limit: int = 150) -> dict:
-    """Get the most recent messages from a specific thread up to ~3500 characters.
+    """Get source-aware history for one thread without inventing attribution.
 
     Args:
         thread_id: The thread ID to fetch messages for.
         limit: DB query limit (default 150). Will dynamically cap around 3500 chars.
 
     Returns:
-        dict: Status and list of messages with sender, content, timestamp.
+        dict: ``messages`` contains only message bodies and their source
+        evidence.  ``reaction_events`` is a separate, complete audit stream
+        of crawled reactions.  In particular, a thread-level or unknown-target
+        reaction is never assigned to the nearest message merely to fit a
+        legacy message-shaped payload.
+
+        Older read-only snapshots can predate the evidence migration.  Missing
+        columns/tables are represented as unknown/empty evidence rather than
+        making the whole history unreadable or inferring values from content.
     """
+    conn = None
     try:
         conn = get_db_connection()
+        message_columns = _table_columns(conn, "messages")
+        # code:inbox-msg-kind-001 — system banners/reactions never become
+        # message text supplied to the model.  Column expressions deliberately
+        # cover old readonly DB snapshots that lack notation migration fields.
+        message_fields = (
+            ("source_id", "NULL"),
+            ("sender", "'Unknown'"),
+            ("sender_confidence", "'unknown'"),
+            ("content", "''"),
+            ("message_timestamp", "NULL"),
+            ("message_at", "NULL"),
+            ("message_at_approx", "NULL"),
+            ("raw_timestamp", "NULL"),
+            ("day_context", "NULL"),
+            ("time_precision", "'unknown'"),
+            ("reply_to_message_id", "NULL"),
+            ("quoted_sender", "NULL"),
+            ("quoted_sender_confidence", "'unknown'"),
+            ("quoted_text", "NULL"),
+            ("sender_evidence", "NULL"),
+            ("quote_evidence", "NULL"),
+            ("seq", "0"),
+            ("id", "0"),
+        )
+        message_select = ", ".join(
+            _column_or_default("m", message_columns, field, fallback)
+            for field, fallback in message_fields
+        )
+        kind_clause = "AND m.kind = 'message'" if "kind" in message_columns else ""
+        order_column = "m.seq" if "seq" in message_columns else "m.id"
         rows = conn.execute(
-            "SELECT sender, content, message_timestamp FROM messages "
-            "WHERE thread_id = ? ORDER BY seq DESC LIMIT ?",
-            (thread_id, limit)
+            f"SELECT {message_select} FROM messages m "
+            f"WHERE m.thread_id = ? {kind_clause} "
+            f"ORDER BY {order_column} DESC LIMIT ?",
+            (thread_id, limit),
         ).fetchall()
-        conn.close()
+
+        reaction_events = _get_crawled_reaction_events(conn, thread_id)
 
         messages = []
         total_chars = 0
@@ -85,19 +128,130 @@ def get_thread_messages(thread_id: str, limit: int = 150) -> dict:
             char_cost = len(content) + 50
             if total_chars + char_cost > 3500 and total_chars > 0:
                 break
-            messages.append({"sender": r["sender"], "content": content, "timestamp": r["message_timestamp"]})
+            messages.append({
+                "sender": r["sender"],
+                "content": content,
+                "timestamp": r["message_timestamp"],
+                "message_at": r["message_at"],
+                "message_at_approx": r["message_at_approx"],
+                "seq": r["seq"],
+                "source_id": r["source_id"],
+                "sender_confidence": r["sender_confidence"],
+                "raw_timestamp": r["raw_timestamp"],
+                "day_context": r["day_context"],
+                "time_precision": r["time_precision"],
+                "reply_to_message_id": r["reply_to_message_id"],
+                "quoted_sender": r["quoted_sender"],
+                "quoted_sender_confidence": r["quoted_sender_confidence"],
+                "quoted_text": r["quoted_text"],
+                "sender_evidence": r["sender_evidence"],
+                "quote_evidence": r["quote_evidence"],
+            })
             total_chars += char_cost
 
         # Reverse so the order is chronological (Oldest -> Newest)
         messages.reverse()
-        return {"status": "success", "messages": messages, "count": len(messages)}
+        return {
+            "status": "success",
+            "messages": messages,
+            "reaction_events": reaction_events,
+            "count": len(messages),
+        }
     except Exception as e:
         logger.error(f"Message fetch failed: {e}")
         return {"status": "error", "error": str(e)}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _table_columns(conn, table_name: str) -> set[str]:
+    """Return a table's columns without assuming an evidence migration ran."""
+    # Table names are module constants, not user input.  PRAGMA cannot bind a
+    # table identifier; keep the allow-list here so this helper remains safe.
+    if table_name not in {"messages", "crawled_message_reactions"}:
+        raise ValueError(f"Unsupported table: {table_name}")
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})")}
+
+
+def _column_or_default(table_alias: str, columns: set[str], column: str, fallback: str) -> str:
+    """Build one stable output alias for a nullable legacy schema field."""
+    if column in columns:
+        return f"{table_alias}.{column} AS {column}"
+    return f"{fallback} AS {column}"
+
+
+def _get_crawled_reaction_events(conn, thread_id: str) -> list[dict]:
+    """Read every crawled reaction as an independent evidence event.
+
+    This intentionally does not join reactions to ``messages``.  A matching
+    target id tells an auditor what Facebook claimed as the target; it is not a
+    licence to attach thread/unknown-target reactions to some bubble in the
+    model's conversation text.
+    """
+    reaction_columns = _table_columns(conn, "crawled_message_reactions")
+    # A malformed/pre-migration table without thread identity cannot be scoped
+    # safely.  Returning no events is preferable to leaking another thread's
+    # observation or attaching it to the current thread by guesswork.
+    if not reaction_columns or "thread_id" not in reaction_columns:
+        return []
+
+    reaction_fields = (
+        ("id", "NULL"),
+        ("reaction_key", "NULL"),
+        ("source_id", "NULL"),
+        ("actor", "'unknown'"),
+        ("actor_role", "'unknown'"),
+        ("emoji", "'unknown'"),
+        ("target_type", "'unknown'"),
+        ("target_message_id", "NULL"),
+        ("target_scope", "'unknown'"),
+        ("observed_at", "NULL"),
+        ("occurred_at", "NULL"),
+        ("raw_label", "NULL"),
+        ("evidence", "NULL"),
+        ("parse_confidence", "'unknown'"),
+    )
+    reaction_select = ", ".join(
+        _column_or_default("r", reaction_columns, field, fallback)
+        for field, fallback in reaction_fields
+    )
+    order_column = "r.id" if "id" in reaction_columns else "r.rowid"
+    rows = conn.execute(
+        f"SELECT {reaction_select} FROM crawled_message_reactions r "
+        f"WHERE r.thread_id = ? ORDER BY {order_column} ASC",
+        (thread_id,),
+    ).fetchall()
+    events = []
+    for reaction in rows:
+        target_id = reaction["target_message_id"]
+        events.append({
+            "reaction_id": reaction["id"],
+            "reaction_key": reaction["reaction_key"],
+            "source_id": reaction["source_id"],
+            "actor": reaction["actor"],
+            "actor_role": reaction["actor_role"],
+            "emoji": reaction["emoji"],
+            "target_type": reaction["target_type"],
+            "target_message_id": target_id,
+            # Kept as an explicit compatibility alias; it is copied from the
+            # target field, never looked up from the enclosing message.
+            "target_id": target_id,
+            "target_scope": reaction["target_scope"],
+            "observed_at": reaction["observed_at"],
+            "occurred_at": reaction["occurred_at"],
+            "raw_label": reaction["raw_label"],
+            "evidence": reaction["evidence"],
+            "parse_confidence": reaction["parse_confidence"],
+        })
+    return events
 
 
 def find_unreplied_threads(page_id: str, limit: int = 10) -> dict:
-    """Find threads whose latest customer message has not been acknowledged.
+    """Find threads whose latest genuine customer message has not been acknowledged.
+
+    Only rows with ``kind='message'`` count (code:inbox-msg-kind-001); a
+    re-scraped "replied to an ad." banner cannot make a thread look unreplied.
 
     Args:
         page_id: The Facebook Page ID to search threads for.
@@ -111,7 +265,8 @@ def find_unreplied_threads(page_id: str, limit: int = 10) -> dict:
 
         rows = conn.execute('''
             WITH last AS (
-                SELECT thread_id, MAX(seq) AS max_seq FROM messages GROUP BY thread_id
+                SELECT thread_id, MAX(seq) AS max_seq FROM messages
+                WHERE kind = 'message' GROUP BY thread_id
             ),
             lm AS (
                 SELECT m.thread_id, m.sender, m.seq, m.message_timestamp, m.timestamp AS recorded_at 
@@ -121,17 +276,77 @@ def find_unreplied_threads(page_id: str, limit: int = 10) -> dict:
                 SELECT thread_id, MAX(CAST(json_extract(payload_json,'$.last_message_seq') AS INTEGER)) AS seq
                 FROM telegram_hitl_queue WHERE route='inbox' GROUP BY thread_id
             )
-            SELECT t.id, t.thread_name
+            , scheduled AS (
+                SELECT thread_id, last_message_seq AS seq
+                FROM inbox_mas_processed_messages
+            )
+            SELECT t.id, t.thread_name, lm.sender AS latest_sender, lm.seq AS latest_seq
             FROM lm JOIN threads t ON t.id=lm.thread_id
             LEFT JOIN proposed p ON p.thread_id=lm.thread_id
-            WHERE t.page_id=? AND lm.sender='Customer' AND (p.seq IS NULL OR p.seq < lm.seq)
+            LEFT JOIN scheduled s ON s.thread_id=lm.thread_id
+            -- An unresolved actor with a non-empty body is deliberately
+            -- surfaced to the deterministic gate.  It must become a
+            -- needs-review record, never an automatic customer draft; leaving
+            -- it out here would turn parser uncertainty into a silent skip.
+            WHERE t.page_id=? AND lm.sender IN ('Customer', 'Unknown')
+              AND NULLIF(TRIM((SELECT content FROM messages
+                               WHERE thread_id=lm.thread_id AND seq=lm.seq)), '') IS NOT NULL
+              AND (p.seq IS NULL OR p.seq < lm.seq)
+              AND (s.seq IS NULL OR s.seq < lm.seq)
             ORDER BY t.inbox_sort_index LIMIT ?;
         ''', (page_id, limit)).fetchall()
         conn.close()
 
-        threads = [{"thread_id": r["id"], "thread_name": r["thread_name"]}
+        threads = [{"thread_id": r["id"], "thread_name": r["thread_name"],
+                    "latest_sender": r["latest_sender"], "latest_seq": r["latest_seq"]}
                    for r in rows]
         return {"status": "success", "threads": threads, "count": len(threads)}
     except Exception as e:
         logger.error(f"Unreplied threads query failed: {e}")
         return {"status": "error", "error": str(e)}
+
+
+def claim_scheduled_inbox_message(thread_id: str, expected_message_seq: int | None = None) -> bool:
+    """Atomically mark the latest customer turn as consumed by scheduled MAS.
+
+    This deliberately happens *before* an LLM call.  The marker suppresses
+    repeat scheduled generation for every downstream outcome: awaiting a human
+    reply, approved/rejected draft, escalation, timeout, or agent error.  The
+    manual dashboard MAS path does not call this function, so an operator can
+    explicitly regenerate a selected thread.  A newer customer turn replaces
+    the sequence and becomes eligible normally.
+    """
+    conn = get_db_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT MAX(seq) AS seq FROM messages "
+            "WHERE thread_id=? AND sender='Customer' AND kind='message'",
+            (thread_id,),
+        ).fetchone()
+        seq = row["seq"] if row else None
+        if seq is None:
+            conn.rollback()
+            return False
+        # Do not claim a newer turn that arrived after the caller assembled
+        # its prompt.  It must be read in a later cycle with its own context.
+        if expected_message_seq is not None and int(seq) != int(expected_message_seq):
+            conn.rollback()
+            return False
+        cursor = conn.execute(
+            """INSERT INTO inbox_mas_processed_messages
+                   (thread_id, last_message_seq, processed_at, updated_at)
+               VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+               ON CONFLICT(thread_id) DO UPDATE SET
+                   last_message_seq=excluded.last_message_seq,
+                   updated_at=CURRENT_TIMESTAMP
+               WHERE inbox_mas_processed_messages.last_message_seq < excluded.last_message_seq""",
+            (thread_id, int(seq)),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()

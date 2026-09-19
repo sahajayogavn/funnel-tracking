@@ -1,4 +1,6 @@
 import hashlib
+import json
+from collections import Counter
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
@@ -118,10 +120,10 @@ def build_thread_record(page_id: str, visible_thread: dict) -> ThreadRecord:
 def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract_user_info,
                          detect_city=None, ad_context: str = "", fb_url: str = "",
                          ad_ids: list | None = None) -> EnrichedThreadRecord:
-    # Do not attach a surrounding Inbox transcript to a shared ad id: it would
-    # make another seeker's messages available to later Signal 3 LLM calls.
+    # Never attach the surrounding Inbox transcript to a shared ad id.  Apart
+    # from corrupting the ad record, that would leak another seeker's messages
+    # into Signal 3 for every later classification using this ad.
     ad_context = sanitize_ad_content(ad_context)
-
     db_msgs = [{"sender": m.get("sender"), "content": m.get("text", "")} for m in js_messages]
     user_info = extract_user_info(db_msgs, thread_record.thread_name, ad_context)
     # Classification is intentionally deferred to one batch + independent
@@ -132,14 +134,32 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
     normalized_messages = []
     for idx, msg in enumerate(js_messages):
         text = (msg.get("text") or "").strip()
-        if not text:
+        reactions = list(msg.get("reactions") or [])
+        # A reaction-only DOM observation has no conversational body, but it
+        # is still evidence and must reach the separate reaction persistence
+        # path. It is never made into a synthetic emoji message.
+        if not text and not reactions:
             continue
         normalized_messages.append(
             InboxMessage(
-                sender=msg.get("sender", "Unknown"),
+                # The scraper may not be able to establish an actor.  Persist
+                # that uncertainty instead of defaulting it to the seeker.
+                sender=msg.get("sender") or "Unknown",
                 content=text,
                 message_timestamp=msg.get("timestamp", ""),
                 seq=idx,
+                source_id=msg.get("source_id") or None,
+                sender_confidence=msg.get("sender_confidence") or "unknown",
+                raw_timestamp=msg.get("raw_timestamp") or msg.get("timestamp", ""),
+                day_context=msg.get("day_context") or "",
+                time_precision=msg.get("time_precision") or "unknown",
+                reply_to_message_id=msg.get("reply_to_message_id") or None,
+                quoted_sender=msg.get("quoted_sender") or None,
+                quoted_sender_confidence=msg.get("quoted_sender_confidence") or "unknown",
+                quoted_text=msg.get("quoted_text") or None,
+                sender_evidence=msg.get("sender_evidence") or None,
+                quote_evidence=msg.get("quote_evidence") or None,
+                reactions=reactions,
             )
         )
 
@@ -186,6 +206,87 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
     )
 
 
+def _persist_crawled_reactions(cursor, thread_id: str, reactions: list[dict],
+                               message_source_id: str | None = None) -> None:
+    """Persist browser-observed reactions without attributing missing facts.
+
+    This intentionally writes a separate evidence table from the legacy
+    ``reactions`` table, which tracks the application's own outbound actions.
+    A reaction attached by the DOM to a bubble is not proof that the bubble's
+    sender performed it, so target and actor are copied only from the parser's
+    structured observation and otherwise remain ``unknown``/NULL.
+    """
+    for reaction in reactions or []:
+        if not isinstance(reaction, dict):
+            continue
+        # The enclosing message source id is a direct DOM association, not an
+        # actor/target inference. It remains a source reference only; target
+        # fields below stay unknown unless the parser observed them explicitly.
+        source_id = (
+            reaction.get("source_id") or message_source_id or ""
+        ).strip() or None
+        actor = (reaction.get("actor") or "unknown").strip() or "unknown"
+        emoji = (reaction.get("emoji") or "unknown").strip() or "unknown"
+        target_type = (reaction.get("target_type") or "unknown").strip() or "unknown"
+        target_message_id = (reaction.get("target_message_id") or "").strip() or None
+        observed_at = (reaction.get("observed_at") or "").strip() or None
+        occurred_at = (reaction.get("occurred_at") or "").strip() or None
+        raw_label = (reaction.get("raw_label") or "").strip() or None
+        parse_confidence = (reaction.get("parse_confidence") or "unknown").strip() or "unknown"
+        actor_role = (reaction.get("actor_role") or "unknown").strip() or "unknown"
+        target_scope = (reaction.get("target_scope") or target_type).strip() or "unknown"
+        evidence = (reaction.get("evidence") or "").strip() or None
+
+        # The key is a snapshot evidence fingerprint, not an invented Facebook
+        # id.  It permits different people/emojis on the same target while
+        # making an unchanged re-crawl idempotent.
+        key_material = json.dumps(
+            {
+                "source_id": source_id,
+                "actor": actor,
+                "emoji": emoji,
+                "target_type": target_type,
+                "target_message_id": target_message_id,
+                "observed_at": observed_at,
+                "occurred_at": occurred_at,
+                "raw_label": raw_label,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        reaction_key = hashlib.sha256(key_material.encode("utf-8")).hexdigest()
+        cursor.execute(
+            """INSERT INTO crawled_message_reactions
+               (thread_id, reaction_key, source_id, actor, actor_role, emoji, target_type,
+                target_message_id, target_scope, observed_at, occurred_at, raw_label,
+                evidence, parse_confidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(thread_id, reaction_key) DO UPDATE SET
+                   actor=excluded.actor, actor_role=excluded.actor_role,
+                   target_type=excluded.target_type, target_message_id=excluded.target_message_id,
+                   target_scope=excluded.target_scope, observed_at=excluded.observed_at,
+                   occurred_at=excluded.occurred_at, raw_label=excluded.raw_label,
+                   evidence=excluded.evidence, parse_confidence=excluded.parse_confidence""",
+            (
+                thread_id,
+                reaction_key,
+                source_id,
+                actor,
+                actor_role,
+                emoji,
+                target_type,
+                target_message_id,
+                target_scope,
+                observed_at,
+                occurred_at,
+                raw_label,
+                evidence,
+                parse_confidence,
+            ),
+        )
+
+
 # code:bug-inbox-thread-name-001:persist-valid-fb-name
 def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city=None) -> dict:
     # The display name can change between crawls.  A valid name read from the
@@ -200,11 +301,15 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     cursor = conn.cursor()
     messages_added = 0
     new_customer_message_added = False
-    # Defend this boundary too: callers can construct records directly.
+    # Defend the persistence boundary too; records can be constructed by
+    # callers other than `enrich_thread_record`.
     ad_context = sanitize_ad_content(thread_record.ad_context)
 
-
-    cursor.execute("SELECT sender, content, seq FROM messages WHERE thread_id=? ORDER BY seq ASC", (thread_record.thread_id,))
+    cursor.execute(
+        """SELECT id, sender, content, seq, source_id, day_context
+           FROM messages WHERE thread_id=? ORDER BY seq ASC""",
+        (thread_record.thread_id,),
+    )
     existing_msgs = cursor.fetchall()
     
     import re
@@ -219,88 +324,206 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
         s = re.sub(r'(\[Quoted Reply/Link\]:\s*)+$', '', s.strip())
         return re.sub(r'\s+', '', s.lower())
 
-    # code:bug-inbox-message-dedup-002
-    # Retrospective [2026-09-17]: "Auto_Page" is assigned at save time (canned
-    # replies, and the AD SOURCE-prefixed first row), while the scraper always
-    # reports "Page". Comparing the raw sender made every such row look new,
-    # so "<name> replied to an ad." was appended again on every crawl.
+    # `Auto_Page` only exists in legacy rows created by a former content-based
+    # sender heuristic. Treat it as Page for *matching those legacy rows*, but
+    # never create or infer it for a newly observed message.
     def _normalize_sender(s):
         s = _normalize(s)
         return "page" if s == "auto_page" else s
 
-    existing_list = [(_normalize_sender(row['sender']), _normalize(row['content'])) for row in existing_msgs]
-    existing_set = set(existing_list)
+    def _fingerprint(sender, content, source_id=None, day_context=""):
+        """Return the strongest available identity without inventing one.
+
+        A Facebook source id wins.  Without it, a parser-provided absolute day
+        plus sender/body makes repeated short acknowledgements on different
+        days distinct.  Older rows without either retain the ordered-overlap
+        fallback below; they are never globally deduped by body text.
+        """
+        normalized_sender = _normalize_sender(sender)
+        normalized_content = _normalize(content)
+        source_id = (source_id or "").strip()
+        if source_id:
+            return ("source", source_id)
+        day_context = (day_context or "").strip()
+        if len(day_context) == 10 and day_context[4:5] == "-" and day_context[7:8] == "-":
+            return ("day", normalized_sender, normalized_content, day_context)
+        return ("body", normalized_sender, normalized_content)
+
+    def _body_fingerprint(sender, content, day_context=""):
+        """Fallback identity when a source id is absent or unusable.
+
+        This is deliberately only used for ordered snapshot alignment.  It is
+        not a global body dedupe key: repeated acknowledgements remain
+        separate events unless they are part of the exact re-fetched overlap.
+        """
+        normalized_sender = _normalize_sender(sender)
+        normalized_content = _normalize(content)
+        day_context = (day_context or "").strip()
+        if len(day_context) == 10 and day_context[4:5] == "-" and day_context[7:8] == "-":
+            return ("day", normalized_sender, normalized_content, day_context)
+        return ("body", normalized_sender, normalized_content)
+
+    # A DOM wrapper id is not a Facebook *message* id when two bodies from the
+    # same snapshot claim it.  The unique DB index would otherwise silently
+    # erase a sibling, or an upsert could overwrite the wrong body.  Keep both
+    # bodies and treat that id as unavailable for this observation; a later
+    # parser boundary fix can provide a real per-message id.  Never mint a
+    # synthetic Facebook id from the wrapper or body text.
+    existing_by_source_id = {
+        row["source_id"]: row["id"]
+        for row in existing_msgs
+        if row["source_id"]
+    }
     
     # Inbox includes operational rows (assignment, labels, etc.) in its DOM.
     # They are not conversation messages and must neither be saved nor affect
     # overlap/sequence calculation for the actual message timeline.
+    # Reactions can arrive on an already persisted bubble or without a body
+    # bubble in the current viewport. Persist them independently before the
+    # conversational-body filter below; otherwise pure reaction observations
+    # disappear at the normalizer boundary.
+    for msg in thread_record.messages:
+        _persist_crawled_reactions(
+            cursor, thread_record.thread_id, msg.reactions, msg.source_id
+        )
+
     conversation_messages = [
         msg for msg in thread_record.messages
-        if classify_message_kind(msg.content) == KIND_MESSAGE
+        if msg.content and classify_message_kind(msg.content) == KIND_MESSAGE
     ]
 
-    new_tuples = []
-    for msg in conversation_messages:
-        content = msg.content
-        sender = msg.sender
-        if sender == "Page":
-            if ("Chúng tôi có thể" in content or 
-                "Họ tên và Số điện thoại" in content or
-                "Khóa học thiền ở Hà Nội" in content or
-                "Thời gian: 20h-21h30" in content):
-                sender = "Auto_Page"
-        new_tuples.append((_normalize_sender(sender), _normalize(content)))
+    # Only conversational bodies participate in message identity.  A
+    # reaction-only observation may refer to an enclosing bubble source id,
+    # but it is not a sibling body and must not make that message id ambiguous.
+    source_id_counts = Counter(
+        (msg.source_id or "").strip()
+        for msg in conversation_messages
+        if (msg.source_id or "").strip()
+    )
+    ambiguous_source_ids = {
+        source_id for source_id, count in source_id_counts.items() if count > 1
+    }
+
+    def _observed_source_id(msg):
+        source_id = (msg.source_id or "").strip()
+        return source_id if source_id and source_id not in ambiguous_source_ids else ""
         
-    max_overlap = min(len(existing_list), len(new_tuples))
+    max_overlap = min(len(existing_msgs), len(conversation_messages))
     best_overlap = 0
+    def _overlap_matches(existing_row, incoming_msg):
+        """Match only an ordered re-fetched prefix without trusting collisions."""
+        incoming_source_id = _observed_source_id(incoming_msg)
+        if incoming_source_id:
+            return _fingerprint(
+                existing_row["sender"], existing_row["content"],
+                existing_row["source_id"], existing_row["day_context"],
+            ) == _fingerprint(
+                incoming_msg.sender, incoming_msg.content,
+                incoming_source_id, incoming_msg.day_context,
+            )
+        # A colliding wrapper id is no evidence of identity.  Fall back to the
+        # same ordered body/day comparison used for snapshots without ids so a
+        # known prefix is not duplicated, while unmatched siblings are kept.
+        return _body_fingerprint(
+            existing_row["sender"], existing_row["content"], existing_row["day_context"],
+        ) == _body_fingerprint(
+            incoming_msg.sender, incoming_msg.content, incoming_msg.day_context,
+        )
+
     # Try all possible overlap lengths. We want the LARGEST overlap.
     for i in range(1, max_overlap + 1):
-        if existing_list[-i:] == new_tuples[:i]:
+        if all(
+            _overlap_matches(existing_msgs[-i + offset], incoming_msg)
+            for offset, incoming_msg in enumerate(conversation_messages[:i])
+        ):
             best_overlap = i
             
     next_seq = existing_msgs[-1]['seq'] + 1 if existing_msgs else 0
     candidate_msgs = conversation_messages[best_overlap:]
 
+    def _message_time_evidence(msg):
+        """Resolve canonical time from the exact evidence persisted with a row."""
+        if msg.time_precision in {"time_only", "unresolved_day_time", "unresolved_day"}:
+            return None, True
+        return resolve_message_at(msg.message_timestamp or msg.raw_timestamp, datetime.now())
+
+    # Source-id observations are authoritative for identity, so a re-crawl
+    # updates its evidence in place.  No text/content rule is used to decide
+    # who sent it.  This runs before append logic because a parser correction
+    # can legitimately change a message body while keeping its source id.
+    for msg in conversation_messages:
+        source_id = _observed_source_id(msg)
+        existing_id = existing_by_source_id.get(source_id)
+        if not source_id or existing_id is None:
+            continue
+        message_at, message_at_approx = _message_time_evidence(msg)
+        cursor.execute(
+            """UPDATE messages
+               SET sender=?, content=?, message_timestamp=?,
+                   message_at=?, message_at_approx=?,
+                   sender_confidence=?, raw_timestamp=?, day_context=?,
+                   time_precision=?, reply_to_message_id=?, quoted_sender=?,
+                   quoted_sender_confidence=?, quoted_text=?, sender_evidence=?,
+                   quote_evidence=?
+               WHERE id=?""",
+            (
+                msg.sender or "Unknown",
+                msg.content,
+                msg.message_timestamp,
+                message_at,
+                1 if message_at_approx else 0,
+                msg.sender_confidence or "unknown",
+                msg.raw_timestamp or msg.message_timestamp,
+                msg.day_context or "",
+                msg.time_precision or "unknown",
+                msg.reply_to_message_id,
+                msg.quoted_sender,
+                msg.quoted_sender_confidence or "unknown",
+                msg.quoted_text,
+                msg.sender_evidence,
+                msg.quote_evidence,
+                existing_id,
+            ),
+        )
+    # Do not use a global (sender, body) set here.  It erased later "Dạ" /
+    # "Vâng" turns that happened to repeat an earlier customer message.  The
+    # largest ordered overlap removes a re-fetched prefix; all remaining
+    # observed events are retained unless their real source id already exists.
     msgs_to_insert = []
+    seen_source_ids = set(existing_by_source_id)
     for msg in candidate_msgs:
-        content = msg.content
-        sender = msg.sender
-        if sender == "Page":
-            if ("Chúng tôi có thể" in content or 
-                "Họ tên và Số điện thoại" in content or
-                "Khóa học thiền ở Hà Nội" in content or
-                "Thời gian: 20h-21h30" in content):
-                sender = "Auto_Page"
-                
-        sig = (_normalize_sender(sender), _normalize(content))
-        if sig not in existing_set:
-            msg.sender = sender
-            msgs_to_insert.append(msg)
-            existing_set.add(sig)
+        source_id = _observed_source_id(msg)
+        if source_id and source_id in seen_source_ids:
+            continue
+        msgs_to_insert.append(msg)
+        if source_id:
+            seen_source_ids.add(source_id)
 
     for idx, msg in enumerate(msgs_to_insert):
         msg_content_to_save = msg.content
-        sender_to_save = msg.sender
-        
-        if sender_to_save == "Page":
-            if ("Chúng tôi có thể" in msg_content_to_save or 
-                "Họ tên và Số điện thoại" in msg_content_to_save or
-                "Khóa học thiền ở Hà Nội" in msg_content_to_save or
-                "Thời gian: 20h-21h30" in msg_content_to_save):
-                sender_to_save = "Auto_Page"
+        sender_to_save = msg.sender or "Unknown"
 
         if messages_added == 0 and ad_context:
             msg_content_to_save = f"--- [AD SOURCE]: {ad_context} ---\n\n{msg_content_to_save}"
-            if sender_to_save == "Page": sender_to_save = "Auto_Page"
             
         # code:inbox-msg-kind-001 / code:inbox-msg-abs-time-001
         # Candidates were filtered by their original Inbox row above.  The
         # optional AD-context prefix is metadata, not a system-banner kind.
         msg_kind = KIND_MESSAGE
-        message_at, message_at_approx = resolve_message_at(msg.message_timestamp, datetime.now())
+        # A clock with no reliable day context is not an event timestamp.  In
+        # particular, do not silently anchor "9:00 AM" to crawl day: that can
+        # turn an old customer turn into a fresh one for the conversation gate.
+        # Keep the raw label/evidence and let it remain unknown until a source
+        # snapshot provides a date.
+        message_at, message_at_approx = _message_time_evidence(msg)
         cursor.execute(
-            "INSERT OR IGNORE INTO messages (thread_id, sender, content, message_timestamp, seq, kind, message_at, message_at_approx) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            """INSERT OR IGNORE INTO messages
+               (thread_id, sender, content, message_timestamp, seq, kind,
+                message_at, message_at_approx, source_id, sender_confidence,
+                raw_timestamp, day_context, time_precision, reply_to_message_id,
+                quoted_sender, quoted_sender_confidence, quoted_text, sender_evidence,
+                quote_evidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 thread_record.thread_id,
                 sender_to_save,
@@ -310,6 +533,17 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
                 msg_kind,
                 message_at,
                 1 if message_at_approx else 0,
+                _observed_source_id(msg) or None,
+                msg.sender_confidence or "unknown",
+                msg.raw_timestamp or msg.message_timestamp,
+                msg.day_context or "",
+                msg.time_precision or "unknown",
+                msg.reply_to_message_id,
+                msg.quoted_sender,
+                msg.quoted_sender_confidence or "unknown",
+                msg.quoted_text,
+                msg.sender_evidence,
+                msg.quote_evidence,
             )
         )
         if cursor.rowcount > 0:
@@ -323,6 +557,8 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     # old conversation look newly active or reorder the Inbox snapshot.
     last_message_at = None
     for message in reversed(conversation_messages):
+        if message.time_precision in {"time_only", "unresolved_day_time", "unresolved_day"}:
+            continue
         parsed_message_time = parse_sidebar_time_token(message.message_timestamp or "")
         parsed_at = parsed_message_time.get("parsed_at")
         if parsed_at and " " in parsed_at:
@@ -496,6 +732,18 @@ def _mas_handoff_to_dict(mas_handoff: MasHandoff | None) -> dict:
                 "content": message.content,
                 "message_timestamp": message.message_timestamp,
                 "seq": message.seq,
+                "source_id": message.source_id,
+                "sender_confidence": message.sender_confidence,
+                "raw_timestamp": message.raw_timestamp,
+                "day_context": message.day_context,
+                "time_precision": message.time_precision,
+                "reply_to_message_id": message.reply_to_message_id,
+                "quoted_sender": message.quoted_sender,
+                "quoted_sender_confidence": message.quoted_sender_confidence,
+                "quoted_text": message.quoted_text,
+                "sender_evidence": message.sender_evidence,
+                "quote_evidence": message.quote_evidence,
+                "reactions": list(message.reactions),
             }
             for message in mas_handoff.messages
         ],

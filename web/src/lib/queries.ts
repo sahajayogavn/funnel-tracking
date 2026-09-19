@@ -1,7 +1,7 @@
 // code:web-db-002:data-queries
 // Server-side query functions that read from FrankenSQLite
 import { getDb } from './db';
-import type { Seeker, SeekerDetail, Post, CommentRow, MessageRow, ThreadRow, TouchPoint } from './types';
+import type { CrawledReactionEvent, Seeker, SeekerDetail, Post, CommentRow, MessageRow, ThreadRow, TouchPoint } from './types';
 import { parseRealDate } from './funnel-filters';
 
 // ── FB URL normalization ──
@@ -28,6 +28,84 @@ function tableExists(tableName: string): boolean {
   const db = getDb();
   const result = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(tableName);
   return !!result;
+}
+
+function tableHasColumn(db: ReturnType<typeof getDb>, tableName: string, columnName: string): boolean {
+  if (!tableExists(tableName)) return false;
+  return (db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[])
+    .some(column => column.name === columnName);
+}
+
+function messageEvidenceSelect(db: ReturnType<typeof getDb>): string {
+  const select = (column: string, alias: string) => tableHasColumn(db, 'messages', column)
+    ? `m.${column} AS ${alias}`
+    : `NULL AS ${alias}`;
+  return [
+    select('source_id', 'sourceId'),
+    select('sender_confidence', 'senderConfidence'),
+    select('time_precision', 'timePrecision'),
+    select('reply_to_message_id', 'replyToMessageId'),
+    select('quoted_sender', 'quotedSender'),
+    select('quoted_text', 'quotedText'),
+  ].join(',\n           ');
+}
+
+function attachCrawledReactions(db: ReturnType<typeof getDb>, threadId: string, messages: MessageRow[]): MessageRow[] {
+  if (!messages.length || !tableExists('crawled_message_reactions')) return messages;
+  const reactionColumn = (column: string, alias: string, fallback = 'NULL') =>
+    tableHasColumn(db, 'crawled_message_reactions', column)
+      ? `${column} AS ${alias}`
+      : `${fallback} AS ${alias}`;
+  const reactions = db.prepare(`
+    SELECT ${reactionColumn('actor', 'actor')},
+           ${reactionColumn('actor_role', 'actorRole')},
+           ${reactionColumn('emoji', 'emoji')},
+           ${reactionColumn('target_type', 'targetType')},
+           ${reactionColumn('target_scope', 'targetScope')},
+           ${reactionColumn('target_message_id', 'targetMessageId')}
+    FROM crawled_message_reactions
+    WHERE thread_id = ?
+  `).all(threadId) as {
+    actor: string | null; actorRole: string | null; emoji: string | null;
+    targetType: string | null; targetScope: string | null; targetMessageId: string | null;
+  }[];
+  const byTarget = new Map<string, MessageRow['reactions']>();
+  for (const reaction of reactions) {
+    // An unbound/thread reaction is real evidence, but must not be displayed
+    // on an arbitrary bubble. It remains queryable in its dedicated table.
+    if (!reaction.targetMessageId) continue;
+    const current = byTarget.get(reaction.targetMessageId) || [];
+    current.push({
+      actor: reaction.actor,
+      actorRole: reaction.actorRole,
+      emoji: reaction.emoji,
+      targetType: reaction.targetType,
+      targetScope: reaction.targetScope,
+      targetId: reaction.targetMessageId,
+    });
+    byTarget.set(reaction.targetMessageId, current);
+  }
+  return messages.map(message => ({
+    ...message,
+    reactions: message.sourceId ? (byTarget.get(message.sourceId) || []) : [],
+  }));
+}
+
+function getCrawledReactionEvents(db: ReturnType<typeof getDb>, threadId: string): CrawledReactionEvent[] {
+  if (!threadId || !tableExists('crawled_message_reactions')) return [];
+  const select = (column: string, alias: string, fallback = 'NULL') =>
+    tableHasColumn(db, 'crawled_message_reactions', column)
+      ? `${column} AS ${alias}` : `${fallback} AS ${alias}`;
+  return db.prepare(`
+    SELECT ${select('id', 'id', '0')}, ${select('actor', 'actor')},
+           ${select('actor_role', 'actorRole')}, ${select('emoji', 'emoji')},
+           ${select('target_type', 'targetType')}, ${select('target_scope', 'targetScope')},
+           ${select('target_message_id', 'targetMessageId')}, ${select('observed_at', 'observedAt')},
+           ${select('evidence', 'evidence')}, ${select('parse_confidence', 'parseConfidence')}
+    FROM crawled_message_reactions
+    WHERE thread_id = ?
+    ORDER BY id ASC
+  `).all(threadId) as CrawledReactionEvent[];
 }
 
 export type ActionQueueItem = {
@@ -65,30 +143,11 @@ export function getSeekerActionQueueItems(targetId?: string | null, targetName?:
   `).all(targetId || '', targetName || '') as ActionQueueItem[];
 }
 
-// ── Heuristics to fix older scraped messages ──
-// Scraper may have incorrectly recorded Page messages as "Customer" due to DOM changes
-function normalizeMessageSender(content: string | null, originalSender: string | null): string | null {
-  if (!originalSender) return null;
-  if (originalSender === 'Page' || originalSender === 'Auto_Page') return 'Page';
-  
-  if (!content) return originalSender;
-  
-  const text = content.toLowerCase();
-  
-  // Known Page/Admin reply patterns:
-  if (text.includes('chúng tôi có thể giúp gì cho bạn?')) return 'Page';
-  if (text.includes('hoàn toàn miễn phí')) return 'Page';
-  if (text.includes('khóa học thiền ở')) return 'Page';
-  if (text.includes('thời gian: 20h')) return 'Page';
-  if (text.includes('tối thứ 3 hàng tuần')) return 'Page';
-  if (text.includes('bạn để lại họ tên và số điện thoại')) return 'Page';
-  if (text.includes('lớp ở vương thừa vũ')) return 'Page';
-  if (text.includes('bạn ạ')) return 'Page';
-  if (text.includes('nhé bạn')) return 'Page';
-  if (text.includes('chủ nhật đầu tiên')) return 'Page';
-  if (text.includes('inbox page')) return 'Page';
-  if (text.includes('tổng là 12 tuần')) return 'Page';
-
+// ── Display the persisted sender evidence verbatim ──
+// Sender ownership is decided at ingestion and carries a confidence value in
+// the structured history contract.  Reclassifying a bubble by its prose here
+// makes the dashboard disagree with the data MAS actually received.
+function normalizeMessageSender(_content: string | null, originalSender: string | null): string | null {
   return originalSender;
 }
 
@@ -96,6 +155,9 @@ function normalizeMessageSender(content: string | null, originalSender: string |
 
 export function getAllSeekers(): Seeker[] {
   const db = getDb();
+  const hasRealName = (db.prepare("PRAGMA table_info(users)").all() as { name: string }[])
+    .some((column: { name: string }) => column.name === 'real_name');
+  const realNameSelect = hasRealName ? 'MAX(u.real_name) AS realName' : 'NULL AS realName';
   const hasProgramCode = (db.prepare("PRAGMA table_info(users)").all() as { name: string }[])
     .some((column: { name: string }) => column.name === 'program_code');
   const programCodeSelect = hasProgramCode ? 'MAX(u.program_code) AS programCode' : 'NULL AS programCode';
@@ -144,6 +206,7 @@ export function getAllSeekers(): Seeker[] {
   const dmUsers = db.prepare(`
     SELECT
       MIN(u.id) AS id, t.id AS threadId, t.thread_name AS name,
+      ${realNameSelect},
       ${inboxSortIndexSelect},
       ${lastMessageAtSelect},
       MAX(u.fb_url) AS fbProfileUrl,
@@ -157,6 +220,20 @@ export function getAllSeekers(): Seeker[] {
       ) AS city,
       ${programCodeSelect},
       ${classificationStatusSelect},
+      (
+        SELECT aq.action_text FROM action_queue aq
+        WHERE aq.target_id = t.id
+          AND aq.queue_type IN ('reply_message', 'proactive_message')
+          AND aq.status IN ('pending', 'approved')
+        ORDER BY aq.id DESC LIMIT 1
+      ) AS pendingMessage,
+      (
+        SELECT json_extract(aq.payload_json, '$.type') FROM action_queue aq
+        WHERE aq.target_id = t.id
+          AND aq.queue_type IN ('reply_message', 'proactive_message')
+          AND aq.status IN ('pending', 'approved')
+        ORDER BY aq.id DESC LIMIT 1
+      ) AS pendingMessageKind,
       COALESCE(MAX(u.lead_stage), 'Intake') AS leadStage,
       MIN(COALESCE(u.first_seen, t.created_at)) AS firstSeen,
       MAX(COALESCE(u.last_interaction, t.last_synced_time)) AS lastInteraction,
@@ -191,10 +268,11 @@ export function getAllSeekers(): Seeker[] {
   if (tableExists('comment_users') && tableExists('comments')) {
     commentUsers = db.prepare(`
       SELECT
-        cu.id, cu.commenter_name AS name, cu.fb_profile_url AS fbProfileUrl,
+        cu.id, cu.commenter_name AS name, NULL AS realName, cu.fb_profile_url AS fbProfileUrl,
         NULL AS inboxSortIndex,
         MAX(c.comment_date) AS lastMessageAt,
         cu.fb_user_id AS fbUserId, cu.phone, cu.email, cu.city, NULL AS programCode,
+        NULL AS pendingMessage, NULL AS pendingMessageKind,
         CASE WHEN cu.city IS NULL OR cu.city = 'Unknown' THEN 'unknown' ELSE 'done' END AS classificationStatus,
         cu.lead_stage AS leadStage,
         MIN(c.comment_date) AS firstSeen,
@@ -380,16 +458,19 @@ export function getAllThreads(): ThreadRow[] {
 
 export function getMessagesByThread(threadId: string): MessageRow[] {
   const db = getDb();
+  const evidence = messageEvidenceSelect(db);
   const rows = db.prepare(`
     SELECT id, thread_id AS threadId, sender, content,
-           message_timestamp AS messageTimestamp, seq, timestamp
-    FROM messages WHERE thread_id = ? ORDER BY seq ASC, id ASC
+           message_timestamp AS messageTimestamp, message_at AS messageAt,
+           ${evidence},
+           seq, timestamp
+    FROM messages m WHERE thread_id = ? ORDER BY seq ASC, id ASC
   `).all(threadId) as MessageRow[];
 
-  return rows.map(r => ({
+  return attachCrawledReactions(db, threadId, rows.map(r => ({
     ...r,
     sender: normalizeMessageSender(r.content, r.sender)
-  }));
+  })));
 }
 
 // ── Touch Points for a seeker ──
@@ -495,6 +576,7 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
     return {
       seeker: cuRow,
       messages: [],
+      reactionEvents: [],
       comments,
       adSource: null,
       messageCount: 0,
@@ -532,16 +614,27 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
   uRow.leadStage = (uRow.phone && uRow.phone.trim() !== '') ? 'Seeker' : 'User';
 
   // Use thread_id for message lookups
+  const evidence = messageEvidenceSelect(db);
   let messages = db.prepare(`
     SELECT id, thread_id AS threadId, sender, content,
-           message_timestamp AS messageTimestamp, seq, timestamp
-    FROM messages WHERE thread_id = ? ORDER BY seq ASC, id ASC
+           message_timestamp AS messageTimestamp, message_at AS messageAt,
+           ${evidence},
+           seq, timestamp
+    FROM messages m
+    WHERE thread_id = ?
+      -- Meta Inbox inserts banners, reactions, and attachment placeholders
+      -- into the message stream. They are not conversation turns and must not
+      -- appear as messages from the seeker in the detail/sidebar views.
+      AND kind NOT IN ('system_banner', 'reaction', 'attachment')
+    ORDER BY seq ASC, id ASC
   `).all(uRow.threadId) as MessageRow[];
   
   messages = messages.map(r => ({
     ...r,
     sender: normalizeMessageSender(r.content, r.sender)
   }));
+  messages = attachCrawledReactions(db, uRow.threadId || '', messages);
+  const reactionEvents = getCrawledReactionEvents(db, uRow.threadId || '');
 
   // Check for ad source
   const adMsg = messages.find(m => m.content?.includes('[AD SOURCE]'));
@@ -599,6 +692,7 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
   return {
     seeker: uRow,
     messages,
+    reactionEvents,
     comments,
     adSource,
     messageCount: messages.length,

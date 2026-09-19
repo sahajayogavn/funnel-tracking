@@ -114,6 +114,8 @@ export function parseRealDate(ts?: string | null): number {
 
 export interface FacebookMessageLike {
   messageTimestamp?: string | null;
+  /** Absolute Facebook event time persisted by the inbox scraper. */
+  messageAt?: string | null;
   content?: string | null;
   seq?: number | null;
 }
@@ -133,7 +135,9 @@ export function sortFacebookMessages<T extends FacebookMessageLike>(messages: re
     .map((message, index) => ({
       message,
       index,
-      facebookTime: parseRealDate(message.messageTimestamp),
+      // `Mon 8:04 AM` is relative to the scrape date. Once persisted, it
+      // must not be interpreted again against the browser's current date.
+      facebookTime: parseRealDate(message.messageAt) || parseRealDate(message.messageTimestamp),
       sequence: message.seq ?? index,
       isAdReply: /replied to an ad\.?$/i.test((message.content || '').trim()),
     }))

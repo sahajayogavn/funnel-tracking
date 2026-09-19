@@ -5,6 +5,7 @@ import { useRef, useState, useEffect, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { FunnelFilterBar, type FilterState } from './funnel-filter-bar';
 import { getDateRangeBounds } from '@/lib/funnel-filters';
+import { MessengerMessageList } from './messenger-message-list';
 
 // Use 2D ForceGraph which uses Canvas2D (WebGL-accelerated) for better performance
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
@@ -37,7 +38,7 @@ interface GraphData {
 
 interface HoveredNodeDetails {
   profile?: Record<string, unknown>;
-  messages?: { sender: string; content: string; message_timestamp: string }[];
+  messages?: { sender: string; content: string; message_timestamp: string; message_at?: string | null }[];
   post?: { post_name: string; post_url: string; created_at: string; last_synced_time: string; is_orphan?: boolean };
   stats?: { total: number; unique_users: number };
   comments?: { commenter_name: string; comment_text: string; comment_timestamp: string; is_reply: number }[];
@@ -352,29 +353,24 @@ export function NetworkGraph() {
           {hoveredNodeDetails && hoveredNode.type === 'user' && (
             <div style={{ marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '12px' }}>
               <div style={{ fontSize: '12px', fontWeight: 600, color: '#e2e8f0', marginBottom: '8px' }}>Chat History</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {Array.isArray(hoveredNodeDetails.messages) && hoveredNodeDetails.messages.length > 0 ? (
-                  hoveredNodeDetails.messages.map((msg: { sender: string; content?: string }, i: number) => {
-                    const isPage = msg.sender === '1548373332058326';
-                    return (
-                      <div key={i} style={{
-                        alignSelf: isPage ? 'flex-end' : 'flex-start',
-                        background: isPage ? 'rgba(99, 102, 241, 0.2)' : 'rgba(255,255,255,0.05)',
-                        padding: '6px 10px',
-                        borderRadius: '8px',
-                        fontSize: '12px',
-                        color: 'var(--text-secondary)',
-                        maxWidth: '90%',
-                        wordBreak: 'break-word'
-                      }}>
-                        {msg.content}
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>No messages found.</div>
-                )}
-              </div>
+              {Array.isArray(hoveredNodeDetails.messages) && hoveredNodeDetails.messages.length > 0 ? (
+                <MessengerMessageList
+                  compact
+                  maxHeight={280}
+                  messages={hoveredNodeDetails.messages.map((message, index) => ({
+                    id: index,
+                    sender: message.sender === 'Page' || message.sender === 'Auto_Page'
+                      ? (message.sender === 'Auto_Page' ? '@Auto_Page' : 'Page')
+                      : (message.sender === 'Customer' ? hoveredNode.name : (message.sender || 'Unknown')),
+                    content: message.content,
+                    timestamp: message.message_timestamp,
+                    eventAt: message.message_at,
+                    outgoing: message.sender === 'Page' || message.sender === 'Auto_Page',
+                  }))}
+                />
+              ) : (
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>No messages found.</div>
+              )}
             </div>
           )}
 

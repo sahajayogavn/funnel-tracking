@@ -528,6 +528,18 @@ All MAS execution routes (Inbox, Comment Reply, Warm-up, and Event Advertising) 
 
 Pipeline: persisted thread data → `run_adk_pipeline()` session state injection → `MessageClassifier` → `Responder` → `send_proposal_to_telegram()` queued insertion → **Telegram HITL Database Pipeline** → `hitl_execution_job()` Playwright re-hydration → `commit_reply_via_cdp()` firing → Telegram Completion (💯).
 
+### Per-message inbox MAS (2026-09-17)
+
+Inbox automation no longer groups conversations into a batch prompt.  After the
+deterministic conversation/schedule and duplicate-proposal gates, one eligible
+thread's latest customer message creates one ADK session and one `/llm` trace.
+The session runs `ConversationAnalyst → KnowledgeLibrarian → ReplyComposer →
+ReplyQAReviewer`.  QA `PASS` releases the composed reply; QA `REPAIR` runs one
+additional `ReplyRepair` call in the same session.  Missing QA, invalid repair,
+or a deterministic final safety failure is fail-closed and produces no queue
+action.  All agents use the shared trace callbacks, so rows have a common trace
+ID, increasing sequence, and parent links rather than a misleading single call.
+
 ### Route 1: React (Reaction to New Messages/Comments)
 
 | Aspect | Detail |

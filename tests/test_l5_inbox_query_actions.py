@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from adk_agents.tools.l5_seeker_tools import find_unreplied_threads
+from adk_agents.tools.l5_seeker_tools import claim_scheduled_inbox_message, find_unreplied_threads
 from fb_pipeline.persistence.l4_sqlite_store import setup_database
 
 
@@ -49,6 +49,13 @@ class TestFindUnrepliedThreads(unittest.TestCase):
         self.conn.execute(
             "INSERT INTO messages (thread_id, sender, content, message_timestamp, seq, timestamp) VALUES (?, 'Customer', ?, ?, ?, ?)",
             (thread_id, content, message_timestamp, seq, recorded_at),
+        )
+
+    def _insert_unknown_message(self, thread_id: str, content: str, seq: int):
+        self.conn.execute(
+            "INSERT INTO messages (thread_id, sender, content, message_timestamp, seq, timestamp) "
+            "VALUES (?, 'Unknown', ?, '2026-03-25T10:00:00', ?, '2026-03-25T10:00:00')",
+            (thread_id, content, seq),
         )
 
     def _insert_auto_reply_ack(self, thread_id: str, seq: int | None, dry_run: bool = True):
@@ -161,6 +168,60 @@ class TestFindUnrepliedThreads(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["threads"][0]["thread_id"], "thread-1")
+
+    def test_latest_unknown_body_is_selected_for_review_not_silently_ignored(self):
+        """The runner's deterministic state gate will make this needs_review.
+
+        Selection here only makes the uncertainty observable; it does not make
+        the row eligible for claim or an LLM draft.
+        """
+        self._insert_thread("thread-unknown")
+        self._insert_unknown_message("thread-unknown", "Lan sent a message", 1)
+        self.conn.commit()
+
+        result = find_unreplied_threads("page1")
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["threads"][0]["thread_id"], "thread-unknown")
+        self.assertEqual(result["threads"][0]["latest_sender"], "Unknown")
+
+    def test_empty_unknown_row_is_not_an_actionable_review_candidate(self):
+        self._insert_thread("thread-empty-unknown")
+        self._insert_unknown_message("thread-empty-unknown", "   ", 1)
+        self.conn.commit()
+
+        self.assertEqual(find_unreplied_threads("page1")["count"], 0)
+
+    def test_scheduler_claim_suppresses_repeat_mas_after_an_agent_error(self):
+        """The claim is written before an LLM call, so a 15-minute retry does
+        not pay for the same customer turn after a downstream MAS failure."""
+        self._insert_thread("thread-1")
+        self._insert_customer_message(
+            "thread-1", "Hello", "2026-03-25T10:00:00", "2026-03-25T10:00:00", 1,
+        )
+        self.conn.commit()
+
+        self.assertTrue(claim_scheduled_inbox_message("thread-1"))
+        self.assertEqual(find_unreplied_threads("page1")["count"], 0)
+        # A new customer response is a new unit of work and reopens the thread.
+        self._insert_customer_message(
+            "thread-1", "Following up", "2026-03-25T11:00:00", "2026-03-25T11:00:00", 2,
+        )
+        self.conn.commit()
+        self.assertEqual(find_unreplied_threads("page1")["count"], 1)
+
+    def test_scheduler_claim_does_not_consume_a_newer_unread_customer_turn(self):
+        self._insert_thread("thread-1")
+        self._insert_customer_message(
+            "thread-1", "First", "2026-03-25T10:00:00", "2026-03-25T10:00:00", 1,
+        )
+        self._insert_customer_message(
+            "thread-1", "Newer", "2026-03-25T10:01:00", "2026-03-25T10:01:00", 2,
+        )
+        self.conn.commit()
+
+        self.assertFalse(claim_scheduled_inbox_message("thread-1", expected_message_seq=1))
+        self.assertEqual(find_unreplied_threads("page1")["count"], 1)
 
 
 if __name__ == '__main__':

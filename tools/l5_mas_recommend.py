@@ -7,7 +7,7 @@ spawns when the operator clicks "⚡ Chạy đề xuất MAS". Unlike
 
 - takes an explicit list of thread IDs chosen in the UI,
 - NEVER opens a browser,
-- runs the real ADK agents (BatchInboxAgent / WarmUpComposer / EventAdvertiser),
+- runs isolated per-thread ADK MAS agents (plus WarmUpComposer / EventAdvertiser),
 - sanitizes every reply with `_sanitize_reply()`,
 - and ONLY enqueues proposals into `action_queue` with status='pending'
   (payload.source = 'inbox_mas') for human approval.
@@ -34,10 +34,10 @@ if PROJECT_ROOT not in sys.path:
 os.chdir(PROJECT_ROOT)
 
 from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+from fb_pipeline.persistence.l4_llm_trace import link_outcome, span
 from tools.l5_action_queue import active_proposal_status, enqueue_action, replace_action
-from tools.l5_inbox_mas_context import load_knowledge_context, setup_llm_env
-from tools.l5_inbox_mas_pipeline import _sanitize_reply, run_adk_batch_pipeline
-from tools.l5_scheduler_adk import run_adk_event_advertiser, run_adk_warmup_composer
+from tools.l5_inbox_mas_context import setup_llm_env
+from tools.l5_inbox_mas_pipeline import _approved_draft, _sanitize_reply, run_adk_care_pipeline, run_adk_pipeline
 from adk_agents.tools.l5_event_tools import get_upcoming_events
 from adk_agents.tools.l5_seeker_tools import get_thread_messages, lookup_seeker
 from adk_agents.tools.l5_warmup_tools import select_warmup_strategy
@@ -52,7 +52,8 @@ logger = logging.getLogger("tools.mas_recommend")
 DEFAULT_PAGE_ID = "1548373332058326"
 SOURCE = "inbox_mas"
 MAX_MESSAGES_PER_THREAD = 15
-VALID_TYPES = ("all", "reply", "warmup", "event")
+VALID_TYPES = ("all", "reply", "warmup", "event", "care")
+CARE_PURPOSES = ("class_reminder", "warmup", "event")
 
 
 # code:tool-mas-recommend-001:pending-guard
@@ -110,11 +111,19 @@ def _load_thread(thread_id: str) -> Optional[dict]:
     seeker = lookup_seeker(thread_id)
     messages = msg_result["messages"][-MAX_MESSAGES_PER_THREAD:]
     thread_name = seeker.get("name") or _thread_name_from_db(thread_id) or "Seeker"
+    # code:inbox-conv-state-001 — manual recommendations are operator-initiated,
+    # so the gate does not block them, but the LLM still gets the time context.
+    from fb_pipeline.contracts.l1_conversation_state import compute_conversation_state, format_conversation_lines
+    state = compute_conversation_state(msg_result["messages"])
     return {
         "thread_id": thread_id,
         "thread_name": thread_name,
         "seeker": seeker,
         "messages": messages,
+        "reaction_events": msg_result.get("reaction_events") or [],
+        "conversation_text": format_conversation_lines(messages, msg_result.get("reaction_events") or []),
+        "conversation_state": state.to_dict(),
+        "late": state.late,
         "latest_customer_timestamp": next(
             (m.get("timestamp") for m in reversed(msg_result["messages"]) if m.get("sender") == "Customer"),
             None,
@@ -144,34 +153,57 @@ def _proposal(action_id: int, queue_type: str, thread: dict, text: str, kind: st
     }
 
 
+def _outbound_skip_reason(text: str | None) -> Optional[str]:
+    """Map control sentinels to a business outcome before any queue write."""
+    value = (text or "").strip()
+    upper = value.upper()
+    if not value:
+        return "no_reply"
+    if upper == "[OUT_OF_SCOPE]":
+        return "out_of_scope"
+    if upper.startswith("[NO_REPLY"):
+        return value[:60]
+    if upper.startswith("[NO_SEND"):
+        return "mas_no_send"
+    return None
+
+
 # code:tool-mas-recommend-001:reply
-def recommend_replies(threads: list[dict], page_id: str, regenerate: bool = False) -> tuple[list[dict], list[dict]]:
-    """Run BatchInboxAgent once for all threads and enqueue reply_message proposals."""
+def recommend_replies(threads: list[dict], page_id: str, regenerate: bool = False,
+                      instruction: str = "") -> tuple[list[dict], list[dict]]:
+    """Run one isolated inbox MAS action per selected thread and enqueue drafts."""
     created: list[dict] = []
     skipped: list[dict] = []
-    batch: list[dict] = []
     for t in threads:
         reason = _guard(t["thread_id"], "reply_message", "reply", regenerate)
         if reason:
             skipped.append({"threadId": t["thread_id"], "reason": reason})
-        else:
-            batch.append(t)
-    if not batch:
-        return created, skipped
-
-    logger.info("Running BatchInboxAgent for %d thread(s)", len(batch))
-    results = run_adk_batch_pipeline(batch)
-    by_id = {r.get("thread_id"): r for r in results if isinstance(r, dict) and r.get("thread_id")}
-
-    for t in batch:
-        llm = by_id.get(t["thread_id"])
-        reply_text = _sanitize_reply((llm or {}).get("reply_text", "") or "")
-        classification = (llm or {}).get("classification", "")
-        if not reply_text:
-            skipped.append({"threadId": t["thread_id"], "reason": "no_reply"})
             continue
-        if reply_text.strip() == "[OUT_OF_SCOPE]":
-            skipped.append({"threadId": t["thread_id"], "reason": "out_of_scope", "classification": classification})
+        # No cross-thread prompt or trace: the selected thread is the action boundary.
+        llm = run_adk_pipeline(
+            t["messages"], t["seeker"], trigger="manual_recommendation",
+            page_id=page_id, subject_id=t["thread_id"], feedback=instruction or None,
+            conversation_state=t.get("conversation_state"),
+            reaction_events=t.get("reaction_events") or [],
+        )
+        # An escalation note is for the human operator, never outward-facing
+        # copy.  `run_adk_pipeline` exposes it separately from reply_text, but
+        # older callers may still receive a sanitized note in reply_text.
+        # Do not let a manually-triggered MAS run enqueue that note as a DM.
+        escalation_reason = (llm or {}).get("escalation_reason", "")
+        if escalation_reason:
+            skipped.append({
+                "threadId": t["thread_id"],
+                "reason": f"escalated_{escalation_reason}",
+                "escalationNote": (llm or {}).get("escalation_note", ""),
+                "classification": (llm or {}).get("classification", ""),
+            })
+            continue
+        reply_text = _approved_draft(llm or {})
+        classification = (llm or {}).get("classification", "")
+        skip_reason = _outbound_skip_reason(reply_text)
+        if skip_reason:
+            skipped.append({"threadId": t["thread_id"], "reason": skip_reason, "classification": classification})
             continue
         action_id, old = _enqueue(
             regenerate,
@@ -183,136 +215,179 @@ def recommend_replies(threads: list[dict], page_id: str, regenerate: bool = Fals
                 "classification": classification,
                 "customer_message_timestamp": t["latest_customer_timestamp"],
                 "seeker": t["seeker"],
+                "conversation_state": t.get("conversation_state"),
             },
         )
         created.append(_proposal(action_id, "reply_message", t, reply_text, "reply", old))
+    if created:
+        link_outcome("hitl_queue", ",".join(str(item["id"]) for item in created))
     return created, skipped
 
 
 # code:tool-mas-recommend-001:warmup
 def recommend_warmups(threads: list[dict], page_id: str, knowledge_context: str,
                       regenerate: bool = False) -> tuple[list[dict], list[dict]]:
-    """Run WarmUpComposer per thread and enqueue proactive_message (type=warmup)."""
-    created: list[dict] = []
-    skipped: list[dict] = []
-    for t in threads:
-        reason = _guard(t["thread_id"], "proactive_message", "warmup", regenerate, "warmup")
-        if reason:
-            skipped.append({"threadId": t["thread_id"], "reason": reason})
-            continue
-        seeker = t["seeker"]
-        stage = seeker.get("lead_stage") or "Intake"
-        # Operator picked this seeker explicitly, so ignore the "too soon" gate
-        # that the scheduler applies and fall back to a manual strategy.
-        strategy = select_warmup_strategy(stage, _days_dormant(seeker)) or {"type": "manual_warmup", "cool_step": None}
-        text = _sanitize_reply(run_adk_warmup_composer(seeker, strategy, knowledge_context))
-        if not text:
-            skipped.append({"threadId": t["thread_id"], "reason": "no_reply"})
-            continue
-        action_id, old = _enqueue(
-            regenerate,
-            queue_type="proactive_message", page_id=page_id, target_type="thread",
-            target_id=t["thread_id"], target_name=t["thread_name"], action_text=text,
-            payload={
-                "source": SOURCE, "type": "warmup", "stage": stage,
-                "city": seeker.get("city"), "strategy": strategy.get("type"),
-            },
-        )
-        created.append(_proposal(action_id, "proactive_message", t, text, "warmup", old))
-    return created, skipped
+    """Compatibility adapter: warm-up now uses the common Care workflow."""
+    return recommend_care(
+        threads, page_id, knowledge_context, None, "", None, regenerate,
+        care_purpose="warmup",
+    )
 
 
-def _pick_event(city: Optional[str]) -> Optional[dict]:
+def _pick_event(city: Optional[str], event_id: Optional[str | int] = None) -> Optional[dict]:
     upcoming = get_upcoming_events(city=city if city and city != "all" else None)
     if upcoming.get("status") == "success" and upcoming.get("events"):
-        return upcoming["events"][0]
-    conn = get_db_connection()
-    try:
-        row = conn.execute(
-            "SELECT id, name, city, event_date, description FROM events ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+        events = upcoming["events"]
+        if event_id is not None:
+            return next((event for event in events if str(event.get("id")) == str(event_id)), None)
+        return events[0]
+    # An event without an in-scope future record is not verified evidence.
+    # Never fall back to an arbitrary historical/cross-city DB row.
+    return None
 
 
 # code:tool-mas-recommend-001:event
 def recommend_events(threads: list[dict], page_id: str, knowledge_context: str, city: Optional[str],
                      regenerate: bool = False) -> tuple[list[dict], list[dict]]:
-    """Run EventAdvertiser per thread and enqueue proactive_message (type=event)."""
+    """Compatibility adapter: events now use the common Care workflow."""
+    return recommend_care(
+        threads, page_id, knowledge_context, city, "", None, regenerate,
+        care_purpose="event",
+    )
+
+
+def _care_skip_reason(thread: dict, route: str) -> Optional[str]:
+    seeker = thread["seeker"]
+    stage = (seeker.get("lead_stage") or "").lower()
+    temperature = (seeker.get("temperature") or "").lower()
+    if stage in {"spam", "unsubscribed"} or temperature == "unsubscribed":
+        return "opt_out"
+    conversation = " ".join(str(m.get("content") or "").lower() for m in thread["messages"][-5:])
+    if any(token in conversation for token in ("đừng nhắn", "không nhắn", "ngừng liên hệ", "unsubscribe")):
+        return "opt_out"
+    if route == "class_reminder" and any(token in conversation for token in (
+        "tuần này không đi", "tuần này chưa đi", "bận", "hủy", "đổi sang", "không tham gia",
+    )):
+        return "context_says_not_this_session"
+    if route == "class_reminder" and not seeker.get("program_code"):
+        return "no_verified_program_registration"
+    return None
+
+
+def _prior_page_lines(thread: dict, limit: int = 3) -> list[str]:
+    return [str(m.get("content") or "")[:160] for m in thread["messages"]
+            if m.get("sender") == "Page"][-limit:]
+
+
+def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, city: Optional[str],
+                   instruction: str, program_code: Optional[str], regenerate: bool = False,
+                   command_id: Optional[str] = None,
+                   care_purpose: Optional[str] = None,
+                   event_id: Optional[str | int] = None) -> tuple[list[dict], list[dict]]:
+    """Create one contextual, reviewable care proposal per selected seeker.
+
+    This is deliberately a manual, selected-list entry point.  It produces
+    drafts only; no browser, Facebook action, or automatic send is possible.
+    """
+    from fb_pipeline.contracts.l1_class_schedule import upcoming_sessions
+    from fb_pipeline.contracts.l1_conversation_state import format_now_context
+
+    if care_purpose not in CARE_PURPOSES:
+        return [], [{"threadId": t["thread_id"], "reason": "care_purpose_required"} for t in threads]
+    route = care_purpose
+    # One operator click is idempotent, while a later operator click is an
+    # independent proposal even for the same seeker and care route.
+    dedupe_key = f"operator-care:{route}:{command_id or instruction.strip()}"
+    session = None
+    if route == "class_reminder":
+        sessions = upcoming_sessions(datetime.now(), window_hours=24 * 7)
+        matching = [s for s in sessions if not program_code or s.program_code == program_code]
+        if len(matching) != 1:
+            reason = "class_session_not_unique" if matching else "class_session_not_found"
+            return [], [{"threadId": t["thread_id"], "reason": reason} for t in threads]
+        session = matching[0].to_dict()
+
+    event = _pick_event(city, event_id) if route == "event" else None
+    if route == "event" and not event:
+        return [], [{"threadId": t["thread_id"], "reason": "no_event"} for t in threads]
+
     created: list[dict] = []
     skipped: list[dict] = []
-    event = _pick_event(city)
-    if not event:
-        logger.warning("No event found in `events` table; skipping event recommendations")
-        return created, [{"threadId": t["thread_id"], "reason": "no_event"} for t in threads]
     for t in threads:
-        reason = _guard(t["thread_id"], "proactive_message", "event", regenerate, "event")
+        reason = _care_skip_reason(t, route)
+        seeker = {**t["seeker"], "thread_id": t["thread_id"], "thread_name": t["thread_name"]}
+        if not reason and route == "class_reminder" and seeker.get("program_code") != session["program_code"]:
+            reason = "registered_for_different_program"
         if reason:
             skipped.append({"threadId": t["thread_id"], "reason": reason})
             continue
-        text = _sanitize_reply(run_adk_event_advertiser(event, t["seeker"], knowledge_context))
-        if not text:
-            skipped.append({"threadId": t["thread_id"], "reason": "no_reply"})
+        kind = route
+        active = active_proposal_status(t["thread_id"], "proactive_message", dedupe_key=dedupe_key)
+        if active == "executing":
+            skipped.append({"threadId": t["thread_id"], "reason": "executing_care_command_exists"})
+            continue
+        if active and not regenerate:
+            reason = "pending_care_command_exists"
+            skipped.append({"threadId": t["thread_id"], "reason": reason})
+            continue
+        strategy = select_warmup_strategy(seeker.get("lead_stage") or "Intake", _days_dormant(seeker)) if route == "warmup" else None
+        strategy = strategy or ({"type": "manual_warmup", "cool_step": None} if route == "warmup" else None)
+        care_brief = {
+            "operator_instruction": instruction,
+            "verified_session": session,
+            "verified_event": event,
+            "warmup_strategy": strategy,
+            "prior_page_lines": _prior_page_lines(t),
+            "recent_conversation": t.get("conversation_text", ""),
+            "conversation_state": t.get("conversation_state") or {},
+            "knowledge_context": knowledge_context,
+        }
+        llm = run_adk_care_pipeline(
+            t["messages"], seeker, care_purpose=route, care_brief=care_brief,
+            feedback=instruction, page_id=page_id, trigger="operator_care_command",
+            subject_id=t["thread_id"], now_context=format_now_context(datetime.now()),
+            reaction_events=t.get("reaction_events") or [],
+        )
+        if llm.get("escalation_reason"):
+            skipped.append({"threadId": t["thread_id"], "reason": f"escalated_{llm['escalation_reason']}"})
+            continue
+        text = _approved_draft(llm)
+        skip_reason = _outbound_skip_reason(text)
+        if skip_reason:
+            skipped.append({"threadId": t["thread_id"], "reason": skip_reason})
             continue
         action_id, old = _enqueue(
-            regenerate,
-            queue_type="proactive_message", page_id=page_id, target_type="thread",
+            regenerate, queue_type="proactive_message", page_id=page_id, target_type="thread",
             target_id=t["thread_id"], target_name=t["thread_name"], action_text=text,
-            payload={
-                "source": SOURCE, "type": "event", "event_id": event.get("id"),
-                "eventTitle": event.get("name"), "city": event.get("city"),
-            },
+            payload={"source": SOURCE, "type": kind, "trigger": "operator_care_command",
+                     "instruction": instruction, "city": seeker.get("city"),
+                     "dedupe_key": dedupe_key,
+                     "session": session, "event_id": event.get("id") if event else None,
+                     "conversation_state": t.get("conversation_state")},
         )
-        created.append(_proposal(action_id, "proactive_message", t, text, "event", old))
+        created.append(_proposal(action_id, "proactive_message", t, text, kind, old))
     return created, skipped
 
 
 # code:tool-mas-recommend-001:llm-preflight
 def _check_llm_reachable(timeout: float = 8.0) -> Optional[str]:
-    """Return an error string if the OpenAI-compatible endpoint is definitely down.
+    """Native Gemini is verified by the ADK call itself.
 
-    Lets the web route fall back to templates immediately instead of waiting on
-    LiteLLM retries and then reporting every thread as `no_reply`. Only hard
-    failures (DNS, connection refused) count; HTTP errors or a slow handshake
-    mean the host is up, so we proceed and let the real call decide.
+    There is deliberately no alternate endpoint preflight: this deployment
+    must not route MAS recommendations through a stale OpenAI-compatible URL.
     """
-    import socket
-    import urllib.error
-    import urllib.request
-
-    base = os.environ["OPENAI_API_BASE"].rstrip("/")
-    req = urllib.request.Request(
-        f"{base}/models",
-        headers={
-            "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
-            "User-Agent": os.environ.get("LLM_USER_AGENT", "sahajayoga-mas/1.0"),
-        },
-    )
-    try:
-        urllib.request.urlopen(req, timeout=timeout).read(1)
-        return None
-    except urllib.error.HTTPError:
-        return None  # server answered (even 4xx) → reachable
-    except urllib.error.URLError as exc:
-        reason = exc.reason
-        if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):
-            return f"LLM endpoint unreachable ({base}): {reason}"
-        logger.warning("LLM preflight inconclusive (%s); proceeding", reason)
-        return None
-    except (TimeoutError, socket.timeout) as exc:
-        logger.warning("LLM preflight timed out (%s); proceeding", exc)
-        return None
-    except Exception as exc:
-        return f"LLM endpoint unreachable ({base}): {exc}"
+    return None
 
 
 # code:tool-mas-recommend-001:run
-def run(thread_ids: list[str], rec_type: str = "all", page_id: str = DEFAULT_PAGE_ID,
-        city: Optional[str] = None, regenerate: bool = False) -> dict:
-    setup_llm_env()
-    if not os.environ.get("OPENAI_API_BASE") or not os.environ.get("OPENAI_API_KEY"):
-        return {"status": "error", "error": "LLM credentials missing (OPENAI_API_BASE/OPENAI_API_KEY)"}
+def _run(thread_ids: list[str], rec_type: str = "all", page_id: str = DEFAULT_PAGE_ID,
+         city: Optional[str] = None, regenerate: bool = False, instruction: str = "",
+         program_code: Optional[str] = None, command_id: Optional[str] = None,
+         care_purpose: Optional[str] = None, event_id: Optional[str] = None) -> dict:
+    # All MAS paths use the shared Gemini-only configuration.
+    config = setup_llm_env() or {}
+    if config.get("provider") != "google" or not os.environ.get("GOOGLE_API_KEY"):
+        return {"status": "error", "error": "Gemini credentials missing (GOOGLE_API_KEY)"}
     reachability_error = _check_llm_reachable()
     if reachability_error:
         return {"status": "error", "error": reachability_error}
@@ -322,18 +397,26 @@ def run(thread_ids: list[str], rec_type: str = "all", page_id: str = DEFAULT_PAG
     if not threads:
         return {"status": "error", "error": "No messages found for the selected threads", "missing": missing}
 
-    knowledge_context = load_knowledge_context()
+    # KnowledgeLibrarian retrieves a narrow, source-scoped brief after the
+    # analyst. Do not preload the global knowledge corpus into every role.
+    knowledge_context = ""
     proposals: list[dict] = []
     skipped: list[dict] = [{"threadId": tid, "reason": "no_messages"} for tid in missing]
 
     if rec_type in ("all", "reply"):
-        c, s = recommend_replies(threads, page_id, regenerate)
+        c, s = recommend_replies(threads, page_id, regenerate, instruction)
         proposals += c; skipped += s
     if rec_type in ("all", "warmup"):
         c, s = recommend_warmups(threads, page_id, knowledge_context, regenerate)
         proposals += c; skipped += s
     if rec_type in ("all", "event"):
         c, s = recommend_events(threads, page_id, knowledge_context, city, regenerate)
+        proposals += c; skipped += s
+    if rec_type == "care":
+        c, s = recommend_care(
+            threads, page_id, knowledge_context, city, instruction, program_code,
+            regenerate, command_id, care_purpose, event_id,
+        )
         proposals += c; skipped += s
 
     return {
@@ -346,19 +429,52 @@ def run(thread_ids: list[str], rec_type: str = "all", page_id: str = DEFAULT_PAG
     }
 
 
+def run(thread_ids: list[str], rec_type: str = "all", page_id: str = DEFAULT_PAGE_ID,
+        city: Optional[str] = None, regenerate: bool = False,
+        trace_id: Optional[str] = None, instruction: str = "", program_code: Optional[str] = None,
+        care_purpose: Optional[str] = None, event_id: Optional[str] = None) -> dict:
+    """Run a web-selected MAS recommendation under one trace.
+
+    ``trace_id`` is the durable recommendation job id when invoked from
+    ``/queues``; this makes the UI link and the SQLite trace one-to-one.
+    """
+    trace_subject = trace_id or ",".join(thread_ids) or "recommendation"
+    with span(
+        trigger="web",
+        route="recommend",
+        page_id=page_id,
+        subject=("batch", f"recommend:{trace_subject}", f"{rec_type} recommendation"),
+        dry_run=True,
+        trace_id=trace_id,
+    ):
+        return _run(
+            thread_ids, rec_type, page_id, city, regenerate, instruction,
+            program_code, trace_id, care_purpose, event_id,
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run MAS agents for selected threads and enqueue HITL proposals")
     parser.add_argument("--thread-ids", required=True, help="Comma-separated thread IDs")
     parser.add_argument("--type", default="all", choices=VALID_TYPES)
     parser.add_argument("--page-id", default=DEFAULT_PAGE_ID)
     parser.add_argument("--city", default=None)
+    parser.add_argument("--instruction", default="", help="Operator care instruction for --type care")
+    parser.add_argument("--program-code", default=None, help="Verified class filter for --type care")
+    parser.add_argument("--purpose", choices=CARE_PURPOSES, default=None,
+                        help="Explicit purpose for --type care; program filters never select a purpose")
+    parser.add_argument("--event-id", default=None,
+                        help="Verified event ID for an event regeneration; never substitute another event")
     parser.add_argument("--regenerate", action="store_true",
                         help="Replace the seeker's current pending/approved draft with a fresh one")
+    parser.add_argument("--job-id", default=None,
+                        help="Durable web recommendation job id used as the LLM trace id")
     args = parser.parse_args()
 
     thread_ids = [t.strip() for t in args.thread_ids.split(",") if t.strip()]
     try:
-        result = run(thread_ids, args.type, args.page_id, args.city, args.regenerate)
+        result = run(thread_ids, args.type, args.page_id, args.city, args.regenerate, args.job_id,
+                     args.instruction, args.program_code, args.purpose, args.event_id)
     except Exception as exc:  # surface as JSON so the web route can fall back
         logger.exception("MAS recommendation failed")
         result = {"status": "error", "error": str(exc)}

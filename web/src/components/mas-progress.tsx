@@ -4,7 +4,7 @@
 // Backend-driven view of the persisted MAS recommendation job. Each stage is
 // derived from the job phase reported by the API, never from a client timer.
 
-export type MasRunType = 'all' | 'reply' | 'warmup' | 'event';
+export type MasRunType = 'all' | 'reply' | 'warmup' | 'event' | 'care';
 export type MasJob = {
   id: number;
   status: 'queued' | 'running' | 'completed' | 'failed';
@@ -19,9 +19,10 @@ export type MasJob = {
 type Stage = { key: string; icon: string; label: string; detail: string; agent?: boolean };
 
 const AGENTS: Record<Exclude<MasRunType, 'all'>, Stage> = {
-  reply: { key: 'responder', icon: '💬', label: 'BatchInboxAgent', detail: 'Đọc ngữ cảnh seeker + Knowledge Base → soạn reply', agent: true },
+  reply: { key: 'inbox-mas', icon: '💬', label: 'Inbox MAS theo từng tin nhắn', detail: 'ConversationAnalyst → KnowledgeLibrarian → ReplyComposer → QA (ReplyRepair khi cần)', agent: true },
   warmup: { key: 'warmup', icon: '📣', label: 'WarmUpComposer', detail: 'Chọn chiến lược theo stage & thời gian im lặng → soạn tin', agent: true },
   event: { key: 'event', icon: '🗓️', label: 'EventAdvertiser', detail: 'Ghép sự kiện theo thành phố → soạn lời mời', agent: true },
+  care: { key: 'care', icon: '🧭', label: 'MAS Care Planner', detail: 'Đọc chỉ dẫn, lịch sử và thời gian → đề xuất hoặc không gửi cho từng seeker', agent: true },
 };
 
 function buildStages(type: MasRunType, seekerCount: number): Stage[] {

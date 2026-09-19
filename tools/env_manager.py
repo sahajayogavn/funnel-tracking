@@ -19,9 +19,8 @@ def save_credentials(credentials: dict):
     Save credentials dict encoded in .env.
     Usage example:
     save_credentials({
-        'OPENAI_COMPATIBLE_URL': 'https://...',
-        'OPENAI_COMPATIBLE_KEY': 'sk-...',
-        'OPENAI_COMPATIBLE_MODELS': 'gpt-5.3-codex',
+        'GOOGLE_API_KEY': 'AIza...',
+        'GEMINI_MODEL': 'gemini-3.8-flash',
         'GOOGLE_SHEET_CREDENTIALS': '{...}',
         'FACEBOOK_FANPAGE_APP_TOKEN': 'EAA...',
         'TELEGRAM_BOT_TOKEN': '1234:ABC...',
@@ -83,9 +82,8 @@ if __name__ == '__main__':
 
     if args.init:
         dummy_data = {
-            'OPENAI_COMPATIBLE_URL': 'https://api.openai.com/v1',
-            'OPENAI_COMPATIBLE_KEY': 'your_api_key_here',
-            'OPENAI_COMPATIBLE_MODELS': 'gpt-5.3-codex',
+            'GOOGLE_API_KEY': 'your_google_api_key_here',
+            'GEMINI_MODEL': 'gemini-3.8-flash',
             'GOOGLE_SHEET_CREDENTIALS': 'your_google_json_string',
             'FACEBOOK_FANPAGE_APP_TOKEN': 'your_fb_token',
             'TELEGRAM_BOT_TOKEN': 'your_tg_token',

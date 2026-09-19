@@ -1,13 +1,13 @@
 {
-  "rollout_id": "rl-2026-09-15-001",
-  "prd_beads_id": "local-seeker-mas-selection",
-  "contract_version": "none (existing Next.js screens)",
+  "rollout_id": "rl-2026-09-18-001",
+  "prd_beads_id": "prd:mas-time-aware-001:operator-care-command",
+  "contract_version": "operator-care-command.v1",
   "build_sequence": [
-    { "step": 1, "component": "seeker table range selection", "type": "interaction", "tokens_first": true },
-    { "step": 2, "component": "approval queue range selection", "type": "interaction" },
-    { "step": 3, "component": "proposal message preview", "type": "data-display" }
+    { "step": 1, "component": "operator care-command input", "type": "interaction", "tokens_first": true },
+    { "step": 2, "component": "per-seeker MAS care decision", "type": "workflow" },
+    { "step": 3, "component": "pending-message table column", "type": "data-display" }
   ],
-  "states_to_implement": ["default", "loading", "empty", "error", "selected", "disabled"],
-  "risks": ["Selection must follow the currently filtered/sorted order", "A selected proposal must never bypass HITL approval"],
+  "states_to_implement": ["default", "loading", "empty", "error", "selected", "disabled", "no_send"],
+  "risks": ["Selection must follow the currently filtered/sorted order", "A selected proposal must never bypass HITL approval", "An operator instruction must not override opt-out, prior send budget, or schedule verification"],
   "tool_budget_estimate": 6
 }

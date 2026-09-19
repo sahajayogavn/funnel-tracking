@@ -102,7 +102,18 @@ def extract_visible_threads(page) -> list[dict]:
                 }
                 
                 let fbUrl = '';
+                let facebookUid = '';
                 if (hovercard) {
+                    // Keep a stable user identity for read-only Fetch QA. The
+                    // existing fbUrl value intentionally drops query params
+                    // for the navigation code below, so extract the UID before
+                    // doing that normalization.
+                    try {
+                        const hovercardUrl = new URL(hovercard, window.location.origin);
+                        facebookUid = hovercardUrl.searchParams.get('id')
+                            || hovercardUrl.searchParams.get('selected_item_id')
+                            || '';
+                    } catch (_) {}
                     fbUrl = hovercard.split('?')[0];
                 }
 
@@ -132,6 +143,7 @@ def extract_visible_threads(page) -> list[dict]:
                     sidebarTimeText,
                     sidebarTimestampMs: Number.isFinite(sidebarTimestampMs) ? sidebarTimestampMs : null,
                     sidebarIdentityKey,
+                    facebookUid,
                     selectedItemId,
                     href,
                     fbUrl,

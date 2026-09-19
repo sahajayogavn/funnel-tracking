@@ -43,7 +43,7 @@ from fb_pipeline.persistence.l4_sqlite_store import get_db_connection, record_fe
 from fb_pipeline.session.l2_bootstrap import attach_to_authorized_session
 
 from tools.l5_inbox_mas_context import setup_llm_env, load_knowledge_context
-from tools.l5_inbox_mas_pipeline import run_adk_pipeline, run_adk_batch_pipeline, _sanitize_reply
+from tools.l5_inbox_mas_pipeline import run_adk_pipeline, _sanitize_reply
 from tools.l5_inbox_mas_thread import process_single_thread
 # Setup logging
 os.makedirs(os.path.join(PROJECT_ROOT, 'logs'), exist_ok=True)
@@ -70,7 +70,8 @@ CDP_URL = "http://127.0.0.1:9222"
 
 
 def run_inbox_cycle(page_id: str, dry_run: bool = True,
-                    max_threads: int = 5, target_thread: str = None) -> dict:
+                    max_threads: int = 5, target_thread: str = None,
+                    target_city: str = "Hà Nội") -> dict:
     from adk_agents.tools.seeker_tools import find_unreplied_threads
     import datetime
 
@@ -133,98 +134,226 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
 
         logger.info(f"Found {unreplied['count']} unreplied thread(s).")
 
-        batch_payload = []
-        from adk_agents.tools.seeker_tools import lookup_seeker, get_thread_messages
+        candidates = []
+        gate_skipped = []
+        from adk_agents.tools.seeker_tools import (
+            claim_scheduled_inbox_message, get_thread_messages, lookup_seeker,
+        )
         from adk_agents.tools.l5_stage_tools import evaluate_stage_gate
         from fb_pipeline.persistence.l4_sqlite_store import log_mas_decision
-        from tools.l5_telegram_hitl import send_proposal_to_telegram
+        from fb_pipeline.contracts.l1_conversation_state import (
+            compute_conversation_state, format_conversation_lines, format_now_context,
+            ACTION_REPLY, ACTION_REPLY_LATE,
+        )
+        from tools.l5_telegram_hitl import format_inbox_proposal, format_escalation_proposal, send_proposal_to_telegram
+        from tools.l5_action_queue import enqueue_action, has_active_proposal
+
+        now = datetime.datetime.now()
+        now_context = format_now_context(now)
+
+        def queue_missing_mas_outcome(payload: dict, note: str) -> None:
+            """A post-admission MAS failure is work for a human, never a skip.
+
+            Deterministic gates above may legitimately produce no reply. Once a
+            candidate has passed those gates, however, an empty/unsafe agent
+            result must leave an observable HITL item instead of disappearing
+            from the operating queue.
+            """
+            thread_id = payload["thread_id"]
+            thread_name = payload["thread_name"]
+            log_mas_decision(
+                page_id, "inbox_escalation", "thread", thread_id,
+                "non_convergence", note, dry_run=dry_run,
+                payload={"thread_name": thread_name, "loop_count": 0},
+            )
+            send_proposal_to_telegram(
+                route="inbox", thread_id=thread_id,
+                proposed_text=format_escalation_proposal(
+                    thread_id, thread_name, payload["messages"], "non_convergence", note,
+                ),
+                payload={"status": "escalated", "escalation_reason": "non_convergence"},
+                escalation_reason="non_convergence", escalation_note=note,
+            )
 
         for thread in unreplied["threads"]:
             thread_id = thread["thread_id"]
+            thread_name = thread["thread_name"]
             msg_result = get_thread_messages(thread_id)
             if msg_result["status"] != "success" or msg_result["count"] == 0:
                 continue
 
-            last_msg = msg_result["messages"][-1] if msg_result["messages"] else None
-            if last_msg and last_msg.get("sender") == "Page":
+            # code:inbox-conv-state-001 — time gate + conversation state BEFORE the LLM.
+            state = compute_conversation_state(msg_result["messages"], now=now)
+            log_mas_decision(
+                page_id, "inbox_gate", "thread", thread_id, state.action, state.reason,
+                dry_run=dry_run, payload={**state.to_dict(), "thread_name": thread_name},
+            )
+            if state.action not in (ACTION_REPLY, ACTION_REPLY_LATE):
+                gate_skipped.append({"status": "gate_skip", "thread_name": thread_name,
+                                     "state": state.state, "action": state.action,
+                                     "reason": state.reason, "age_hours": state.age_hours})
+                continue
+
+            # code:stage-gate-decouple-001 — only a genuine customer turn with a
+            # phone number is evidence; the gate no longer runs per generated draft.
+            stage_result = {}
+            if state.has_phone:
+                stage_result = evaluate_stage_gate(thread_id)
+                if stage_result.get("promoted"):
+                    log_mas_decision(page_id, "stage_gate", "thread", thread_id, "promoted",
+                                     stage_result.get("reason"), dry_run=dry_run, payload=stage_result)
+
+            # Duplicate check before spending an LLM call.
+            if has_active_proposal(thread_id, "reply_message"):
+                gate_skipped.append({"status": "skipped_duplicate_proposal", "thread_name": thread_name})
                 continue
 
             seeker = lookup_seeker(thread_id)
+            seeker_city = (seeker or {}).get("city")
+            # code:agent-mas-002:city-admit — a mismatch against a KNOWN, different
+            # city still skips (keeps one cycle scoped to one city's operating
+            # capacity). An unresolved/Unknown city is admitted instead of dropped:
+            # the first-pass classifier can be wrong, and the InboxOrchestrator
+            # (get_seeker_profile / propose_seeker_update) is what actually corrects
+            # it from the conversation. Silently excluding Unknown seekers forever
+            # was the original defect this replaces.
+            if target_city and seeker_city and seeker_city != "Unknown" and seeker_city != target_city:
+                gate_skipped.append({
+                    "status": "gate_skip",
+                    "thread_name": thread_name,
+                    "reason": "city_not_eligible",
+                    "city": seeker_city,
+                    "target_city": target_city,
+                })
+                continue
+
+            # Claim before spending LLM tokens.  A scheduled run must process a
+            # customer turn at most once, regardless of whether the result is a
+            # pending human review, approval/rejection, escalation, timeout, or
+            # error.  Manual website MAS intentionally bypasses this claim.
+            latest_customer_seq = next(
+                (message.get("seq") for message in reversed(msg_result["messages"])
+                 if message.get("sender") == "Customer"),
+                None,
+            )
+            if latest_customer_seq is None or not claim_scheduled_inbox_message(
+                thread_id, expected_message_seq=latest_customer_seq,
+            ):
+                gate_skipped.append({"status": "skipped_already_processed", "thread_name": thread_name})
+                continue
+
             recent_messages = msg_result["messages"][-15:] if len(msg_result["messages"]) > 15 else msg_result["messages"]
-            
-            # Find last customer message seq equivalent. Since we get them from DB, the length or max seq is needed.
-            # We don't have seq in `msg_result["messages"]`, so we will use len of full_messages_json or something.
-            # Wait, `get_thread_messages` does not return `seq`. 
-            # I can just count the total messages. 
-            
-            batch_payload.append({
+
+            candidates.append({
                 "thread_id": thread_id,
-                "thread_name": thread["thread_name"],
+                "thread_name": thread_name,
                 "seeker": seeker,
                 "messages": recent_messages,
+                "conversation_text": format_conversation_lines(
+                    recent_messages, msg_result.get("reaction_events") or [],
+                ),
                 "full_messages_json": msg_result["messages"],
-                "latest_timestamp": msg_result["messages"][-1].get("timestamp")
+                "reaction_events": msg_result.get("reaction_events") or [],
+                "latest_timestamp": msg_result["messages"][-1].get("timestamp"),
+                "conversation_state": state.to_dict(),
+                "late": state.late,
+                "stage_result": stage_result,
             })
 
-            if len(batch_payload) >= max_threads:
+            if len(candidates) >= max_threads:
                 break
 
-        if not batch_payload:
-            return {"status": "no_valid_threads"}
+        results.extend(gate_skipped)
+        if not candidates:
+            return {"status": "no_valid_threads", "processed": len(results), "results": results}
 
-        logger.info(f"Running Batched ADK Pipeline for {len(batch_payload)} threads...")
-        batch_results = run_adk_batch_pipeline(batch_payload)
-        
-        llm_replies = {item.get("thread_id"): item for item in batch_results if isinstance(item, dict) and item.get("thread_id")}
-
-        for payload in batch_payload:
+        logger.info("Running isolated MAS pipelines for %d eligible thread(s)", len(candidates))
+        for payload in candidates:
             thread_id = payload["thread_id"]
             thread_name = payload["thread_name"]
             try:
-                llm_output = llm_replies.get(thread_id)
-                if not llm_output or not llm_output.get("reply_text"):
-                    results.append({"status": "no_reply", "thread_name": thread_name})
+                # One latest-customer-message candidate gets one session and one trace.
+                # The deterministic gate above has already excluded stale/answered turns.
+                pipeline_kwargs = {
+                    "trigger": "scheduler", "page_id": page_id,
+                    "subject_id": thread_id, "now_context": now_context,
+                }
+                if payload.get("reaction_events"):
+                    pipeline_kwargs["reaction_events"] = payload["reaction_events"]
+                llm_output = run_adk_pipeline(
+                    payload["messages"], payload["seeker"], **pipeline_kwargs,
+                )
+                if not llm_output:
+                    queue_missing_mas_outcome(payload, "MAS không trả về kết quả cuối cùng.")
+                    results.append({"status": "escalated", "thread_name": thread_name,
+                                    "escalation_reason": "non_convergence"})
+                    continue
+
+                # code:agent-mas-002:escalation-taxonomy — the orchestrator decided this
+                # needs a human, not another rewrite. Queue it as a distinct HITL card
+                # with no reply attached; there is nothing here for an operator to
+                # approve-and-send, only to read and answer themselves.
+                escalation_reason = llm_output.get("escalation_reason", "")
+                if escalation_reason:
+                    log_mas_decision(page_id, "inbox_escalation", "thread", thread_id, escalation_reason,
+                                     llm_output.get("escalation_note", ""), dry_run=dry_run,
+                                     payload={"thread_name": thread_name, "loop_count": llm_output.get("loop_count")})
+                    combined_text = format_escalation_proposal(
+                        thread_id, thread_name, payload["messages"],
+                        escalation_reason, llm_output.get("escalation_note", ""),
+                    )
+                    send_proposal_to_telegram(
+                        route="inbox", thread_id=thread_id, proposed_text=combined_text,
+                        payload={"status": "escalated", "escalation_reason": escalation_reason,
+                                "classification": llm_output.get("classification", "")},
+                        escalation_reason=escalation_reason, escalation_note=llm_output.get("escalation_note", ""),
+                    )
+                    results.append({"status": "escalated", "thread_name": thread_name,
+                                    "escalation_reason": escalation_reason})
+                    continue
+
+                if not llm_output.get("reply_text"):
+                    queue_missing_mas_outcome(payload, "MAS không tạo được reply hoặc verdict an toàn.")
+                    results.append({"status": "escalated", "thread_name": thread_name,
+                                    "escalation_reason": "non_convergence"})
                     continue
 
                 reply_text = _sanitize_reply(llm_output.get("reply_text", ""))
                 classification = llm_output.get("classification", "")
 
                 if not reply_text:
-                    results.append({"status": "no_reply", "thread_name": thread_name})
+                    queue_missing_mas_outcome(payload, "Reply bị deterministic safety gate từ chối.")
+                    results.append({"status": "escalated", "thread_name": thread_name,
+                                    "escalation_reason": "non_convergence"})
                     continue
 
                 latest_customer_message_timestamp = None
                 last_message_seq = None
-                
-                # Fetch the exact seq from DB for the last message
                 conn_seq = get_db_connection()
                 seq_row = conn_seq.execute(
-                    "SELECT MAX(seq) as max_seq FROM messages WHERE thread_id=?", 
+                    "SELECT MAX(seq) as max_seq FROM messages WHERE thread_id=?",
                     (thread_id,)
                 ).fetchone()
                 conn_seq.close()
                 if seq_row and seq_row["max_seq"] is not None:
                     last_message_seq = seq_row["max_seq"]
+                latest_customer_message_timestamp = payload["conversation_state"].get("last_customer_at")
 
-                for message in reversed(payload["full_messages_json"]):
-                    if message.get("sender") == "Customer":
-                        latest_customer_message_timestamp = message.get("timestamp")
-                        break
-
-                convo_lines = []
-                for msg in payload["messages"]:
-                    sender_label = msg.get("sender", "Unknown")
-                    convo_lines.append(f"[{sender_label}]: {msg.get('content', '')}")
-                convo_text = "\\n".join(convo_lines)
-                
-                if len(convo_text) > 2500:
-                    convo_text = "...(truncated)...\\n" + convo_text[-2500:]
+                # code:agent-mas-001:no-reply-sentinel
+                if reply_text.strip().upper().startswith("[NO_REPLY"):
+                    log_mas_decision(page_id, "inbox_gate", "thread", thread_id, "llm_no_reply",
+                                     reply_text.strip()[:120], dry_run=dry_run,
+                                     payload={"thread_name": thread_name, "classification": classification})
+                    results.append({"status": "no_reply", "thread_name": thread_name, "reason": reply_text.strip()[:120]})
+                    continue
 
                 is_out_of_scope = (reply_text.strip() == "[OUT_OF_SCOPE]")
-                stage_result = {}
 
                 if is_out_of_scope:
-                    combined_text = f"🚨 [OUT OF SCOPE] Lời nhắn không thuộc phạm vi MAS (Sahaja Yoga):\\n\\n{convo_text}"
+                    combined_text = (
+                        "🚨 [OUT OF SCOPE] Lời nhắn không thuộc phạm vi MAS (Sahaja Yoga)\n\n"
+                        + format_inbox_proposal(thread_id, thread_name, payload["messages"], "Cần người phụ trách xem xét.")
+                    )
                     msg_id = send_proposal_to_telegram(
                         route="inbox", thread_id=thread_id, proposed_text=combined_text,
                         payload={"classification": classification, "status": "out_of_scope", "last_message_seq": last_message_seq}
@@ -232,18 +361,15 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                     results.append({"status": "out_of_scope", "thread_name": thread_name, "classification": classification})
                     continue
 
-                stage_result = evaluate_stage_gate(thread_id)
-                if stage_result.get("promoted"):
-                    log_mas_decision(page_id, "stage_gate", "thread", thread_id, "promoted", stage_result.get("reason"), dry_run=dry_run, payload=stage_result)
+                stage_result = payload.get("stage_result") or {}
 
-                combined_text = f"📜 Cuộc hội thoại gần đây:\\n{convo_text}\\n\\n🤖 Đề xuất trả lời (MAS):\\n{reply_text}"
-                if len(combined_text) > 3500:
-                    combined_text = combined_text[:3500] + "... (truncated)"
+                combined_text = format_inbox_proposal(
+                    thread_id=thread_id,
+                    seeker_name=thread_name,
+                    messages=payload["messages"],
+                    reply_text=reply_text,
+                )
 
-                from tools.l5_action_queue import enqueue_action, has_active_proposal
-                if has_active_proposal(thread_id, "reply_message"):
-                    results.append({"status": "skipped_duplicate_proposal", "thread_name": thread_name})
-                    continue
                 action_queue_id = enqueue_action(
                     queue_type="reply_message", page_id=page_id, target_type="thread",
                     target_id=thread_id, target_name=thread_name, action_text=reply_text,
@@ -251,6 +377,7 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                         "classification": classification,
                         "customer_message_timestamp": latest_customer_message_timestamp,
                         "seeker": payload["seeker"],
+                        "conversation_state": payload["conversation_state"],
                     },
                 )
                 msg_id = send_proposal_to_telegram(
@@ -327,6 +454,10 @@ def main():
         "--target-thread", type=str, default=None,
         help="Target a specific thread by name for E2E testing."
     )
+    parser.add_argument(
+        "--city", type=str, default="Hà Nội",
+        help="Only run MAS for seekers whose city exactly matches this value (default: Hà Nội)."
+    )
 
     args = parser.parse_args()
     dry_run = True
@@ -346,9 +477,11 @@ def main():
     logger.info(f"Page ID: {page_id}")
     logger.info(f"Mode: {mode_str}")
     logger.info(f"Max threads/cycle: {max_threads_to_use}")
+    logger.info(f"MAS city filter: {args.city or 'disabled'}")
 
     if args.once:
-        result = run_inbox_cycle(page_id, dry_run=dry_run, max_threads=max_threads_to_use, target_thread=args.target_thread)
+        result = run_inbox_cycle(page_id, dry_run=dry_run, max_threads=max_threads_to_use,
+                                 target_thread=args.target_thread, target_city=args.city)
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
     elif args.poll:
@@ -357,7 +490,8 @@ def main():
             try:
                 result = run_inbox_cycle(page_id, dry_run=dry_run,
                                          max_threads=max_threads_to_use,
-                                         target_thread=args.target_thread)
+                                         target_thread=args.target_thread,
+                                         target_city=args.city)
                 logger.info(f"Cycle result: {result.get('status', 'unknown')}, "
                            f"processed: {result.get('processed', 0)}")
             except Exception as e:

@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-17T11:46:48.697617",
+  "timestamp": "2026-09-19T02:53:36.210834",
   "page_id": "1548373332058326",
   "summary": {
     "total": 10,
@@ -8,10 +8,10 @@
   },
   "threads": [
     {
-      "thread_name": "Nguyễn Thị Phương Anh",
+      "thread_name": "Nguyen Thi Phuong Anh",
       "thread_id": "1548373332058326_7df3db519aafd210",
       "dom_tool": {
-        "thread_name": "Nguyễn Thị Phương Anh",
+        "thread_name": "Nguyen Thi Phuong Anh",
         "message_count": 28,
         "senders": {
           "Customer": 14,
@@ -28,7 +28,7 @@
         ]
       },
       "llm_agent": {
-        "thread_name": "Nguyễn Thị Phương Anh",
+        "thread_name": "Nguyen Thi Phuong Anh",
         "message_count": 28,
         "senders": {
           "Customer": 14,
@@ -54,10 +54,10 @@
       "overall": "PASSED"
     },
     {
-      "thread_name": "Hoàng Yến",
+      "thread_name": "Nguyễn Hoàng Yến",
       "thread_id": "1548373332058326_5a50f99c64d51cbb",
       "dom_tool": {
-        "thread_name": "Hoàng Yến",
+        "thread_name": "Nguyễn Hoàng Yến",
         "message_count": 27,
         "senders": {
           "Customer": 11,
@@ -74,7 +74,7 @@
         ]
       },
       "llm_agent": {
-        "thread_name": "Hoàng Yến",
+        "thread_name": "Nguyễn Hoàng Yến",
         "message_count": 27,
         "senders": {
           "Customer": 11,
@@ -146,10 +146,10 @@
       "overall": "PASSED"
     },
     {
-      "thread_name": "Dong Pham",
+      "thread_name": "Phạm Đông",
       "thread_id": "1548373332058326_81f60f8b64651bb1",
       "dom_tool": {
-        "thread_name": "Dong Pham",
+        "thread_name": "Phạm Đông",
         "message_count": 26,
         "senders": {
           "Customer": 12,
@@ -166,7 +166,7 @@
         ]
       },
       "llm_agent": {
-        "thread_name": "Dong Pham",
+        "thread_name": "Phạm Đông",
         "message_count": 26,
         "senders": {
           "Customer": 12,
@@ -192,10 +192,10 @@
       "overall": "PASSED"
     },
     {
-      "thread_name": "Khanh Van Quach",
+      "thread_name": "Quách Khánh Vân",
       "thread_id": "1548373332058326_a1b27ae3f95bf3ed",
       "dom_tool": {
-        "thread_name": "Khanh Van Quach",
+        "thread_name": "Quách Khánh Vân",
         "message_count": 26,
         "senders": {
           "Customer": 11,
@@ -212,7 +212,7 @@
         ]
       },
       "llm_agent": {
-        "thread_name": "Khanh Van Quach",
+        "thread_name": "Quách Khánh Vân",
         "message_count": 26,
         "senders": {
           "Customer": 11,
@@ -238,56 +238,10 @@
       "overall": "PASSED"
     },
     {
-      "thread_name": "Hung Bui",
-      "thread_id": "1548373332058326_100001005716854",
-      "dom_tool": {
-        "thread_name": "Hung Bui",
-        "message_count": 24,
-        "senders": {
-          "Customer": 13,
-          "Page": 11,
-          "Unknown": 0
-        },
-        "phone": "01666667975",
-        "email": "duyhunghd6@gmail.com",
-        "city": "Hà Nội",
-        "sample_messages": [
-          "Thân gửi  page Sahaja Yoga Vietnam",
-          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
-          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
-        ]
-      },
-      "llm_agent": {
-        "thread_name": "Hung Bui",
-        "message_count": 24,
-        "senders": {
-          "Customer": 13,
-          "Page": 11,
-          "Unknown": 0
-        },
-        "phone": "01666667975",
-        "email": "duyhunghd6@gmail.com",
-        "city": "Hà Nội",
-        "sample_messages": [
-          "Thân gửi  page Sahaja Yoga Vietnam",
-          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
-          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
-        ]
-      },
-      "comparison": {
-        "thread_name": "PASSED",
-        "message_count": "PASSED (24 vs 24, diff=0)",
-        "senders": "PASSED (100% agreement)",
-        "phone": "PASSED",
-        "city": "PASSED"
-      },
-      "overall": "PASSED"
-    },
-    {
-      "thread_name": "Khanh Nguyen Hoang",
+      "thread_name": "Hoàng Khanh",
       "thread_id": "1548373332058326_92e5b3941dfad8e4",
       "dom_tool": {
-        "thread_name": "Khanh Nguyen Hoang",
+        "thread_name": "Hoàng Khanh",
         "message_count": 23,
         "senders": {
           "Customer": 6,
@@ -304,7 +258,7 @@
         ]
       },
       "llm_agent": {
-        "thread_name": "Khanh Nguyen Hoang",
+        "thread_name": "Hoàng Khanh",
         "message_count": 23,
         "senders": {
           "Customer": 6,
@@ -323,6 +277,52 @@
       "comparison": {
         "thread_name": "PASSED",
         "message_count": "PASSED (23 vs 23, diff=0)",
+        "senders": "PASSED (100% agreement)",
+        "phone": "PASSED",
+        "city": "PASSED"
+      },
+      "overall": "PASSED"
+    },
+    {
+      "thread_name": "Bùi Duy Hùng",
+      "thread_id": "1548373332058326_100001005716854",
+      "dom_tool": {
+        "thread_name": "Bùi Duy Hùng",
+        "message_count": 22,
+        "senders": {
+          "Customer": 13,
+          "Page": 9,
+          "Unknown": 0
+        },
+        "phone": "01666667975",
+        "email": "duyhunghd6@gmail.com",
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Thân gửi  page Sahaja Yoga Vietnam",
+          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
+          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
+        ]
+      },
+      "llm_agent": {
+        "thread_name": "Bùi Duy Hùng",
+        "message_count": 22,
+        "senders": {
+          "Customer": 13,
+          "Page": 9,
+          "Unknown": 0
+        },
+        "phone": "01666667975",
+        "email": "duyhunghd6@gmail.com",
+        "city": "Hà Nội",
+        "sample_messages": [
+          "Thân gửi  page Sahaja Yoga Vietnam",
+          "Được biết ngày 26/03 tới, SY Vietnam tổ chức lớp học thiền tại Hà Nội",
+          "do đó, tôi gửi tin nhắn để đăng ký tham dự"
+        ]
+      },
+      "comparison": {
+        "thread_name": "PASSED",
+        "message_count": "PASSED (22 vs 22, diff=0)",
         "senders": "PASSED (100% agreement)",
         "phone": "PASSED",
         "city": "PASSED"
@@ -422,10 +422,10 @@
       "overall": "PASSED"
     },
     {
-      "thread_name": "Tony Võ",
+      "thread_name": "Võ Bá Hiền",
       "thread_id": "1548373332058326_7c438625384cc131",
       "dom_tool": {
-        "thread_name": "Tony Võ",
+        "thread_name": "Võ Bá Hiền",
         "message_count": 22,
         "senders": {
           "Customer": 7,
@@ -442,7 +442,7 @@
         ]
       },
       "llm_agent": {
-        "thread_name": "Tony Võ",
+        "thread_name": "Võ Bá Hiền",
         "message_count": 22,
         "senders": {
           "Customer": 7,

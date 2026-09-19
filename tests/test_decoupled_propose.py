@@ -24,11 +24,12 @@ def test_db(tmp_path, monkeypatch):
     conn = override_get_db_connection()
     conn.executescript('''
         CREATE TABLE threads (id TEXT PRIMARY KEY, page_id TEXT, thread_name TEXT, inbox_sort_index INTEGER);
-        CREATE TABLE messages (seq INTEGER, thread_id TEXT, sender TEXT, timestamp INTEGER, message_timestamp INTEGER, content TEXT);
+        CREATE TABLE messages (seq INTEGER, thread_id TEXT, sender TEXT, timestamp INTEGER, message_timestamp INTEGER, content TEXT, kind TEXT NOT NULL DEFAULT 'message', message_at TEXT, message_at_approx INTEGER DEFAULT 0);
         CREATE TABLE telegram_hitl_queue (id INTEGER PRIMARY KEY, route TEXT, thread_id TEXT, payload_json TEXT, status TEXT);
         CREATE TABLE fetch_log (id INTEGER PRIMARY KEY, page_id TEXT, fetched_at TEXT, qa_status TEXT);
         CREATE TABLE auto_replies (thread_id TEXT, customer_message_timestamp INTEGER);
         CREATE TABLE users (thread_id TEXT, thread_name TEXT, phone TEXT, email TEXT, fb_url TEXT, city TEXT, lead_stage TEXT, first_seen INTEGER, last_interaction INTEGER);
+        CREATE TABLE inbox_mas_processed_messages (thread_id TEXT PRIMARY KEY, last_message_seq INTEGER NOT NULL, processed_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
     ''')
     conn.close()
     
