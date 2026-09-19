@@ -64,6 +64,7 @@ env.bak/
 venv.bak/
 
 # Project specifics
+web/.auth/
 node_modules/
 logs/
 .agents/memory/agent_memory/*.tmp

@@ -1,0 +1,21 @@
+.screen { position: fixed; inset: 0; z-index: 100; overflow-y: auto; display: grid; place-items: center; padding: 24px; background: var(--bg-primary); }
+.card { width: 100%; max-width: 500px; padding: 32px; border: 1px solid var(--border-glow); border-radius: 20px; background: var(--bg-secondary); box-shadow: var(--shadow-card); }
+.brand { color: var(--text-secondary); font-size: 14px; margin-bottom: 24px; }
+.card h1 { font-size: 28px; font-weight: 700; margin-bottom: 10px; }
+.intro { color: var(--text-secondary); line-height: 1.6; margin-bottom: 28px; }
+.questions, .choices { border: 0; min-width: 0; }
+.choices legend, .question { display: block; font-size: 15px; font-weight: 600; line-height: 1.6; margin-bottom: 12px; }
+.choice { display: flex; gap: 12px; align-items: center; padding: 13px 15px; border: 1px solid var(--border-glow); border-radius: 10px; margin-bottom: 10px; cursor: pointer; }
+.choice:has(input:checked) { background: var(--gradient-glow); border-color: var(--accent-indigo); }
+.choice input { accent-color: var(--accent-indigo); width: 18px; height: 18px; }
+.question { margin-top: 22px; }
+.answer { width: 100%; padding: 13px 15px; border: 1px solid var(--border-glow); border-radius: 10px; background: var(--bg-primary); color: var(--text-primary); font: inherit; }
+.answer:focus-visible, .submit:focus-visible, .choice:focus-within { outline: 2px solid var(--accent-indigo); outline-offset: 3px; }
+.hint, .remember { color: var(--text-secondary); font-size: 12px; line-height: 1.6; margin-top: 10px; }
+.error { color: #fda4af; font-size: 14px; line-height: 1.5; margin-top: 14px; }
+.error:empty { display: none; }
+.submit { width: 100%; margin-top: 20px; padding: 13px; border: 0; border-radius: 10px; background: var(--gradient-primary); color: white; font: inherit; font-weight: 600; cursor: pointer; }
+.questions:disabled { opacity: .65; }
+.questions:disabled .submit { cursor: wait; }
+.remember { text-align: center; margin-top: 20px; }
+@media (max-width: 480px) { .screen { padding: 16px; } .card { padding: 24px 20px; } }

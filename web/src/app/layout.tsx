@@ -1,17 +1,20 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Link from "next/link";
+import { cookies } from "next/headers";
+import { SESSION_COOKIE, validSession } from "@/lib/auth";
 
 export const metadata: Metadata = {
   title: "Funnel Tracking — Sahaja Yoga Vietnam",
   description: "Seeker CRM & Customer Journey Analytics for Thiền Sahaja Yoga Việt Nam",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const authenticated = validSession((await cookies()).get(SESSION_COOKIE)?.value);
   return (
     <html lang="en">
       <head>
@@ -20,39 +23,35 @@ export default function RootLayout({
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
       </head>
       <body>
-        <aside className="sidebar">
+        {authenticated && <aside className="sidebar">
           <div className="sidebar-header">
             <div className="sidebar-brand">🪷 Sahaja Yoga VN</div>
             <div className="sidebar-subtitle">Funnel Tracking</div>
           </div>
           <nav className="sidebar-nav">
-            <Link href="/" className="nav-link">
-              <span className="nav-icon">📊</span>
-              Dashboard
-            </Link>
             <Link href="/seekers" className="nav-link">
               <span className="nav-icon">👥</span>
               Seekers
+            </Link>
+            <Link href="/stats" className="nav-link">
+              <span className="nav-icon">📊</span>
+              Stats
             </Link>
             <Link href="/graph" className="nav-link">
               <span className="nav-icon">🕸️</span>
               Network Graph
             </Link>
-            <Link href="/journey" className="nav-link">
-              <span className="nav-icon">🛤️</span>
-              Journey Workflow
-            </Link>
             <Link href="/queues" className="nav-link">
               <span className="nav-icon">✅</span>
-              Approval Queues
+              Queue MAS
             </Link>
             <Link href="/llm" className="nav-link">
               <span className="nav-icon">🔬</span>
-              LLM Observability
+              Debugging LLM/MAS
             </Link>
           </nav>
-        </aside>
-        <main className="main-content">
+        </aside>}
+        <main className={authenticated ? "main-content" : undefined}>
           {children}
         </main>
       </body>

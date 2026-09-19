@@ -163,6 +163,23 @@ The system uses an ultra-compact elapsed-time convention across `/seekers`, seek
 
 ## Local development
 
+### Dashboard authentication
+
+The dashboard and its API routes require a signed session cookie. At `/login`,
+users answer both Sahaja Yoga questions. Answers are checked on the server,
+ignoring case and surrounding whitespace. The HttpOnly, SameSite=Lax cookie
+remembers access for one year and uses Secure on HTTPS.
+
+Set `AUTH_SECRET` to a persistent random secret (at least 32 random bytes) for
+deployments, sharing it across all instances. Without it, the local server creates
+`web/.auth/session-secret` (when started from `web/`), excluded from git, and reuses
+it across restarts. Preserve that file to preserve existing sessions. Read-only
+or ephemeral deployments must set `AUTH_SECRET`. Changing the secret invalidates
+existing sessions. Clearing browser cookies also requires answering again.
+
+This is a shared knowledge gate; it does not identify individual users or assign
+different permissions.
+
 Run the development server from `web/`:
 
 ```bash
