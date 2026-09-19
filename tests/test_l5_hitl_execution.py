@@ -20,16 +20,16 @@ def test_standalone_worker_only_imports_delivery_dependencies():
     assert "run_adk_warmup_composer" not in source
 
 
-def test_approval_cannot_enable_automated_facebook_delivery():
+def test_delivery_requires_claimed_human_approval():
     from tools.l5_hitl_execution import OUTBOUND_QUEUE_TYPES, _execute_approved_action
 
-    assert OUTBOUND_QUEUE_TYPES == ()
+    assert "proactive_message" in OUTBOUND_QUEUE_TYPES
     try:
         _execute_approved_action({"id": 1, "queue_type": "reply_message"}, "page", dry_run=False)
     except RuntimeError as exc:
-        assert "manual" in str(exc).lower()
+        assert "human-approved" in str(exc).lower()
     else:
-        raise AssertionError("Automated DM delivery must stay disabled")
+        raise AssertionError("Unclaimed actions must never deliver")
 
 
 def test_shell_runner_requires_an_explicit_mode():

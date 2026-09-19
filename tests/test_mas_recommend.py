@@ -149,6 +149,31 @@ def test_operator_care_command_creates_personalized_class_pending_message(test_d
     assert json.loads(row["payload_json"])["trigger"] == "operator_care_command"
 
 
+def test_class_reminder_uses_selected_seekers_program_without_a_program_filter(test_db, mocked_llm):
+    """The default UI filter is "all", not an instruction to merge all classes.
+
+    A selected seeker with a verified program must still receive the one
+    upcoming session for that program even when the weekly schedule includes
+    other classes.
+    """
+    conn = test_db()
+    conn.execute("UPDATE users SET program_code=?, lead_stage=? WHERE thread_id=?",
+                 ("14h30-CN-Vương Thừa Vũ-HN", "Seeker_Public_Program", HUNG_BUI))
+    conn.commit()
+    conn.close()
+
+    result = rec.run(
+        [HUNG_BUI], "care", city="Hà Nội",
+        instruction="Nhắc lịch lớp phù hợp với đăng ký đã xác thực.",
+        care_purpose="class_reminder",
+    )
+
+    assert result["status"] == "ok"
+    assert result["count"] == 1
+    assert mocked_llm["care"][0][3]["verified_session"]["program_code"] == "14h30-CN-Vương Thừa Vũ-HN"
+    assert json.loads(_pending(test_db)[0]["payload_json"])["session"]["program_code"] == "14h30-CN-Vương Thừa Vũ-HN"
+
+
 def test_two_operator_care_commands_can_coexist_for_one_seeker(test_db, mocked_llm):
     first = rec.run([HUNG_BUI], "care", instruction="Hỏi thăm nhẹ nhàng tuần này", trace_id="job-1",
                     care_purpose="warmup")
@@ -162,6 +187,93 @@ def test_two_operator_care_commands_can_coexist_for_one_seeker(test_db, mocked_l
     assert {json.loads(row["payload_json"])["dedupe_key"] for row in rows} == {
         "operator-care:warmup:job-1", "operator-care:warmup:job-2",
     }
+
+
+@pytest.mark.parametrize("variant,blocked", [
+    ("sent", True), ("regenerate", True), ("other_date", False),
+    ("other_class", False), ("other_page", False), ("other_thread", False),
+    ("pending", False), ("approved", False), ("rejected", False),
+    ("failed", False), ("drafted", False),
+    ("explicit_override", False), ("negated_override", True),
+    ("quoted_override", True), ("generic_urgent", True),
+])
+def test_trace36_reminder_cadence(test_db, mocked_llm, monkeypatch, variant, blocked):
+    from datetime import datetime
+    from types import SimpleNamespace
+    from fb_pipeline.contracts import l1_class_schedule as schedule
+
+    session = {"class_key": "class-hn", "program_code": "class-hn",
+               "session_date": "2026-09-20", "starts_at": "2026-09-20 14:30:00"}
+    monkeypatch.setattr(schedule, "upcoming_sessions", lambda *a, **k: [
+        SimpleNamespace(program_code="class-hn", to_dict=lambda: dict(session))])
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls):
+            return cls(2026, 9, 19, 13, 11)
+    monkeypatch.setattr(rec, "datetime", FrozenDatetime)
+    prior = dict(session)
+    if variant == "other_date":
+        prior["session_date"] = "2026-09-13"
+    if variant == "other_class":
+        prior.update(class_key="other", program_code="other")
+    payload = {"type": "class_reminder", "session": prior, "dedupe_key": "old-command"}
+    if variant == "drafted":
+        payload["delivery_status"] = "drafted"
+    status = variant if variant in {"pending", "approved", "rejected", "failed"} else "executed"
+    conn = test_db()
+    conn.execute("UPDATE users SET program_code='class-hn' WHERE thread_id=?", (HUNG_BUI,))
+    conn.execute("""INSERT INTO action_queue
+        (queue_type,page_id,target_type,target_id,status,action_text,payload_json,executed_at)
+        VALUES ('proactive_message',?,'thread',?,?,?,?,'2026-09-18 06:39:38')""",
+        ("other-page" if variant == "other_page" else rec.DEFAULT_PAGE_ID,
+         "other-thread" if variant == "other_thread" else HUNG_BUI, status,
+         "Chúng ta có hẹn lớp Chủ Nhật lúc 14h30.", json.dumps(payload)))
+    conn.commit()
+    conn.close()
+    instruction = "Soạn tin nhắc lịch học phù hợp cho seeker đã chọn. Chỉ đề xuất khi có lịch đã được xác thực và seeker còn phù hợp để nhận tin."
+    instruction += {
+        "explicit_override": " Đây là sự kiện cần nhắc lịch dồn dập.",
+        "negated_override": " Không phải đây là sự kiện cần nhắc lịch dồn dập.",
+        "quoted_override": ' Seeker nói: "Đây là sự kiện cần nhắc lịch dồn dập".',
+        "generic_urgent": " Hãy nhắc lại ngay, ưu tiên gấp.",
+    }.get(variant, "")
+    result = rec.run([HUNG_BUI], "care", care_purpose="class_reminder",
+                     trace_id="36", instruction=instruction, regenerate=variant == "regenerate")
+    assert result["count"] == (0 if blocked else 1)
+    assert len(mocked_llm["care"]) == (0 if blocked else 1)
+    assert len(_pending(test_db)) == (1 if blocked else 2)
+    if blocked:
+        assert result["skipped"][0]["reason"] == "reminder_already_sent_for_session"
+        assert "không" in result["skipped"][0]["note"].lower()
+    elif variant == "explicit_override":
+        brief = mocked_llm["care"][0][3]
+        assert brief["reminder_cadence"]["repeat_explicitly_requested"] is True
+        assert brief["reminder_cadence"]["sent_reminders"][0]["executed_at"] == "2026-09-18 06:39:38"
+
+
+def test_care_no_send_is_explained_without_enqueue(test_db, mocked_llm, monkeypatch):
+    monkeypatch.setattr(rec, "run_adk_care_pipeline", lambda *a, **k: {
+        "no_send_reason": "Đã nhắc lịch hôm qua; hôm nay không phù hợp để nhắc lại.",
+        "reply_text": "", "draft_reply": "", "qa_verdict": "",
+    })
+    result = rec.run([HUNG_BUI], "care", care_purpose="warmup", instruction="Chăm sóc phù hợp")
+    assert result["count"] == 0
+    assert result["skipped"][0]["reason"] == "care_not_appropriate_now"
+    assert "hôm qua" in result["skipped"][0]["note"]
+    assert not _pending(test_db)
+
+
+def test_intensive_reminder_instruction_does_not_override_opt_out(test_db, mocked_llm):
+    conn = test_db()
+    conn.execute("UPDATE users SET lead_stage='Unsubscribed' WHERE thread_id=?", (HUNG_BUI,))
+    conn.commit()
+    conn.close()
+    result = rec.run([HUNG_BUI], "care", care_purpose="class_reminder",
+                     instruction="Đây là sự kiện cần nhắc lịch dồn dập.")
+    assert result["count"] == 0
+    assert result["skipped"][0]["reason"] == "opt_out"
+    assert not mocked_llm["care"]
+    assert not _pending(test_db)
 
 
 def test_all_runs_reply_warmup_event(test_db, mocked_llm):

@@ -24,7 +24,9 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
+import unicodedata
 from datetime import datetime
 from typing import Any, Optional
 
@@ -36,6 +38,7 @@ os.chdir(PROJECT_ROOT)
 from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
 from fb_pipeline.persistence.l4_llm_trace import link_outcome, span
 from tools.l5_action_queue import active_proposal_status, enqueue_action, replace_action
+from tools.l5_delivery_guard import conversation_snapshot
 from tools.l5_inbox_mas_context import setup_llm_env
 from tools.l5_inbox_mas_pipeline import _approved_draft, _sanitize_reply, run_adk_care_pipeline, run_adk_pipeline
 from adk_agents.tools.l5_event_tools import get_upcoming_events
@@ -118,6 +121,10 @@ def _load_thread(thread_id: str) -> Optional[dict]:
     return {
         "thread_id": thread_id,
         "thread_name": thread_name,
+        "recipient_name": _thread_name_from_db(thread_id) or thread_name,
+        # Delivery verifies only this fetched transcript's latest stable event.
+        # Older Messenger history can be virtualized away before approval.
+        "delivery_snapshot": conversation_snapshot(msg_result["messages"]),
         "seeker": seeker,
         "messages": messages,
         "reaction_events": msg_result.get("reaction_events") or [],
@@ -179,6 +186,7 @@ def recommend_replies(threads: list[dict], page_id: str, regenerate: bool = Fals
         if reason:
             skipped.append({"threadId": t["thread_id"], "reason": reason})
             continue
+        delivery_snapshot = t.get("delivery_snapshot") or conversation_snapshot(t["messages"])
         # No cross-thread prompt or trace: the selected thread is the action boundary.
         llm = run_adk_pipeline(
             t["messages"], t["seeker"], trigger="manual_recommendation",
@@ -212,6 +220,8 @@ def recommend_replies(threads: list[dict], page_id: str, regenerate: bool = Fals
             payload={
                 "source": SOURCE,
                 "trigger": "manual_recommendation",
+                "conversation_snapshot": delivery_snapshot,
+                "recipient_name": t.get("recipient_name") or t["thread_name"],
                 "classification": classification,
                 "customer_message_timestamp": t["latest_customer_timestamp"],
                 "seeker": t["seeker"],
@@ -279,6 +289,44 @@ def _prior_page_lines(thread: dict, limit: int = 3) -> list[str]:
             if m.get("sender") == "Page"][-limit:]
 
 
+# code:tool-mas-recommend-001:reminder-cadence
+def _reminder_cadence(thread_id: str, page_id: str, session: dict,
+                      instruction: str) -> dict:
+    """Sent evidence is scoped to a recipient and a concrete class occurrence.
+
+    A new command ID or regeneration is not permission to contact again. Only
+    a standalone affirmative operator sentence opts into intensive reminders;
+    substring matches would also authorize negations and quoted customer text.
+    """
+    normalized = unicodedata.normalize("NFC", instruction).casefold()
+    sentences = {" ".join(part.split()) for part in re.split(r"[.!?\n]+", normalized)}
+    repeat = bool(sentences & {
+        "đây là sự kiện cần nhắc lịch dồn dập",
+        "đây là buổi học cần nhắc lịch dồn dập",
+    })
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("""
+            SELECT id, executed_at, action_text FROM action_queue
+            WHERE page_id=? AND target_id=? AND target_type='thread'
+              AND queue_type IN ('proactive_message', 'reply_message')
+              AND status='executed' AND executed_at IS NOT NULL
+              AND json_valid(payload_json)
+              AND json_extract(payload_json, '$.type')='class_reminder'
+              AND COALESCE(json_extract(payload_json, '$.delivery_status'), '')
+                  NOT IN ('drafted', 'outdated', 'uncertain')
+              AND json_extract(payload_json, '$.session.session_date')=?
+              AND COALESCE(json_extract(payload_json, '$.session.class_key'),
+                           json_extract(payload_json, '$.session.program_code'))=?
+            ORDER BY executed_at DESC, id DESC
+        """, (page_id, thread_id, session.get("session_date"),
+              session.get("class_key") or session.get("program_code"))).fetchall()
+        return {"repeat_explicitly_requested": repeat,
+                "sent_reminders": [dict(row) for row in rows]}
+    finally:
+        conn.close()
+
+
 def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, city: Optional[str],
                    instruction: str, program_code: Optional[str], regenerate: bool = False,
                    command_id: Optional[str] = None,
@@ -295,17 +343,22 @@ def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, ci
     if care_purpose not in CARE_PURPOSES:
         return [], [{"threadId": t["thread_id"], "reason": "care_purpose_required"} for t in threads]
     route = care_purpose
-    # One operator click is idempotent, while a later operator click is an
-    # independent proposal even for the same seeker and care route.
+    # Command idempotency is separate from the sent-reminder cadence below.
     dedupe_key = f"operator-care:{route}:{command_id or instruction.strip()}"
-    session = None
+    sessions = []
+    scoped_session = None
     if route == "class_reminder":
         sessions = upcoming_sessions(datetime.now(), window_hours=24 * 7)
-        matching = [s for s in sessions if not program_code or s.program_code == program_code]
-        if len(matching) != 1:
+        # A program filter is an explicit operator scope and must resolve to
+        # one forthcoming session.  Without it, the selected seeker's verified
+        # program is the scope.  Requiring the *entire* weekly catalogue to
+        # have one session made a normal unfiltered single-seeker reminder
+        # impossible whenever several classes were scheduled that week.
+        matching = [s for s in sessions if s.program_code == program_code] if program_code else []
+        if program_code and len(matching) != 1:
             reason = "class_session_not_unique" if matching else "class_session_not_found"
             return [], [{"threadId": t["thread_id"], "reason": reason} for t in threads]
-        session = matching[0].to_dict()
+        scoped_session = matching[0].to_dict() if matching else None
 
     event = _pick_event(city, event_id) if route == "event" else None
     if route == "event" and not event:
@@ -316,10 +369,27 @@ def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, ci
     for t in threads:
         reason = _care_skip_reason(t, route)
         seeker = {**t["seeker"], "thread_id": t["thread_id"], "thread_name": t["thread_name"]}
-        if not reason and route == "class_reminder" and seeker.get("program_code") != session["program_code"]:
-            reason = "registered_for_different_program"
+        session = scoped_session
+        if not reason and route == "class_reminder":
+            seeker_program = seeker.get("program_code")
+            if program_code and seeker_program != program_code:
+                reason = "registered_for_different_program"
+            elif not program_code:
+                matching = [s for s in sessions if s.program_code == seeker_program]
+                if len(matching) != 1:
+                    reason = "class_session_not_unique" if matching else "class_session_not_found"
+                else:
+                    session = matching[0].to_dict()
         if reason:
             skipped.append({"threadId": t["thread_id"], "reason": reason})
+            continue
+        cadence = _reminder_cadence(t["thread_id"], page_id, session, instruction) if route == "class_reminder" else {}
+        if cadence.get("sent_reminders") and not cadence.get("repeat_explicitly_requested"):
+            skipped.append({
+                "threadId": t["thread_id"], "reason": "reminder_already_sent_for_session",
+                "note": "Chưa phù hợp để nhắc lại: seeker đã được nhắc cho buổi học này. Không tạo tin nhắn để tránh làm phiền.",
+                "reminderEvidence": cadence["sent_reminders"],
+            })
             continue
         kind = route
         active = active_proposal_status(t["thread_id"], "proactive_message", dedupe_key=dedupe_key)
@@ -341,13 +411,19 @@ def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, ci
             "recent_conversation": t.get("conversation_text", ""),
             "conversation_state": t.get("conversation_state") or {},
             "knowledge_context": knowledge_context,
+            "reminder_cadence": cadence,
         }
+        delivery_snapshot = t.get("delivery_snapshot") or conversation_snapshot(t["messages"])
         llm = run_adk_care_pipeline(
             t["messages"], seeker, care_purpose=route, care_brief=care_brief,
             feedback=instruction, page_id=page_id, trigger="operator_care_command",
             subject_id=t["thread_id"], now_context=format_now_context(datetime.now()),
             reaction_events=t.get("reaction_events") or [],
         )
+        if llm.get("no_send_reason"):
+            skipped.append({"threadId": t["thread_id"], "reason": "care_not_appropriate_now",
+                            "note": llm["no_send_reason"]})
+            continue
         if llm.get("escalation_reason"):
             skipped.append({"threadId": t["thread_id"], "reason": f"escalated_{llm['escalation_reason']}"})
             continue
@@ -360,6 +436,8 @@ def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, ci
             regenerate, queue_type="proactive_message", page_id=page_id, target_type="thread",
             target_id=t["thread_id"], target_name=t["thread_name"], action_text=text,
             payload={"source": SOURCE, "type": kind, "trigger": "operator_care_command",
+                     "conversation_snapshot": delivery_snapshot,
+                     "recipient_name": t.get("recipient_name") or t["thread_name"],
                      "instruction": instruction, "city": seeker.get("city"),
                      "dedupe_key": dedupe_key,
                      "session": session, "event_id": event.get("id") if event else None,
