@@ -26,6 +26,7 @@ from fb_pipeline.browser.l3_inbox import discover_threads
 from fb_pipeline.contracts.l1_inbox_tasks import ThreadResult, ThreadTask
 from fb_pipeline.contracts.l1_session import WORKER_TAB_ROLE_PREFIX
 from fb_pipeline.persistence.db import connect as connect_database
+from fb_pipeline.session.l2_facebook_block_gate import FacebookTemporaryBlockError
 
 try:  # pragma: no cover - exact import path depends on installed playwright
     from playwright._impl._errors import TargetClosedError
@@ -329,6 +330,12 @@ def worker_main(worker_index: int, page_id: str, inbox_url: str, task_q: "queue.
                                 session.page, conn, task, deps, log, is_first_task, page_id
                             )
                             is_first_task = False
+                        except FacebookTemporaryBlockError as exc:
+                            stop_event.set()
+                            result = ThreadResult(
+                                ordinal=task.ordinal, thread_id="", status="facebook_temporarily_blocked",
+                                error=str(exc),
+                            )
                         except Exception as exc:
                             if _is_target_closed(exc):
                                 if reattach_count < 2:
@@ -620,6 +627,9 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
 
     def _dispatch(task: ThreadTask) -> None:
         nonlocal tasks_dispatched
+        if deps.block_gate and deps.block_gate.tripped:
+            stop_event.set()
+            raise FacebookTemporaryBlockError(deps.block_gate.message)
         if stop_event.is_set():
             return
         dispatch_task = task
@@ -684,7 +694,7 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
             allow_early_exit=allow_early_exit, target_total_messages=target_total_messages,
             on_task=_dispatch,
         )
-    except KeyboardInterrupt as exc:
+    except (KeyboardInterrupt, FacebookTemporaryBlockError) as exc:
         interrupted = exc
         stop_event.set()
         discovery = {
@@ -743,6 +753,9 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
         try:
             result = _call_process_thread_task(page, conn, task, deps, olog, is_first_thread, page_id)
             is_first_thread = False
+        except FacebookTemporaryBlockError as exc:
+            stop_event.set()
+            result = ThreadResult(ordinal=task.ordinal, thread_id="", status="facebook_temporarily_blocked", error=str(exc))
         except Exception as exc:
             result = ThreadResult(ordinal=task.ordinal, thread_id="", status="error", error=str(exc))
         result.worker = "orchestrator"
@@ -808,6 +821,9 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
     all_results = _drain_all(result_q)
     _aggregate_stats(stats, all_results, tasks_dispatched, workers, stage1_ms, stage2_ms)
     _log_stage2_summary(stats, logger)
+
+    if deps.block_gate and deps.block_gate.tripped:
+        raise FacebookTemporaryBlockError(deps.block_gate.message)
 
     if assignment_log_dir:
         _write_assignment_log(stats, page_id, logger, log_dir=assignment_log_dir)

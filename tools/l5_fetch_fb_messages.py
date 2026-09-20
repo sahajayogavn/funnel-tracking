@@ -43,6 +43,7 @@ from fb_pipeline.persistence.l4_sqlite_store import (
     should_fetch as shared_should_fetch,
 )
 from fb_pipeline.session.l2_bootstrap import attach_to_authorized_session, sanitize_storage_state_file
+from fb_pipeline.session.l2_facebook_block_gate import FacebookBlockGate, FacebookTemporaryBlockError
 from fb_pipeline.contracts.l1_city_llm import detect_city_llm, gather_signals_for_user
 
 from tools.l5_fetch_fb_city_classify import _post_scrape_llm_city_classify
@@ -60,6 +61,15 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("fetch_fb_messages")
+
+
+def _notify_facebook_block(page_id: str, message: str) -> None:
+    """Alert the operator once the run has already been stopped."""
+    from tools.l5_telegram_hitl import send_telegram_notification
+    send_telegram_notification(
+        f"🚨 Facebook fetch STOPPED for Page {page_id}. Meta displayed an unsafe/non-Inbox screen ({message}). "
+        "No further fetch cycles will run until an operator restarts them after the restriction clears."
+    )
 
 # --- Constants ---
 # code:tool-fbmessages-002:city-detect
@@ -360,6 +370,7 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
 
         with sync_playwright() as p:
             session = None
+            block_gate = FacebookBlockGate()
             try:
                 session = attach_to_authorized_session(
                     p,
@@ -377,6 +388,9 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
                 run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
                 logger.info("Starting direct scrape...")
+                # A prior run may already have been blocked. Check before
+                # opening any worker tabs or touching the sidebar again.
+                block_gate.trip_if_present(session.page)
                 # The CDP attachment waits only for DOM readiness.  Reload through the
                 # scraper before collecting so Meta has initialized the complete
                 # virtualized sidebar rather than a stale short viewport.
@@ -394,6 +408,7 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
                         extract_ad_id_labels=extract_ad_id_labels,
                         extract_user_info=extract_user_info,
                         detect_city=None,
+                        block_gate=block_gate,
                     )
                     stats = run_parallel_fetch(
                         session.page, page_id, time_range, max_threads, conn, logger, record_fetch, deps,
@@ -441,6 +456,13 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
                 session.close_page()
                 logger.info(f"CDP Direct: Saved to FrankenSQLite. Stats: {stats}")
                 return {"success": True, "method": "cdp_direct", "data": {"stats": stats}}
+            except FacebookTemporaryBlockError as e:
+                logger.critical("FACEBOOK_FETCH_SAFETY_GATE: %s", e)
+                _notify_facebook_block(page_id, str(e))
+                conn.close()
+                if session:
+                    session.close_page()
+                return {"success": False, "error": "facebook_temporarily_blocked", "detail": str(e)}
             except Exception as e:
                 logger.error(f"CDP Direct scrape failed: {e}")
                 try:
@@ -609,7 +631,7 @@ def main():
     print(json.dumps(result, indent=2, ensure_ascii=False))
     
     if not result.get("success", False):
-        sys.exit(1)
+        sys.exit(75 if result.get("error") == "facebook_temporarily_blocked" else 1)
 
 if __name__ == "__main__":
     main()

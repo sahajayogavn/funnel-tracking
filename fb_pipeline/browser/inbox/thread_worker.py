@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from fb_pipeline.contracts.l1_inbox_tasks import ThreadResult, ThreadTask
+from fb_pipeline.session.l2_facebook_block_gate import FacebookBlockGate
 
 from .integrity_validator import validate_thread_integrity
 from .thread_detail_parser import (
@@ -29,6 +30,7 @@ class ThreadWorkerDeps:
     extract_ad_id_labels: Callable
     extract_user_info: Callable
     detect_city: Callable
+    block_gate: FacebookBlockGate | None = None
 
 
 def process_thread_task(page, conn, task: ThreadTask, deps: ThreadWorkerDeps, logger,
@@ -45,6 +47,9 @@ def process_thread_task(page, conn, task: ThreadTask, deps: ThreadWorkerDeps, lo
     thread_record = task.record
     name = thread_record.thread_name
     record_page_id = thread_record.page_id
+
+    if deps.block_gate:
+        deps.block_gate.trip_if_present(page)
 
     has_psid = bool(thread_record.selected_item_id or task.psid_hint)
     if has_psid and not thread_record.selected_item_id:
@@ -70,6 +75,9 @@ def process_thread_task(page, conn, task: ThreadTask, deps: ThreadWorkerDeps, lo
         page.wait_for_timeout(1000)
     except Exception:
         page.wait_for_timeout(4000)
+
+    if deps.block_gate:
+        deps.block_gate.trip_if_present(page)
 
     fb_url, verified = verify_thread_switch(
         page, logger, name, locate_result.prev_fb_url, locate_result.pre_click_fingerprint,

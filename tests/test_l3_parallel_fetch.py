@@ -24,6 +24,7 @@ from fb_pipeline.contracts.l1_inbox_tasks import ThreadResult, ThreadTask
 from fb_pipeline.inbox import l3_parallel_fetch as parallel_fetch
 from fb_pipeline.inbox.l3_parallel_fetch import MessageCounter, run_parallel_fetch, worker_main
 from fb_pipeline.persistence.l4_sqlite_store import setup_database
+from fb_pipeline.session.l2_facebook_block_gate import FacebookBlockGate, FacebookTemporaryBlockError
 
 
 class _Logger:
@@ -145,6 +146,31 @@ class TestWorkerMain(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].status, "error")
         self.assertEqual(results[0].worker, "worker:1")
+
+    def test_temporary_block_stops_worker_without_requeue(self):
+        task_q, result_q = queue.Queue(), queue.Queue()
+        task_q.put(_task("A", 0))
+        task_q.put(None)
+        stop_event = threading.Event()
+        gate = FacebookBlockGate()
+        deps = ThreadWorkerDeps(extract_ad_id_labels=None, extract_user_info=None, detect_city=None,
+                                block_gate=gate)
+
+        class _Session:
+            page = _Page()
+
+        with patch.object(parallel_fetch, "process_thread_task",
+                          side_effect=FacebookTemporaryBlockError("blocked")), \
+             patch.object(parallel_fetch, "sync_playwright") as mock_sp:
+            mock_sp.return_value.__enter__.return_value = object()
+            worker_main(1, "123", "inbox_url", task_q, result_q, stop_event, deps,
+                        memory_dir=None, logger=_Logger(), session_factory=lambda *_: _Session(),
+                        connection_factory=lambda _: sqlite3.connect(":memory:"))
+
+        result = result_q.get_nowait()
+        self.assertEqual(result.status, "facebook_temporarily_blocked")
+        self.assertTrue(stop_event.is_set())
+        self.assertFalse(result.requeued)
 
 
 class TestRunParallelFetchDispatch(unittest.TestCase):

@@ -119,6 +119,10 @@ while true; do
     run_fetch || fetch_status=$?
     if (( fetch_status != 0 )); then
       echo "[$(date '+%Y-%m-%d %H:%M:%S')] Inbox fetch failed with status $fetch_status"
+      if (( fetch_status == 75 )); then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Facebook temporary-block gate tripped; stopping this loop."
+        exit 75
+      fi
     fi
   fi
 

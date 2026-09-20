@@ -42,7 +42,7 @@ class ThreadResult:
     ordinal: int
     thread_id: str                # final id (after PSID recompute), "" if failed
     status: Literal["persisted", "no_messages", "click_verify_failed",
-                    "locate_failed", "error"]
+                    "locate_failed", "facebook_temporarily_blocked", "error"]
     messages_added: int = 0
     locate_method: str = ""       # "direct_url" | "sidebar_identity" | ...
     elapsed_ms: int = 0
