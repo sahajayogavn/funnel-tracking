@@ -117,3 +117,16 @@ def test_seekers_table_icons_before_name_single_line():
     assert ".seeker-name-cell" in css_content
     assert "white-space: nowrap" in css_content
 
+
+def test_seeker_detail_hides_unresolved_refetch_rows_when_timeline_exists():
+    queries_file = ROOT_DIR / "web" / "src" / "lib" / "queries.ts"
+    content = queries_file.read_text(encoding="utf-8")
+
+    # A partial re-fetch must not replace timestamped conversation rows in
+    # reader-facing Recent Messages. Legacy threads with no resolved time keep
+    # their existing history via the fallback in this helper.
+    assert "function displayableMessageHistory" in content
+    assert "parseRealDate(message.messageAt) > 0" in content
+    assert "return timestamped.length > 0 ? timestamped : messages" in content
+    assert "messages = displayableMessageHistory(messages);" in content
+

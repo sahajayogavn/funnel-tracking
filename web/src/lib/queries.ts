@@ -108,6 +108,15 @@ function getCrawledReactionEvents(db: ReturnType<typeof getDb>, threadId: string
   `).all(threadId) as CrawledReactionEvent[];
 }
 
+/**
+ * Prefer a resolved Messenger timeline over an incomplete re-fetch snapshot.
+ * A legacy thread with no resolved event time remains readable as-is.
+ */
+function displayableMessageHistory(messages: MessageRow[]): MessageRow[] {
+  const timestamped = messages.filter(message => parseRealDate(message.messageAt) > 0);
+  return timestamped.length > 0 ? timestamped : messages;
+}
+
 export type ActionQueueItem = {
   id: number; queueType: string; targetType: string; targetId: string | null;
   targetName: string | null; actionText: string | null; reactionType: string | null;
@@ -634,6 +643,7 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
     sender: normalizeMessageSender(r.content, r.sender)
   }));
   messages = attachCrawledReactions(db, uRow.threadId || '', messages);
+  messages = displayableMessageHistory(messages);
   const reactionEvents = getCrawledReactionEvents(db, uRow.threadId || '');
 
   // Check for ad source
