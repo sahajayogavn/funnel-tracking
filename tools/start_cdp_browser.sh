@@ -50,7 +50,10 @@ cmd_start() {
       extra_args+=(--window-position="$WINDOW_POSITION" --window-size="$WINDOW_SIZE")
       ;;
     headless)
-      extra_args+=(--headless=new --window-size="$WINDOW_SIZE")
+      # Some macOS GPU drivers repeatedly crash in Edge's headless compositor,
+      # leaving CDP unavailable even though the parent process was launched.
+      # Inbox scraping uses DOM/CDP only, so software compositing is sufficient.
+      extra_args+=(--headless=new --disable-gpu --window-size="$WINDOW_SIZE")
       ;;
     *)
       echo "Unknown display mode: $DISPLAY_MODE (expected head|headless)" >&2

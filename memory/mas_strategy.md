@@ -18,7 +18,7 @@ Các khoảng trống implementation và kế hoạch nghiệm thu nằm trong
 
 - **Reactive:** chỉ soạn draft khi có nhu cầu chưa được đáp ứng và còn ý nghĩa để trả lời.
 - **Proactive:** chỉ tạo digest/candidate lên Telegram hoặc `/queues`; sau khi quản trị viên **Mở phiên** mới sinh draft cho seeker.
-- **Gửi DM:** yogi kiểm tra và tự gửi trên Facebook. Mở phiên, duyệt draft hoặc LIKE Telegram không cấp quyền tự gửi DM.
+- **Gửi DM (operator cập nhật 19/09/2026):** duyệt action trên WebUI đủ để executor xử lý, không cần Telegram. Mặc định executor điền draft và yogi nhấn Enter; `--auto-send` cho phép gửi sau xác minh người nhận và context. Context mới → Out-date + fetch lại. Mở phiên/digest không phải approval của draft. Quyết định này thay thế các mô tả chỉ-gửi-tay bên dưới; xem amendment trong care execution contract.
 - **Không trả lời** là kết quả hợp lệ. Không bịa câu đáp cho banner, lời kết đã đóng hoặc yêu cầu hết hạn.
 - **Được xác nhận đã nhận đăng ký** khi thông tin đăng ký từ tin khách thật đã được lưu vào hồ sơ `/seekers`. Không cần yogi duyệt việc tiếp nhận này.
 - Tiếp nhận thông tin không chứng minh đã xếp lớp, giữ chỗ hoặc tham dự. SĐT xuất hiện trong tin Page hay quảng cáo không phải bằng chứng khách đăng ký.

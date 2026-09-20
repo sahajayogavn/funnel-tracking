@@ -1,7 +1,6 @@
 // code:web-api-005:graph-details
 import { NextResponse } from 'next/server';
-import type Database from 'better-sqlite3';
-import { getDb } from '@/lib/db';
+import { query, queryOne } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,10 +15,12 @@ const KNOWN_AD_TITLES: Record<string, string> = {
   '6880610198214': '🌿 Chương trình Thiền & Âm nhạc MIỄN PHÍ tại Đà Nẵng, Hội An và Huế – Tháng 4/2026 🎶',
 };
 
-function tableExists(db: Database.Database, tableName: string): boolean {
+const tableCache = new Map<string, boolean>();
+async function tableExists(tableName: string): Promise<boolean> {
+  if (tableCache.has(tableName)) return tableCache.get(tableName)!;
   try {
-    const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(tableName);
-    return !!row;
+    const row = await queryOne('SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?', [tableName]);
+    const exists = !!row; tableCache.set(tableName, exists); return exists;
   } catch {
     return false;
   }
@@ -61,8 +62,6 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Missing id or type parameters' }, { status: 400 });
     }
 
-    const db = getDb();
-
     if (type === 'user') {
       interface UserInfoRow {
         thread_name: string;
@@ -78,8 +77,8 @@ export async function GET(request: Request) {
 
       let userInfo: UserInfoRow | undefined = undefined;
 
-      if (tableExists(db, 'users') && tableExists(db, 'threads')) {
-        userInfo = db.prepare(`
+      if (await tableExists('users') && await tableExists('threads')) {
+        userInfo = await queryOne<UserInfoRow>(`
           SELECT u.thread_name, u.phone, u.email, u.fb_url, u.city, u.lead_stage, 
                  u.first_seen, u.last_interaction, t.id as thread_id
           FROM users u
@@ -87,22 +86,22 @@ export async function GET(request: Request) {
           WHERE u.thread_name = ?
           ORDER BY u.last_interaction DESC
           LIMIT 1
-        `).get(id) as UserInfoRow | undefined;
+        `, [id]);
 
         if (!userInfo && /^\d+$/.test(id)) {
-          userInfo = db.prepare(`
+          userInfo = await queryOne<UserInfoRow>(`
             SELECT u.thread_name, u.phone, u.email, u.fb_url, u.city, u.lead_stage, 
                    u.first_seen, u.last_interaction, t.id as thread_id
             FROM users u
             JOIN threads t ON u.thread_id = t.id
             WHERE u.id = ?
             LIMIT 1
-          `).get(parseInt(id, 10)) as UserInfoRow | undefined;
+          `, [parseInt(id, 10)]);
         }
       }
 
       // Fallback: check comment_users if not found in DM users
-      if (!userInfo && tableExists(db, 'comment_users')) {
+      if (!userInfo && await tableExists('comment_users')) {
         interface CommentUserRow {
           commenter_name: string;
           fb_profile_url: string | null;
@@ -111,12 +110,15 @@ export async function GET(request: Request) {
           first_seen: string | null;
           last_seen: string | null;
         }
-        const cu = db.prepare(`
-          SELECT commenter_name, fb_profile_url, phone, city, first_seen, last_seen
+        const cu = await queryOne<CommentUserRow>(`
+          -- PostgreSQL preserves the canonical comment_users field name
+          -- (last_interaction); SQLite's old UI fallback called it last_seen.
+          SELECT commenter_name, fb_profile_url, phone, city, first_seen,
+                 last_interaction AS last_seen
           FROM comment_users
           WHERE commenter_name = ?
           LIMIT 1
-        `).get(id) as CommentUserRow | undefined;
+        `, [id]);
 
         if (cu) {
           userInfo = {
@@ -144,14 +146,14 @@ export async function GET(request: Request) {
       userInfo.fb_url = fullFbUrl;
 
       let messages: { sender: string; content: string; message_timestamp: string; message_at: string | null }[] = [];
-      if (userInfo.thread_id && tableExists(db, 'messages')) {
-        messages = db.prepare(`
+      if (userInfo.thread_id && await tableExists('messages')) {
+        messages = await query(`
           SELECT sender, content, message_timestamp, message_at
           FROM messages 
           WHERE thread_id = ? AND kind = 'message'
           ORDER BY COALESCE(message_at, timestamp) ASC, seq ASC
           LIMIT 50
-        `).all(userInfo.thread_id) as { sender: string; content: string; message_timestamp: string; message_at: string | null }[];
+        `, [userInfo.thread_id]) as { sender: string; content: string; message_timestamp: string; message_at: string | null }[];
       }
 
       return NextResponse.json({
@@ -170,12 +172,12 @@ export async function GET(request: Request) {
       }
 
       let adRow: AdRow | undefined = undefined;
-      if (tableExists(db, 'ad_posts')) {
-        adRow = db.prepare(`
+      if (await tableExists('ad_posts')) {
+        adRow = await queryOne<AdRow>(`
           SELECT ad_id, post_id, ad_content, city, resolved_at 
           FROM ad_posts 
           WHERE ad_id = ?
-        `).get(id) as AdRow | undefined;
+        `, [id]);
       }
 
       const cleanTitle = cleanAdSnippet(id, adRow?.ad_content || null);
@@ -185,29 +187,29 @@ export async function GET(request: Request) {
 
       // Check linked organic post if post_id exists and posts table is available
       const linkedPostId = adRow?.post_id;
-      if (linkedPostId && tableExists(db, 'posts')) {
-        postInfo = db.prepare(`
+      if (linkedPostId && await tableExists('posts')) {
+        postInfo = await queryOne<NonNullable<typeof postInfo>>(`
           SELECT post_name, post_url, created_at, last_synced_time
           FROM posts
           WHERE id = ?
-        `).get(linkedPostId) as typeof postInfo;
+        `, [linkedPostId]) ?? null;
       }
 
       // Check comments from linked post if available
-      if (linkedPostId && tableExists(db, 'comments')) {
-        comments = db.prepare(`
+      if (linkedPostId && await tableExists('comments')) {
+        comments = await query(`
           SELECT commenter_name, comment_text, comment_timestamp, is_reply
           FROM comments
           WHERE post_id = ? AND commenter_name != ?
           ORDER BY comment_timestamp ASC
           LIMIT 50
-        `).all(linkedPostId, PAGE_NAME) as typeof comments;
+        `, [linkedPostId, PAGE_NAME]) as typeof comments;
 
-        const statsRow = db.prepare(`
+        const statsRow = await queryOne<{ total: number; unique_users: number }>(`
           SELECT COUNT(id) as total, COUNT(DISTINCT commenter_name) as unique_users
           FROM comments
           WHERE post_id = ? AND commenter_name != ?
-        `).get(linkedPostId, PAGE_NAME) as { total: number; unique_users: number } | undefined;
+        `, [linkedPostId, PAGE_NAME]);
 
         if (statsRow) {
           commentStats = statsRow;
@@ -215,8 +217,8 @@ export async function GET(request: Request) {
       }
 
       // If no post comments found, retrieve seekers associated with this ad via user_ad_ids
-      if (comments.length === 0 && tableExists(db, 'user_ad_ids') && tableExists(db, 'users') && tableExists(db, 'threads')) {
-        const adSeekersStats = db.prepare(`
+      if (comments.length === 0 && await tableExists('user_ad_ids') && await tableExists('users') && await tableExists('threads')) {
+        const adSeekersStats = await queryOne<{ seeker_count: number; thread_count: number }>(`
           SELECT 
             COUNT(DISTINCT u.thread_name) as seeker_count,
             COUNT(DISTINCT uai.thread_id) as thread_count
@@ -224,7 +226,7 @@ export async function GET(request: Request) {
           JOIN threads t ON uai.thread_id = t.id
           JOIN users u ON u.thread_id = t.id
           WHERE uai.ad_id = ? AND u.thread_name IS NOT NULL AND u.thread_name != ?
-        `).get(id, PAGE_NAME) as { seeker_count: number; thread_count: number } | undefined;
+        `, [id, PAGE_NAME]);
 
         if (adSeekersStats) {
           commentStats = {
@@ -242,7 +244,7 @@ export async function GET(request: Request) {
           thread_id: string;
         }
 
-        const recentSeekers = db.prepare(`
+        const recentSeekers = await query<SeekerInquiryRow>(`
           SELECT u.thread_name, u.city, u.phone, u.lead_stage, u.last_interaction, t.id as thread_id
           FROM user_ad_ids uai
           JOIN threads t ON uai.thread_id = t.id
@@ -250,18 +252,18 @@ export async function GET(request: Request) {
           WHERE uai.ad_id = ? AND u.thread_name IS NOT NULL AND u.thread_name != ?
           ORDER BY u.last_interaction DESC
           LIMIT 10
-        `).all(id, PAGE_NAME) as SeekerInquiryRow[];
+        `, [id, PAGE_NAME]);
 
-        const hasMessages = tableExists(db, 'messages');
-        comments = recentSeekers.map(s => {
+        const hasMessages = await tableExists('messages');
+        comments = await Promise.all(recentSeekers.map(async s => {
           let msgText = '';
           if (hasMessages && s.thread_id) {
-            const firstMsg = db.prepare(`
+            const firstMsg = await queryOne<{ content: string }>(`
               SELECT content FROM messages 
               WHERE thread_id = ? AND sender != ? AND content IS NOT NULL AND TRIM(content) != ''
               ORDER BY message_timestamp ASC, seq ASC
               LIMIT 1
-            `).get(s.thread_id, PAGE_NAME) as { content: string } | undefined;
+            `, [s.thread_id, PAGE_NAME]);
             if (firstMsg?.content) {
               msgText = firstMsg.content;
             }
@@ -279,7 +281,7 @@ export async function GET(request: Request) {
             comment_timestamp: s.last_interaction || '',
             is_reply: 0,
           };
-        });
+        }));
       }
 
       return NextResponse.json({
@@ -303,12 +305,12 @@ export async function GET(request: Request) {
         last_synced_time: string | null;
       }
       let postInfo: PostRow | undefined = undefined;
-      if (tableExists(db, 'posts')) {
-        postInfo = db.prepare(`
+      if (await tableExists('posts')) {
+        postInfo = await queryOne<PostRow>(`
           SELECT post_name, post_url, created_at, last_synced_time
           FROM posts
           WHERE id = ?
-        `).get(id) as PostRow | undefined;
+        `, [id]);
       }
 
       interface CommentRow {
@@ -320,20 +322,20 @@ export async function GET(request: Request) {
       let comments: CommentRow[] = [];
       let commentStats: { total: number; unique_users: number } = { total: 0, unique_users: 0 };
 
-      if (tableExists(db, 'comments')) {
-        comments = db.prepare(`
+      if (await tableExists('comments')) {
+        comments = await query<CommentRow>(`
           SELECT commenter_name, comment_text, comment_timestamp, is_reply
           FROM comments
           WHERE post_id = ? AND commenter_name != ?
           ORDER BY comment_timestamp ASC
           LIMIT 50
-        `).all(id, PAGE_NAME) as CommentRow[];
+        `, [id, PAGE_NAME]);
 
-        const statsRow = db.prepare(`
+        const statsRow = await queryOne<{ total: number; unique_users: number }>(`
           SELECT COUNT(id) as total, COUNT(DISTINCT commenter_name) as unique_users
           FROM comments
           WHERE post_id = ? AND commenter_name != ?
-        `).get(id, PAGE_NAME) as { total: number; unique_users: number } | undefined;
+        `, [id, PAGE_NAME]);
 
         if (statsRow) {
           commentStats = statsRow;

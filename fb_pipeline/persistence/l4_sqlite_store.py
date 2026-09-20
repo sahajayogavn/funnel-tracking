@@ -3,6 +3,8 @@ import os
 import sqlite3
 from datetime import datetime
 
+from fb_pipeline.persistence.db import connect as connect_database
+
 
 CACHE_TTL_SECONDS = 3600
 
@@ -55,7 +57,7 @@ def _widen_action_queue_check(cursor: sqlite3.Cursor, logger=None):
     if not _table_exists(cursor, "action_queue"):
         return
     row = cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='action_queue'").fetchone()
-    if not row or "session_proposal" in (row[0] or ""):
+    if not row or ("session_proposal" in (row[0] or "") and "'deleted'" in (row[0] or "")):
         return
     cursor.execute("DROP INDEX IF EXISTS idx_action_queue_fifo")
     cursor.execute("DROP INDEX IF EXISTS idx_action_queue_one_active_per_target")
@@ -80,7 +82,7 @@ def _widen_action_queue_check(cursor: sqlite3.Cursor, logger=None):
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             CHECK (queue_type IN ('reply_message', 'reply_comment', 'proactive_comment', 'proactive_message', 'session_proposal', 'attendance_check')),
-            CHECK (status IN ('pending', 'approved', 'executing', 'executed', 'rejected', 'failed'))
+            CHECK (status IN ('pending', 'approved', 'executing', 'executed', 'rejected', 'failed', 'deleted'))
         )
     ''')
     cursor.execute('''
@@ -615,7 +617,7 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             CHECK (queue_type IN ('reply_message', 'reply_comment', 'proactive_comment', 'proactive_message', 'session_proposal', 'attendance_check')),
-            CHECK (status IN ('pending', 'approved', 'executing', 'executed', 'rejected', 'failed'))
+            CHECK (status IN ('pending', 'approved', 'executing', 'executed', 'rejected', 'failed', 'deleted'))
         )
     ''')
     # A scheduler admission is durable work, even when the subsequent LLM call
@@ -629,6 +631,23 @@ def setup_database(conn: sqlite3.Connection, logger=None):
             processed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
+    ''')
+    # Meta's source id, rather than outgoing text, is the durable link from a
+    # delivered Facebook message to the MAS proposal that produced it.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mas_message_provenance (
+            message_source_id TEXT PRIMARY KEY,
+            page_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            action_queue_id INTEGER NOT NULL UNIQUE,
+            send_mode TEXT NOT NULL CHECK (send_mode IN ('auto_send', 'human_enter')),
+            confirmed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(action_queue_id) REFERENCES action_queue(id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_mas_message_provenance_thread
+        ON mas_message_provenance(thread_id, message_source_id)
     ''')
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_inbox_mas_processed_message_seq
@@ -646,7 +665,7 @@ def setup_database(conn: sqlite3.Connection, logger=None):
     cursor.execute('''
         CREATE UNIQUE INDEX IF NOT EXISTS idx_action_queue_one_active_per_target
         ON action_queue(target_id, queue_type, COALESCE(json_extract(payload_json, '$.dedupe_key'), json_extract(payload_json, '$.type'), ''))
-        WHERE status NOT IN ('executed', 'rejected', 'failed')
+        WHERE status NOT IN ('executed', 'rejected', 'failed', 'deleted')
     ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS telegram_offset (
@@ -798,7 +817,7 @@ def setup_comment_database(conn: sqlite3.Connection):
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             CHECK (queue_type IN ('reply_message', 'reply_comment', 'proactive_comment', 'proactive_message', 'session_proposal', 'attendance_check')),
-            CHECK (status IN ('pending', 'approved', 'executing', 'executed', 'rejected', 'failed'))
+            CHECK (status IN ('pending', 'approved', 'executing', 'executed', 'rejected', 'failed', 'deleted'))
         )
     ''')
     _widen_action_queue_check(cursor)
@@ -810,7 +829,7 @@ def setup_comment_database(conn: sqlite3.Connection):
     cursor.execute('''
         CREATE UNIQUE INDEX IF NOT EXISTS idx_action_queue_one_active_per_target
         ON action_queue(target_id, queue_type, COALESCE(json_extract(payload_json, '$.dedupe_key'), json_extract(payload_json, '$.type'), ''))
-        WHERE status NOT IN ('executed', 'rejected', 'failed')
+        WHERE status NOT IN ('executed', 'rejected', 'failed', 'deleted')
     ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS telegram_offset (
@@ -845,31 +864,13 @@ def record_comment_fetch(page_id: str, posts_found: int, comments_found: int, co
 
 
 def get_db_connection(memory_dir: str = None, logger=None) -> sqlite3.Connection:
-    if memory_dir is None:
-        memory_dir = os.path.join("memory", "agent_memory")
-    os.makedirs(memory_dir, exist_ok=True)
-    db_path = os.path.join(memory_dir, "frankensqlite.db")
-    conn = sqlite3.connect(db_path)
-    conn.execute('PRAGMA journal_mode=WAL;')
-    # code:inbox-parallel-fetch-001:db-busy-timeout
-    conn.execute('PRAGMA busy_timeout=30000;')
-    conn.row_factory = sqlite3.Row
-    setup_database(conn, logger=logger)
-    return conn
+    """Open the configured backend; SQLite remains the default until cutover."""
+    return connect_database(memory_dir, logger, sqlite_connect=sqlite3.connect)
 
 
 def get_comment_db_connection(memory_dir: str = None) -> sqlite3.Connection:
-    if memory_dir is None:
-        memory_dir = os.path.join("memory", "agent_memory")
-    os.makedirs(memory_dir, exist_ok=True)
-    db_path = os.path.join(memory_dir, "frankensqlite.db")
-    conn = sqlite3.connect(db_path)
-    conn.execute('PRAGMA journal_mode=WAL;')
-    # code:inbox-parallel-fetch-001:db-busy-timeout
-    conn.execute('PRAGMA busy_timeout=30000;')
-    conn.row_factory = sqlite3.Row
-    setup_comment_database(conn)
-    return conn
+    """Open the configured backend and ensure the legacy comment schema on SQLite."""
+    return connect_database(memory_dir, comment_schema=True, sqlite_connect=sqlite3.connect)
 
 
 # code:inbox-parallel-fetch-001:psid-hint
@@ -917,11 +918,12 @@ def log_mas_decision(
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True) if payload is not None else None
         cursor = conn.execute(
             "INSERT INTO mas_decisions (page_id, route, subject_type, subject_id, decision, reason, dry_run, payload_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             (page_id, route, subject_type, subject_id, decision, reason, dry_run, payload_json),
         )
+        decision_id = cursor.fetchone()[0]
         conn.commit()
-        return {"status": "logged", "decision_id": cursor.lastrowid}
+        return {"status": "logged", "decision_id": decision_id}
     finally:
         if owns_connection and conn is not None:
             conn.close()
@@ -994,14 +996,15 @@ def record_seeker_field_change(
         cursor = conn.execute(
             "INSERT INTO seeker_field_changes "
             "(thread_id, field, old_value, new_value, evidence_seq, reason, source, confidence, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             (thread_id, field, old_value, new_value, evidence_seq, reason, source, confidence,
              "applied" if applied else ("blocked_human_owned" if blocked_by_human else "proposed")),
         )
+        change_id = cursor.fetchone()[0]
         conn.commit()
         return {
             "status": "applied" if applied else ("blocked_human_owned" if blocked_by_human else "proposed"),
-            "change_id": cursor.lastrowid,
+            "change_id": change_id,
             "field": field,
             "old_value": old_value,
             "new_value": new_value,

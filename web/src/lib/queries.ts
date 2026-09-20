@@ -1,8 +1,9 @@
 // code:web-db-002:data-queries
 // Server-side query functions that read from FrankenSQLite
-import { getDb } from './db';
+import { query, queryOne } from './db';
 import type { CrawledReactionEvent, Seeker, SeekerDetail, Post, CommentRow, MessageRow, ThreadRow, TouchPoint } from './types';
 import { parseRealDate } from './funnel-filters';
+import { normalizeJourneyStage } from './journey-engine';
 
 // ── FB URL normalization ──
 // All FB URLs like facebook.com/SahajaVietnam?__cft__[0]=... are the same page.
@@ -24,51 +25,43 @@ function normalizeFbUrl(url: string | null): string | null {
 
 const PAGE_NAME = 'Thiền Sahaja Yoga Việt Nam';
 
-function tableExists(tableName: string): boolean {
-  const db = getDb();
-  const result = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(tableName);
-  return !!result;
+async function tableExists(tableName: string): Promise<boolean> {
+  return Boolean(await queryOne('SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?', [tableName]));
 }
 
-function tableHasColumn(db: ReturnType<typeof getDb>, tableName: string, columnName: string): boolean {
-  if (!tableExists(tableName)) return false;
-  return (db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[])
-    .some(column => column.name === columnName);
+async function tableHasColumn(tableName: string, columnName: string): Promise<boolean> {
+  return Boolean(await queryOne('SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?', [tableName, columnName]));
 }
 
-function messageEvidenceSelect(db: ReturnType<typeof getDb>): string {
-  const select = (column: string, alias: string) => tableHasColumn(db, 'messages', column)
+async function messageEvidenceSelect(): Promise<string> {
+  const select = async (column: string, alias: string) => await tableHasColumn('messages', column)
     ? `m.${column} AS ${alias}`
     : `NULL AS ${alias}`;
-  return [
-    select('source_id', 'sourceId'),
-    select('sender_confidence', 'senderConfidence'),
-    select('time_precision', 'timePrecision'),
-    select('reply_to_message_id', 'replyToMessageId'),
-    select('quoted_sender', 'quotedSender'),
-    select('quoted_text', 'quotedText'),
-  ].join(',\n           ');
+  return (await Promise.all([
+    select('source_id', 'sourceId'), select('sender_confidence', 'senderConfidence'),
+    select('time_precision', 'timePrecision'), select('reply_to_message_id', 'replyToMessageId'),
+    select('quoted_sender', 'quotedSender'), select('quoted_text', 'quotedText'),
+  ])).join(',\n           ');
 }
 
-function attachCrawledReactions(db: ReturnType<typeof getDb>, threadId: string, messages: MessageRow[]): MessageRow[] {
-  if (!messages.length || !tableExists('crawled_message_reactions')) return messages;
-  const reactionColumn = (column: string, alias: string, fallback = 'NULL') =>
-    tableHasColumn(db, 'crawled_message_reactions', column)
+async function attachCrawledReactions(threadId: string, messages: MessageRow[]): Promise<MessageRow[]> {
+  if (!messages.length || !await tableExists('crawled_message_reactions')) return messages;
+  const reactionColumn = async (column: string, alias: string, fallback = 'NULL') =>
+    await tableHasColumn('crawled_message_reactions', column)
       ? `${column} AS ${alias}`
       : `${fallback} AS ${alias}`;
-  const reactions = db.prepare(`
-    SELECT ${reactionColumn('actor', 'actor')},
-           ${reactionColumn('actor_role', 'actorRole')},
-           ${reactionColumn('emoji', 'emoji')},
-           ${reactionColumn('target_type', 'targetType')},
-           ${reactionColumn('target_scope', 'targetScope')},
-           ${reactionColumn('target_message_id', 'targetMessageId')}
-    FROM crawled_message_reactions
-    WHERE thread_id = ?
-  `).all(threadId) as {
+  const columns = await Promise.all([
+    reactionColumn('actor', 'actor'), reactionColumn('actor_role', 'actorRole'), reactionColumn('emoji', 'emoji'),
+    reactionColumn('target_type', 'targetType'), reactionColumn('target_scope', 'targetScope'), reactionColumn('target_message_id', 'targetMessageId'),
+  ]);
+  const reactions = await query<{
     actor: string | null; actorRole: string | null; emoji: string | null;
     targetType: string | null; targetScope: string | null; targetMessageId: string | null;
-  }[];
+  }>(`
+    SELECT ${columns.join(',\n           ')}
+    FROM crawled_message_reactions
+    WHERE thread_id = ?
+  `, [threadId]);
   const byTarget = new Map<string, MessageRow['reactions']>();
   for (const reaction of reactions) {
     // An unbound/thread reaction is real evidence, but must not be displayed
@@ -91,26 +84,49 @@ function attachCrawledReactions(db: ReturnType<typeof getDb>, threadId: string, 
   }));
 }
 
-function getCrawledReactionEvents(db: ReturnType<typeof getDb>, threadId: string): CrawledReactionEvent[] {
-  if (!threadId || !tableExists('crawled_message_reactions')) return [];
-  const select = (column: string, alias: string, fallback = 'NULL') =>
-    tableHasColumn(db, 'crawled_message_reactions', column)
+async function attachMasProvenance(threadId: string, messages: MessageRow[]): Promise<MessageRow[]> {
+  if (!messages.length || !await tableExists('mas_message_provenance')) return messages;
+  const sourceIds = messages.map(message => message.sourceId).filter((id): id is string => Boolean(id));
+  if (!sourceIds.length) return messages;
+  const placeholders = sourceIds.map(() => '?').join(', ');
+  const rows = await query<{ message_source_id: string }>(`
+    SELECT message_source_id FROM mas_message_provenance
+    WHERE thread_id = ? AND message_source_id IN (${placeholders})
+  `, [threadId, ...sourceIds]);
+  const masSourceIds = new Set(rows.map(row => row.message_source_id));
+  return messages.map(message => ({
+    ...message,
+    masProposed: Boolean(message.sourceId && masSourceIds.has(message.sourceId)),
+  }));
+}
+
+async function getCrawledReactionEvents(threadId: string): Promise<CrawledReactionEvent[]> {
+  if (!threadId || !await tableExists('crawled_message_reactions')) return [];
+  const select = async (column: string, alias: string, fallback = 'NULL') =>
+    await tableHasColumn('crawled_message_reactions', column)
       ? `${column} AS ${alias}` : `${fallback} AS ${alias}`;
-  return db.prepare(`
-    SELECT ${select('id', 'id', '0')}, ${select('actor', 'actor')},
-           ${select('actor_role', 'actorRole')}, ${select('emoji', 'emoji')},
-           ${select('target_type', 'targetType')}, ${select('target_scope', 'targetScope')},
-           ${select('target_message_id', 'targetMessageId')}, ${select('observed_at', 'observedAt')},
-           ${select('evidence', 'evidence')}, ${select('parse_confidence', 'parseConfidence')}
+  const columns = await Promise.all([
+    select('id', 'id', '0'), select('actor', 'actor'), select('actor_role', 'actorRole'), select('emoji', 'emoji'),
+    select('target_type', 'targetType'), select('target_scope', 'targetScope'), select('target_message_id', 'targetMessageId'),
+    select('observed_at', 'observedAt'), select('evidence', 'evidence'), select('parse_confidence', 'parseConfidence'),
+  ]);
+  return query<CrawledReactionEvent>(`
+    SELECT ${columns.join(', ')}
     FROM crawled_message_reactions
     WHERE thread_id = ?
     ORDER BY id ASC
-  `).all(threadId) as CrawledReactionEvent[];
+  `, [threadId]);
 }
 
 /**
- * Prefer a resolved Messenger timeline over an incomplete re-fetch snapshot.
- * A legacy thread with no resolved event time remains readable as-is.
+ * A re-fetch can occasionally return a partial Messenger DOM snapshot with no
+ * resolved event time.  Those rows are useful ingestion evidence, but cannot
+ * safely be placed in a chronological conversation and must not displace the
+ * previously captured, timestamped conversation in a reader-facing view.
+ *
+ * Keep a legacy thread readable when it has no resolved timestamps at all;
+ * this deliberately filters only a mixed history, never invents a time or
+ * sender for the partial rows.
  */
 function displayableMessageHistory(messages: MessageRow[]): MessageRow[] {
   const timestamped = messages.filter(message => parseRealDate(message.messageAt) > 0);
@@ -124,24 +140,22 @@ export type ActionQueueItem = {
   status: string; approvalSource: string | null; errorText: string | null; createdAt: string;
 };
 
-export function getActionQueueItems(): ActionQueueItem[] {
-  if (!tableExists('action_queue')) return [];
-  return getDb().prepare(`
+export async function getActionQueueItems(): Promise<ActionQueueItem[]> {
+  if (!await tableExists('action_queue')) return [];
+  return query<ActionQueueItem>(`
     SELECT id, queue_type AS queueType, target_type AS targetType, target_id AS targetId,
            target_name AS targetName, action_text AS actionText, reaction_type AS reactionType,
            payload_json AS payloadJson,
            status, approval_source AS approvalSource, error_text AS errorText, created_at AS createdAt
     FROM action_queue
-    WHERE status NOT IN ('executed', 'rejected')
-    ORDER BY queue_type, id
-  `).all() as ActionQueueItem[];
+    ORDER BY created_at DESC, id DESC
+  `);
 }
 
-export function getSeekerActionQueueItems(targetId?: string | null, targetName?: string | null): ActionQueueItem[] {
-  if (!tableExists('action_queue')) return [];
-  const db = getDb();
+export async function getSeekerActionQueueItems(targetId?: string | null, targetName?: string | null): Promise<ActionQueueItem[]> {
+  if (!await tableExists('action_queue')) return [];
   if (!targetId && !targetName) return [];
-  return db.prepare(`
+  return query<ActionQueueItem>(`
     SELECT id, queue_type AS queueType, target_type AS targetType, target_id AS targetId,
            target_name AS targetName, action_text AS actionText, reaction_type AS reactionType,
            payload_json AS payloadJson,
@@ -149,7 +163,7 @@ export function getSeekerActionQueueItems(targetId?: string | null, targetName?:
     FROM action_queue
     WHERE (target_id = ? OR (target_name IS NOT NULL AND target_name = ?))
     ORDER BY id DESC
-  `).all(targetId || '', targetName || '') as ActionQueueItem[];
+  `, [targetId || '', targetName || '']);
 }
 
 // ── Display the persisted sender evidence verbatim ──
@@ -162,22 +176,15 @@ function normalizeMessageSender(_content: string | null, originalSender: string 
 
 // ── Seekers (unified from users + comment_users) ──
 
-export function getAllSeekers(): Seeker[] {
-  const db = getDb();
-  const hasRealName = (db.prepare("PRAGMA table_info(users)").all() as { name: string }[])
-    .some((column: { name: string }) => column.name === 'real_name');
+export async function getAllSeekers(): Promise<Seeker[]> {
+  const hasRealName = await tableHasColumn('users', 'real_name');
   const realNameSelect = hasRealName ? 'MAX(u.real_name) AS realName' : 'NULL AS realName';
-  const hasProgramCode = (db.prepare("PRAGMA table_info(users)").all() as { name: string }[])
-    .some((column: { name: string }) => column.name === 'program_code');
+  const hasProgramCode = await tableHasColumn('users', 'program_code');
   const programCodeSelect = hasProgramCode ? 'MAX(u.program_code) AS programCode' : 'NULL AS programCode';
   // Existing installations gain this column on their next inbox sync. Keep
   // the dashboard readable during that one-time migration.
-  const hasInboxSortIndex = (db.prepare("PRAGMA table_info(threads)")
-    .all() as { name: string }[])
-    .some((column: { name: string }) => column.name === 'inbox_sort_index');
-  const hasLastMessageAt = (db.prepare("PRAGMA table_info(threads)")
-    .all() as { name: string }[])
-    .some((column: { name: string }) => column.name === 'last_message_at');
+  const hasInboxSortIndex = await tableHasColumn('threads', 'inbox_sort_index');
+  const hasLastMessageAt = await tableHasColumn('threads', 'last_message_at');
   const inboxSortIndexSelect = hasInboxSortIndex
     ? 't.inbox_sort_index AS inboxSortIndex'
     : 'NULL AS inboxSortIndex';
@@ -185,8 +192,7 @@ export function getAllSeekers(): Seeker[] {
     ? 't.last_message_at AS lastMessageAt'
     : 'NULL AS lastMessageAt';
 
-  const hasClassificationVerifiedAt = (db.prepare("PRAGMA table_info(users)").all() as { name: string }[])
-    .some((column: { name: string }) => column.name === 'classification_verified_at');
+  const hasClassificationVerifiedAt = await tableHasColumn('users', 'classification_verified_at');
   
   const classificationStatusSelect = hasClassificationVerifiedAt
     ? `CASE
@@ -212,7 +218,7 @@ export function getAllSeekers(): Seeker[] {
 
   // DM users — use threads as base table and LEFT JOIN to users for contact info
   // This ensures ALL thread interactions are counted, not just those with extracted user info
-  const dmUsers = db.prepare(`
+  const dmUsers = await query<Seeker & { lastMessageTimestampText?: string | null }>(`
     SELECT
       MIN(u.id) AS id, t.id AS threadId, t.thread_name AS name,
       ${realNameSelect},
@@ -237,7 +243,7 @@ export function getAllSeekers(): Seeker[] {
         ORDER BY aq.id DESC LIMIT 1
       ) AS pendingMessage,
       (
-        SELECT json_extract(aq.payload_json, '$.type') FROM action_queue aq
+        SELECT aq.payload_json::jsonb ->> 'type' FROM action_queue aq
         WHERE aq.target_id = t.id
           AND aq.queue_type IN ('reply_message', 'proactive_message')
           AND aq.status IN ('pending', 'approved')
@@ -245,7 +251,10 @@ export function getAllSeekers(): Seeker[] {
       ) AS pendingMessageKind,
       COALESCE(MAX(u.lead_stage), 'Intake') AS leadStage,
       MIN(COALESCE(u.first_seen, t.created_at)) AS firstSeen,
-      MAX(COALESCE(u.last_interaction, t.last_synced_time)) AS lastInteraction,
+      -- SQLite kept threads.last_synced_time as TEXT, whereas the canonical
+      -- PostgreSQL user field is a timestamp.  This is a display value, so
+      -- normalize to text rather than forcing a cast of any legacy string.
+      MAX(COALESCE(u.last_interaction::text, t.last_synced_time)) AS lastInteraction,
       (
         SELECT message_timestamp FROM messages m
         WHERE m.thread_id = t.id
@@ -270,12 +279,12 @@ export function getAllSeekers(): Seeker[] {
     LEFT JOIN ad_posts ap ON ap.ad_id = uai.ad_id
     WHERE t.thread_name IS NOT NULL
     GROUP BY t.id
-  `).all() as (Seeker & { lastMessageTimestampText?: string | null })[];
+  `);
 
   // Comment users (exclude page's own comments — currently all are page)
   let commentUsers: Seeker[] = [];
-  if (tableExists('comment_users') && tableExists('comments')) {
-    commentUsers = db.prepare(`
+  if (await tableExists('comment_users') && await tableExists('comments')) {
+    commentUsers = await query<Seeker & { lastMessageTimestampText?: string | null }>(`
       SELECT
         cu.id, cu.commenter_name AS name, NULL AS realName, cu.fb_profile_url AS fbProfileUrl,
         NULL AS inboxSortIndex,
@@ -292,7 +301,7 @@ export function getAllSeekers(): Seeker[] {
       LEFT JOIN comments c ON c.commenter_name = cu.commenter_name
       WHERE cu.commenter_name != ?
       GROUP BY cu.id
-    `).all(PAGE_NAME) as (Seeker & { lastMessageTimestampText?: string | null })[];
+    `, [PAGE_NAME]);
   }
 
   // Normalize FB URLs and compute dynamic journey stage
@@ -408,28 +417,27 @@ export function getAllSeekers(): Seeker[] {
 
 // ── Activity Histogram (interactions per day, last 365 days) ──
 
-export function getSeekerActivity(seekerName: string): { date: string; count: number }[] {
-  const db = getDb();
+export async function getSeekerActivity(seekerName: string): Promise<{ date: string; count: number }[]> {
 
   // Messages by this user
-  const msgActivity = db.prepare(`
+  const msgActivity = await query<{ date: string; count: number }>(`
     SELECT DATE(m.timestamp) AS date, COUNT(*) AS count
     FROM messages m
     JOIN threads t ON m.thread_id = t.id
     JOIN users u ON u.thread_id = t.id
     WHERE u.thread_name = ?
     GROUP BY DATE(m.timestamp)
-  `).all(seekerName) as { date: string; count: number }[];
+  `, [seekerName]);
 
   // Comments by this user
   let cmtActivity: { date: string; count: number }[] = [];
-  if (tableExists('comments')) {
-    cmtActivity = db.prepare(`
+  if (await tableExists('comments')) {
+    cmtActivity = await query<{ date: string; count: number }>(`
       SELECT DATE(c.timestamp) AS date, COUNT(*) AS count
       FROM comments c
       WHERE c.commenter_name = ?
       GROUP BY DATE(c.timestamp)
-    `).all(seekerName) as { date: string; count: number }[];
+    `, [seekerName]);
   }
 
   // Merge
@@ -444,39 +452,35 @@ export function getSeekerActivity(seekerName: string): { date: string; count: nu
 
 // ── Posts ──
 
-export function getAllPosts(): Post[] {
-  if (!tableExists('posts')) return [];
-  const db = getDb();
-  return db.prepare('SELECT * FROM posts ORDER BY last_synced_time DESC').all() as Post[];
+export async function getAllPosts(): Promise<Post[]> {
+  if (!await tableExists('posts')) return [];
+  return query<Post>('SELECT * FROM posts ORDER BY last_synced_time DESC');
 }
 
 // ── Comments per post ──
 
-export function getCommentsByPost(postId: string): CommentRow[] {
-  if (!tableExists('comments')) return [];
-  const db = getDb();
-  return db.prepare('SELECT * FROM comments WHERE post_id = ? ORDER BY comment_date DESC').all(postId) as CommentRow[];
+export async function getCommentsByPost(postId: string): Promise<CommentRow[]> {
+  if (!await tableExists('comments')) return [];
+  return query<CommentRow>('SELECT * FROM comments WHERE post_id = ? ORDER BY comment_date DESC', [postId]);
 }
 
 // ── Threads & Messages ──
 
-export function getAllThreads(): ThreadRow[] {
-  const db = getDb();
-  return db.prepare('SELECT * FROM threads ORDER BY last_synced_time DESC').all() as ThreadRow[];
+export async function getAllThreads(): Promise<ThreadRow[]> {
+  return query<ThreadRow>('SELECT * FROM threads ORDER BY last_synced_time DESC');
 }
 
-export function getMessagesByThread(threadId: string): MessageRow[] {
-  const db = getDb();
-  const evidence = messageEvidenceSelect(db);
-  const rows = db.prepare(`
+export async function getMessagesByThread(threadId: string): Promise<MessageRow[]> {
+  const evidence = await messageEvidenceSelect();
+  const rows = await query<MessageRow>(`
     SELECT id, thread_id AS threadId, sender, content,
            message_timestamp AS messageTimestamp, message_at AS messageAt,
            ${evidence},
            seq, timestamp
     FROM messages m WHERE thread_id = ? ORDER BY seq ASC, id ASC
-  `).all(threadId) as MessageRow[];
+  `, [threadId]);
 
-  return attachCrawledReactions(db, threadId, rows.map(r => ({
+  return attachCrawledReactions(threadId, rows.map(r => ({
     ...r,
     sender: normalizeMessageSender(r.content, r.sender)
   })));
@@ -484,13 +488,12 @@ export function getMessagesByThread(threadId: string): MessageRow[] {
 
 // ── Touch Points for a seeker ──
 
-export function getSeekerTouchPoints(seekerName: string): TouchPoint[] {
-  const db = getDb();
+export async function getSeekerTouchPoints(seekerName: string): Promise<TouchPoint[]> {
 
-  const msgTouchPoints = db.prepare(`
+  const msgTouchPoints = await query<{ detail: string; date: string; source: string; sender: string }>(`
     SELECT
       m.content AS detail,
-      COALESCE(m.message_timestamp, m.timestamp) AS date,
+      COALESCE(m.message_timestamp, m.timestamp::text) AS date,
       t.thread_name AS source,
       m.sender AS sender
     FROM messages m
@@ -498,7 +501,7 @@ export function getSeekerTouchPoints(seekerName: string): TouchPoint[] {
     JOIN users u ON u.thread_id = t.id
     WHERE u.thread_name = ?
     ORDER BY m.timestamp ASC
-  `).all(seekerName) as { detail: string; date: string; source: string; sender: string }[];
+  `, [seekerName]);
 
   // Process messages: detect ad source, tag type accordingly
   const processed: TouchPoint[] = [];
@@ -523,18 +526,18 @@ export function getSeekerTouchPoints(seekerName: string): TouchPoint[] {
   }
 
   let cmtTouchPoints: TouchPoint[] = [];
-  if (tableExists('comments') && tableExists('posts')) {
-    cmtTouchPoints = db.prepare(`
+  if (await tableExists('comments') && await tableExists('posts')) {
+    cmtTouchPoints = await query<TouchPoint>(`
       SELECT
         CASE WHEN c.is_reply = 1 THEN 'reply' ELSE 'comment' END AS type,
         c.comment_text AS detail,
-        COALESCE(c.comment_date, c.timestamp) AS date,
+        COALESCE(c.comment_date, c.timestamp::text) AS date,
         p.post_name AS source
       FROM comments c
       JOIN posts p ON c.post_id = p.id
       WHERE c.commenter_name = ?
       ORDER BY c.timestamp ASC
-    `).all(seekerName) as TouchPoint[];
+    `, [seekerName]);
   }
 
   return [...processed, ...cmtTouchPoints].sort(
@@ -545,36 +548,35 @@ export function getSeekerTouchPoints(seekerName: string): TouchPoint[] {
 // ── Full Seeker Detail (for /seekers/[id] page) ──
 // code:web-db-002:seeker-detail
 
-export function getSeekerById(seekerId: string): SeekerDetail | null {
-  const db = getDb();
+export async function getSeekerById(seekerId: string): Promise<SeekerDetail | null> {
 
   // comment-{id} prefix → comment_users table
   const isComment = seekerId.startsWith('comment-');
 
   if (isComment) {
-    if (!tableExists('comment_users')) return null;
+    if (!await tableExists('comment_users')) return null;
     const commentUserId = seekerId.replace('comment-', '');
-    const cuRow = db.prepare(`
+    const cuRow = await queryOne<Seeker>(`
       SELECT cu.id, cu.commenter_name AS name, cu.fb_profile_url AS fbProfileUrl,
              cu.fb_user_id AS fbUserId, cu.phone, cu.email, cu.city,
              cu.lead_stage AS leadStage, cu.first_seen AS firstSeen,
              cu.last_interaction AS lastInteraction, 'comment' AS source
       FROM comment_users cu WHERE cu.id = ?
-    `).get(commentUserId) as Seeker | undefined;
+    `, [commentUserId]);
     if (!cuRow) return null;
 
     cuRow.fbProfileUrl = normalizeFbUrl(cuRow.fbProfileUrl);
     cuRow.leadStage = (cuRow.phone && cuRow.phone.trim() !== '') ? 'Seeker' : 'User';
 
     let comments: (CommentRow & { postName?: string; postUrl?: string })[] = [];
-    if (tableExists('comments') && tableExists('posts')) {
-      comments = db.prepare(`
+    if (await tableExists('comments') && await tableExists('posts')) {
+      comments = await query<CommentRow & { postName?: string; postUrl?: string }>(`
         SELECT c.*, p.post_name AS postName, p.post_url AS postUrl
         FROM comments c
         JOIN posts p ON c.post_id = p.id
         WHERE c.commenter_name = ?
         ORDER BY c.timestamp ASC
-      `).all(cuRow.name) as (CommentRow & { postName?: string; postUrl?: string })[];
+      `, [cuRow.name]);
     }
 
     const lastCmt = comments.length > 0 ? comments[comments.length - 1] : null;
@@ -594,7 +596,7 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
   }
 
   // DM seeker — lookup by numeric users.id, thread_id, or thread_name
-  let uRow = db.prepare(`
+  let uRow = await queryOne<Seeker>(`
     SELECT u.id, u.thread_id AS threadId, u.thread_name AS name, u.fb_url AS fbProfileUrl,
            NULL AS fbUserId, u.phone, u.email, u.city,
            u.lead_stage AS leadStage, u.first_seen AS firstSeen,
@@ -602,10 +604,10 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
     FROM users u
     WHERE (u.id = ? OR u.thread_id = ? OR u.thread_name = ?)
     ORDER BY u.id DESC LIMIT 1
-  `).get(seekerId, seekerId, seekerId) as Seeker | undefined;
+  `, [seekerId, seekerId, seekerId]);
 
-  if (!uRow && tableExists('threads')) {
-    const tRow = db.prepare(`
+  if (!uRow && await tableExists('threads')) {
+    const tRow = await queryOne<Seeker>(`
       SELECT NULL AS id, t.id AS threadId, t.thread_name AS name, NULL AS fbProfileUrl,
              NULL AS fbUserId, NULL AS phone, NULL AS email, 'Unknown' AS city,
              'Intake' AS leadStage, t.created_at AS firstSeen,
@@ -613,7 +615,7 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
       FROM threads t
       WHERE t.id = ? OR t.thread_name = ?
       ORDER BY t.id DESC LIMIT 1
-    `).get(seekerId, seekerId) as Seeker | undefined;
+    `, [seekerId, seekerId]);
     if (tRow) uRow = tRow;
   }
 
@@ -623,8 +625,8 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
   uRow.leadStage = (uRow.phone && uRow.phone.trim() !== '') ? 'Seeker' : 'User';
 
   // Use thread_id for message lookups
-  const evidence = messageEvidenceSelect(db);
-  let messages = db.prepare(`
+  const evidence = await messageEvidenceSelect();
+  let messages = await query<MessageRow>(`
     SELECT id, thread_id AS threadId, sender, content,
            message_timestamp AS messageTimestamp, message_at AS messageAt,
            ${evidence},
@@ -636,15 +638,16 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
       -- appear as messages from the seeker in the detail/sidebar views.
       AND kind NOT IN ('system_banner', 'reaction', 'attachment')
     ORDER BY seq ASC, id ASC
-  `).all(uRow.threadId) as MessageRow[];
+  `, [uRow.threadId]);
   
   messages = messages.map(r => ({
     ...r,
     sender: normalizeMessageSender(r.content, r.sender)
   }));
-  messages = attachCrawledReactions(db, uRow.threadId || '', messages);
+  messages = await attachCrawledReactions(uRow.threadId || '', messages);
+  messages = await attachMasProvenance(uRow.threadId || '', messages);
   messages = displayableMessageHistory(messages);
-  const reactionEvents = getCrawledReactionEvents(db, uRow.threadId || '');
+  const reactionEvents = await getCrawledReactionEvents(uRow.threadId || '');
 
   // Check for ad source
   const adMsg = messages.find(m => m.content?.includes('[AD SOURCE]'));
@@ -652,7 +655,7 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
   if (adMsg) {
     const content = adMsg.content || '';
     // Try to match to a known post
-    const postNameCache = tableExists('posts') ? db.prepare(`SELECT id, post_name FROM posts WHERE post_name IS NOT NULL`).all() as { id: string; post_name: string }[] : [];
+    const postNameCache = await tableExists('posts') ? await query<{ id: string; post_name: string }>('SELECT id, post_name FROM posts WHERE post_name IS NOT NULL') : [];
     let matchedPost: { id: string; post_name: string } | undefined;
     for (const post of postNameCache) {
       const matchKey = post.post_name.slice(0, 60);
@@ -670,14 +673,14 @@ export function getSeekerById(seekerId: string): SeekerDetail | null {
 
   // Check if this DM user also commented (cross-channel)
   let comments: (CommentRow & { postName?: string; postUrl?: string })[] = [];
-  if (tableExists('comments') && tableExists('posts')) {
-    comments = db.prepare(`
+  if (await tableExists('comments') && await tableExists('posts')) {
+    comments = await query<CommentRow & { postName?: string; postUrl?: string }>(`
       SELECT c.*, p.post_name AS postName, p.post_url AS postUrl
       FROM comments c
       JOIN posts p ON c.post_id = p.id
       WHERE c.commenter_name = ?
       ORDER BY c.timestamp ASC
-    `).all(uRow.name) as (CommentRow & { postName?: string; postUrl?: string })[];
+    `, [uRow.name]);
   }
 
   // Find the latest message that has a valid timestamp
@@ -759,8 +762,7 @@ export interface GraphData {
   links: GraphLink[];
 }
 
-export function getGraphData(filter?: { city?: string; startDate?: string; endDate?: string }): GraphData {
-  const db = getDb();
+export async function getGraphData(filter?: { city?: string; startDate?: string; endDate?: string }): Promise<GraphData> {
   const nodes: GraphNode[] = [];
   const links: GraphLink[] = [];
   const nodeIds = new Set<string>();
@@ -770,11 +772,11 @@ export function getGraphData(filter?: { city?: string; startDate?: string; endDa
   const dmRangeParams: string[] = [];
   const rangeClauses = (column: string, params: string[]) => {
     const clauses: string[] = [];
-    if (filter?.startDate) { clauses.push(`AND datetime(${column}) >= datetime(?)`); params.push(filter.startDate); }
-    if (filter?.endDate) { clauses.push(`AND datetime(${column}) <= datetime(?)`); params.push(`${filter.endDate} 23:59:59.999`); }
+    if (filter?.startDate) { clauses.push(`AND ${column}::timestamp >= ?::timestamp`); params.push(filter.startDate); }
+    if (filter?.endDate) { clauses.push(`AND ${column}::timestamp <= ?::timestamp`); params.push(`${filter.endDate} 23:59:59.999`); }
     return clauses.join(' ');
   };
-  const commentRangePredicate = rangeClauses('COALESCE(c.comment_date, c.timestamp)', commentRangeParams);
+  const commentRangePredicate = rangeClauses("COALESCE(c.timestamp, NULLIF(c.comment_date, '')::timestamp)", commentRangeParams);
   const dmRangePredicate = rangeClauses('u.last_interaction', dmRangeParams);
 
   const addNode = (node: GraphNode) => {
@@ -819,8 +821,8 @@ export function getGraphData(filter?: { city?: string; startDate?: string; endDa
 
   // Get ALL posts that have comments
   let allPosts: { id: string; post_name: string; commenter_count: number }[] = [];
-  if (tableExists('posts') && tableExists('comments')) {
-    allPosts = db.prepare(`
+  if (await tableExists('posts') && await tableExists('comments')) {
+    allPosts = await query<{ id: string; post_name: string; commenter_count: number }>(`
       SELECT p.id, p.post_name,
              COUNT(DISTINCT c.commenter_name) AS commenter_count
       FROM posts p
@@ -829,7 +831,7 @@ export function getGraphData(filter?: { city?: string; startDate?: string; endDa
       ${commentRangePredicate}
       GROUP BY p.id
       ORDER BY commenter_count DESC
-    `).all(PAGE_NAME, ...commentRangeParams) as { id: string; post_name: string; commenter_count: number }[];
+    `, [PAGE_NAME, ...commentRangeParams]);
   }
 
   for (const post of allPosts) {
@@ -848,21 +850,21 @@ export function getGraphData(filter?: { city?: string; startDate?: string; endDa
     links.push({ source: cityId, target: postNodeId });
 
     // Get ALL actual commenters on this post (from comments table, not comment_users)
-    const commenters = tableExists('comments') ? db.prepare(`
+    const commenters = await tableExists('comments') ? await query<{ commenter_name: string }>(`
       SELECT DISTINCT c.commenter_name
       FROM comments c
       WHERE c.post_id = ? AND c.commenter_name != ?
       ${commentRangePredicate}
-    `).all(post.id, PAGE_NAME, ...commentRangeParams) as { commenter_name: string }[] : [];
+    `, [post.id, PAGE_NAME, ...commentRangeParams]) : [];
 
     for (const commenter of commenters) {
       // Look up user in comment_users for FB URL / phone data
-      const userInfo = tableExists('comment_users') ? db.prepare(`
+      const userInfo = await tableExists('comment_users') ? await queryOne<{ fb_profile_url: string | null; phone: string | null }>(`
         SELECT cu.fb_profile_url, cu.phone
         FROM comment_users cu
         WHERE cu.commenter_name = ?
         LIMIT 1
-      `).get(commenter.commenter_name) as { fb_profile_url: string | null; phone: string | null } | undefined : undefined;
+      `, [commenter.commenter_name]) : undefined;
 
       const userNodeId = `user-${commenter.commenter_name}`;
       addNode({
@@ -880,7 +882,7 @@ export function getGraphData(filter?: { city?: string; startDate?: string; endDa
 
   // Add DM users — link via ad_id grouping when available
   // code:web-db-002:ad-city-enrichment
-  const dmUsers = db.prepare(`
+  const dmUsers = await query<{ db_id: number; thread_name: string; fb_url: string | null; phone: string | null; city: string; thread_id: string; ad_id: string | null; ad_content: string | null }>(`
     SELECT u.id AS db_id, u.thread_name, u.fb_url, u.phone,
            COALESCE(ap.city, u.city, 'Unknown') AS city,
            t.id AS thread_id,
@@ -892,10 +894,10 @@ export function getGraphData(filter?: { city?: string; startDate?: string; endDa
     WHERE u.thread_name IS NOT NULL AND u.thread_name != ?
     ${dmRangePredicate}
     ORDER BY u.last_interaction DESC
-  `).all(PAGE_NAME, ...dmRangeParams) as { db_id: number; thread_name: string; fb_url: string | null; phone: string | null; city: string; thread_id: string; ad_id: string | null; ad_content: string | null }[];
+  `, [PAGE_NAME, ...dmRangeParams]);
 
   // Cache all post names for ad→post fuzzy matching
-  const postNameCache = tableExists('posts') ? db.prepare(`SELECT id, post_name FROM posts WHERE post_name IS NOT NULL`).all() as { id: string; post_name: string }[] : [];
+  const postNameCache = await tableExists('posts') ? await query<{ id: string; post_name: string }>('SELECT id, post_name FROM posts WHERE post_name IS NOT NULL') : [];
 
   // Group users by ad_id to create ad grouping nodes
   const adGroupMap = new Map<string, { ad_id: string; city: string; ad_content: string | null; users: typeof dmUsers }>();
@@ -1024,11 +1026,11 @@ export function getGraphData(filter?: { city?: string; startDate?: string; endDa
     });
 
     // Try to match DM ad source to a post
-    const adMessages = db.prepare(`
+    const adMessages = await query<{ content: string }>(`
       SELECT m.content FROM messages m
       WHERE m.thread_id = ? AND m.content LIKE '%AD SOURCE%'
       LIMIT 1
-    `).all(user.thread_id) as { content: string }[];
+    `, [user.thread_id]);
 
     let linkedToPost = false;
     if (adMessages.length > 0) {
@@ -1067,19 +1069,22 @@ export function getGraphData(filter?: { city?: string; startDate?: string; endDa
 
 // ── Stats ──
 
-export function getDashboardStats() {
-  const db = getDb();
-  const totalDMUsers = tableExists('users') ? (db.prepare('SELECT COUNT(*) AS c FROM users').get() as { c: number }).c : 0;
-  const totalCommentUsers = tableExists('comment_users') ? (db.prepare('SELECT COUNT(*) AS c FROM comment_users').get() as { c: number }).c : 0;
-  const totalPosts = tableExists('posts') ? (db.prepare('SELECT COUNT(*) AS c FROM posts').get() as { c: number }).c : 0;
-  const totalMessages = tableExists('messages') ? (db.prepare('SELECT COUNT(*) AS c FROM messages').get() as { c: number }).c : 0;
-  const totalComments = tableExists('comments') ? (db.prepare('SELECT COUNT(*) AS c FROM comments').get() as { c: number }).c : 0;
-  const totalThreads = tableExists('threads') ? (db.prepare('SELECT COUNT(*) AS c FROM threads').get() as { c: number }).c : 0;
+export async function getDashboardStats() {
+  const count = async (table: string) => (await tableExists(table)
+    ? Number((await queryOne<{ c: string }>(`SELECT COUNT(*) AS c FROM ${table}`))?.c ?? 0) : 0);
+  const [totalDMUsers, totalCommentUsers, totalPosts, totalMessages, totalComments, totalThreads] = await Promise.all(
+    ['users', 'comment_users', 'posts', 'messages', 'comments', 'threads'].map(count),
+  );
 
   // Stage counts using same dedup logic as getAllSeekers
-  const seekers = getAllSeekers();
-  const userCount = seekers.filter(s => s.leadStage === 'User').length;
-  const seekerCount = seekers.filter(s => s.leadStage === 'Seeker').length;
+  const seekers = await getAllSeekers();
+  const stageCounts = seekers.reduce<Record<string, number>>((counts, seeker) => {
+    const stage = normalizeJourneyStage(seeker.leadStage);
+    counts[stage] = (counts[stage] || 0) + 1;
+    return counts;
+  }, {});
+  const userCount = stageCounts.User || 0;
+  const seekerCount = stageCounts.Seeker || 0;
 
   return {
     totalSeekers: seekers.length,
@@ -1089,6 +1094,7 @@ export function getDashboardStats() {
     totalMessages,
     totalComments,
     totalThreads,
+    stageCounts,
     userStageCount: userCount,
     seekerStageCount: seekerCount,
   };

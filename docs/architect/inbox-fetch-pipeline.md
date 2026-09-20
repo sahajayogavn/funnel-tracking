@@ -85,7 +85,7 @@ That is what makes it movable to another tab.
 3. **No fault isolation**: one thread that hangs in the 150-attempt click loop
    blocks every thread behind it.
 
-Target from the PRD: `--workers 5` (1 orchestrator + 4 workers) reduces the
+Target from the PRD: `--workers 4` (1 orchestrator + 3 workers) reduces the
 Stage 2 wall time by ≥ 3× on a 90d refresh with byte-identical persisted
 output, and `--workers 1` keeps today's behaviour exactly.
 
@@ -222,7 +222,7 @@ its DOM is unverified and would need its own anti-fragile spike
 | Stage 1 dedup set / stats | owned by the orchestrator thread only. Workers never touch them; they report through `result_q`. |
 | Message-target counter | `threading.Lock`-guarded int updated from `ThreadResult.messages_added`; orchestrator sets `stop_event` when `existing + added ≥ target_total_messages`. |
 | Logging | one `logging` handler set (thread-safe); every worker log line is prefixed `[worker:i]`. |
-| Worker cap | `--workers` clamped to `[1, 8]`; > 8 tabs risks Business Suite rate limiting and host memory (≈ 400 MB / tab). |
+| Worker cap | `--workers` clamped to `[1, 4]`: 1 orchestrator and at most 3 worker tabs. This cap avoids excess Business Suite rate limiting and host-memory pressure (≈ 400 MB / tab). |
 
 ---
 
@@ -320,7 +320,7 @@ one wrong → fall through), overshoot stop, hint uniqueness rule.
 | 3.1 | `run_parallel_fetch(page, page_id, time_range, max_threads, conn, workers, …) -> stats`: spawns workers, runs `discover_threads(on_task=task_q.put)`, sentinels, orchestrator-as-worker-0, join, aggregate. | new `fb_pipeline/inbox/l3_parallel_fetch.py` | `…:orchestrator` |
 | 3.2 | `worker_main(worker_index, page_id, inbox_url, task_q, result_q, stop_event, deps)` — own playwright/CDP/tab/conn, re-attach policy, `[worker:i]` log prefix. | `fb_pipeline/inbox/l3_parallel_fetch.py` | `…:worker-main` |
 | 3.3 | Stop conditions (§7) and stats keys. | same | `…:stop-rules` |
-| 3.4 | CLI: `--workers N` (default 5, clamp 1–8). `workers == 1` → `scrape_inbox`; else `run_parallel_fetch`. Only valid with `--cdp` (headless Mode 3 launches its own browser and stays sequential in this iteration). | `tools/l5_fetch_fb_messages.py` | `…:cli` |
+| 3.4 | CLI: `--workers N` (default 4, clamp 1–4: 1 orchestrator + at most 3 worker tabs). `workers == 1` → `scrape_inbox`; else `run_parallel_fetch`. Only valid with `--cdp` (headless Mode 3 launches its own browser and stays sequential in this iteration). | `tools/l5_fetch_fb_messages.py` | `…:cli` |
 
 Unit tests: fake worker threads and a fake `discover_threads` to prove
 FIFO dispatch before Stage 1 ends, sentinel shutdown, re-queue on tab loss,
@@ -330,9 +330,9 @@ never imports threading paths.
 ### Phase 4 — Live validation (operator run, after the current 90d job finishes)
 
 1. `--time_range 7d --cdp --refresh --workers 1` → snapshot DB (`threads`, `messages` counts per thread).
-2. Same with `--workers 5` → diff must be empty apart from `last_synced_at`.
+2. Same with `--workers 4` → diff must be empty apart from `last_synced_at`.
 3. Hung Bui snapshot gate with `--workers 3 --maxThreads 3` (Hung Bui must be among the first three cards; abort otherwise).
-4. `--time_range 90d --refresh --workers 5` → record `stage2_ms` and speed-up in `logs/` and in §1 of this document.
+4. `--time_range 90d --refresh --workers 4` → record `stage2_ms` and speed-up in `logs/` and in §1 of this document.
 5. Tune: worker cap, `busy_timeout`, overshoot bucket.
 
 ### Phase 5 — Close-out
@@ -364,7 +364,7 @@ Sequential baseline for 8 threads ≈ 8 × 15 s ≈ 120 s, so run 8 is ≈ 3.7×
 
 | Risk | Mitigation |
 | --- | --- |
-| Business Suite rate-limits 5 concurrent inbox tabs | cap at 8, default 5; Phase 4 measures; a `--worker-delay-ms` throttle is trivial to add if needed. |
+| Business Suite rate-limits concurrent inbox tabs | Cap at 4 total tabs (1 orchestrator + at most 3 workers), default 4; a `--worker-delay-ms` throttle is available if further moderation is needed. |
 | Sidebar order shifts while workers are scrolling (new incoming message moves a thread to the top) | L1 matches by identity, not position; `absolute_top` is only a hint. The orchestrator's Stage 1 dedup already tolerates this. |
 | Same-name conversations | L0 requires preview match; L1 already disambiguates by preview; hint lookup requires unique name. |
 | Host memory | ≈ 400 MB per tab; 5 tabs is well within the operator Mac. |

@@ -23,6 +23,7 @@ Requires GOOGLE_API_KEY and optionally ADK_MODEL (decoded from Base64 values in
 .env via env_manager.py).
 """
 import os
+from pathlib import Path
 
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.tools import AgentTool
@@ -241,18 +242,29 @@ Knowledge brief: {knowledge_brief?}
 QA correction for a bounded rewrite (if any): {qa_feedback?}
 
 ## Rules
-1. 2–3 sentences, Vietnamese, warm and personal. Use the same form of address the
+1. 1–3 sentences, Vietnamese, warm and personal. Use the same form of address the
    volunteers used before (chú/cô/anh/chị/bạn from `prior_page_lines`); default "bạn/mình".
 2. State the session clearly: day ("tối mai Thứ Ba", "Chủ Nhật này"), time, and the
    exact address or "qua Zoom". Derive "tối nay/ngày mai" from the current time.
-3. Mention that it is free only if natural. Never pushy. Emoji sparingly (🙏 🌿).
+3. Focus on the appointment. Mention fees only to answer a current question or
+   explicit operator request. Never invent clothing/preparation advice or benefits.
+   Extra logistics require a verified source AND relevance to this session.
+   Never infer causation between independent facts (free classes do not imply
+   clothing or preparation rules). Emoji sparingly (🙏 🌿).
 4. If `zalo_url` is present and the seeker has not been sent it, add one short line inviting
    them to join the class Zalo group with that link.
 5. Do NOT ask for name or phone again — they already registered.
 6. If the operator instruction or recent conversation says this person has cancelled,
    is busy for this session, or does not want contact, output EXACTLY
    `[NO_SEND: contextual reason]` and nothing else.
-7. End with a gentle "hẹn gặp" line.""",
+7. Use a companionable opening such as "Chào bạn, chúng ta có hẹn lớp thiền ..."
+   ONLY if the transcript/profile establishes registration or an appointment for
+   this class; interest or a program_code alone is insufficient. Otherwise use
+   "Mình gửi bạn thông tin lớp thiền ..." without inventing a commitment.
+   Never say "mình nhắc bạn", "nhắc bạn nhớ", "đừng quên", "Rất mong",
+   "mong được đón", "mọi người đang chờ bạn", or "hy vọng bạn sắp xếp".
+   A closing is optional: "Hẹn gặp lại bạn chiều mai nhé" when appropriate.
+   Do not require attendance confirmation or repeat the appointment in a closing.""",
     output_key="draft_reply",
 ))
 
@@ -299,12 +311,29 @@ conversation_analyst = traced(LlmAgent(
     description="Analyzes one customer message: intent, language, exact question, "
                  "relevant history, required facts, and safety concerns. Call this first, "
                  "and again after propose_seeker_update changes the seeker's profile.",
-    instruction="""Analyze ONE inbox or operator-selected care action. The
-deterministic gate/precheck has already admitted this work; do not override it.
+    instruction="""Analyze ONE inbox or operator-selected care action. Respect
+deterministic blocks. Admission means eligible for assessment, not obliged to
+send. For proactive care, first decide whether contacting NOW is appropriate.
+For class_reminder, check sent-reminder evidence in care_brief.reminder_cadence
+and genuine Page messages for the SAME session, using original message times.
+Default to one sent reminder per session: do not remind again the next day just
+because the class is closer, wording differs, a companion was added, or the
+operator clicked/regenerated. A generic request to compose a suitable reminder
+does not authorize repeated contact. Only repeat_explicitly_requested=true from
+the trusted operator precheck permits intensive reminders; it never overrides
+opt-out or other eligibility constraints. Drafts/approvals and unknown-sender
+quotes are not proof of sending. A recent reminder for this session with no
+explicit repeat authorization means stop: output ONLY `NO_SEND: <short Vietnamese
+explanation for the operator>`. Do not turn a new customer question into a
+proactive reminder; it belongs to the reactive reply route. Otherwise continue
+the analytical handoff. Do not treat reactive closed state alone as a care veto.
 Read {thread_messages?}, {conversation_state?}, {seeker_context?}, {care_purpose?}, {care_brief?}, and
 {now_context?}. Produce a concise handoff: intent, language, time context,
 journey stage, established form of address, relevant history, required facts,
-and safety concerns. Do not draft a reply.""",
+and safety concerns. For class_reminder, distinguish required message facts from
+available background facts. Fees are not required unless currently asked about
+or explicitly requested by the operator. Cite evidence for an appointment;
+interest or program_code alone does not establish a commitment. Do not draft a reply.""",
     output_key="conversation_analysis",
 ))
 
@@ -319,7 +348,10 @@ in the returned session knowledge. Use {conversation_analysis?},
 {knowledge_context?}, {seeker_context?}, {care_purpose?}, {care_brief?}, and
 {now_context?}. Return a compact factual brief. Do not invent a schedule,
 address, price, or policy.  If the knowledge does not answer the question, say
-that a CLB member must follow up.  Do not draft a reply.""",
+that a CLB member must follow up. For class_reminder, separate necessary session
+facts from optional facts; omit irrelevant FAQ/fees/preparation advice unless
+needed for the current request. Preserve sources for any extra logistics.
+Do not draft a reply.""",
     output_key="knowledge_brief",
     tools=[get_knowledge],
 ))
@@ -408,7 +440,26 @@ When the conversation explicitly establishes an older seeker or a prior
 "cô"/"chú" address, require the matching respectful form rather than silently
 changing it back to "bạn/mình".
 
+For class_reminder, apply the SOUL appointment policy directly. Check each
+sentence for relevance, source support, logical connections and pressure.
+Check whether it is appropriate to contact now, even if the Analyst admitted it.
+If this session was already reminded and reminder_cadence does not explicitly
+authorize repeats, return NO_SEND with a Vietnamese operator explanation, not
+REPAIR to reword the same reminder. Recent genuine Page messages count as
+evidence; drafts/approvals or unknown-sender quotes alone do not.
+Return REPAIR for unnecessary fees, unsupported clothing/preparation advice,
+false causation ("miễn phí nên ..."), or coercive reminder/expectation language.
+Do not PASS "mình nhắc bạn", "nhắc bạn nhớ", "đừng quên", "Rất mong",
+"mong được đón", "mọi người đang chờ bạn", or "hy vọng bạn sắp xếp".
+"Chúng ta có hẹn" needs registration/appointment evidence for the selected class,
+not merely interest or a program_code. A closing is optional. Give concrete
+deletions/replacements; these are fixable wording errors, not knowledge_gap.
+If the seeker currently asks about fees, answer from verified facts; that alone
+is not a sensitive-money escalation.
+
 Output exactly one of:
+  `NO_SEND: <short Vietnamese reason>` — proactive care is inappropriate now;
+    no outward message should be produced. This is not an escalation.
   `PASS` — the draft is ready to send as-is.
   `REPAIR: <short concrete correction>` — fixable; ReplyComposer should try again.
   `ESCALATE: <reason_code>: <one-sentence note for the human operator>` — this
@@ -437,6 +488,15 @@ uses that is absent from BOTH the conversation/profile and knowledge_brief.
 Do not write the reply yourself.""",
     output_key="qa_verdict",
 ))
+
+# SOUL is authoritative voice policy, supplied verbatim rather than relying on
+# Librarian to preserve it in a factual summary. Also covers legacy composers.
+_voice_policy = (Path(__file__).resolve().parents[1] / "memory" / "SOUL.md").read_text(encoding="utf-8").strip()
+if not _voice_policy:
+    raise ValueError("MAS voice policy memory/SOUL.md is empty")
+for _voice_agent in (responder, reply_composer, class_reminder_composer,
+                     warmup_composer, event_advertiser, reply_qa_reviewer):
+    _voice_agent.instruction += "\n\n## Authoritative voice policy (memory/SOUL.md)\n" + _voice_policy
 
 # code:agent-mas-002:orchestrator
 def _orchestrator_loop_guard(tool, args, tool_context):

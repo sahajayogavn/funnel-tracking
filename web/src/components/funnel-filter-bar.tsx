@@ -1,7 +1,7 @@
 // code:web-component-005:funnel-filter-bar
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import {
   DATE_RANGES,
   DEFAULT_FUNNEL_FILTERS,
@@ -31,6 +31,8 @@ const DEFAULT_CITIES = [
 ];
 
 interface FunnelFilterBarProps {
+  value?: FilterState;
+  dateOnly?: boolean;
   onFilterChange: (filters: FilterState) => void;
   availableCities?: string[];
   availablePrograms?: { code: string; city: string }[];
@@ -41,6 +43,8 @@ interface FunnelFilterBarProps {
 }
 
 export function FunnelFilterBar({
+  value,
+  dateOnly = false,
   onFilterChange,
   availableCities = DEFAULT_CITIES,
   availablePrograms = [],
@@ -49,7 +53,9 @@ export function FunnelFilterBar({
   unitLabel = 'mục',
   extraControls,
 }: FunnelFilterBarProps) {
-  const [filters, setFilters] = useState<FilterState>(DEFAULT_FUNNEL_FILTERS);
+  const id = useId();
+  const [storedFilters, setFilters] = useState<FilterState>(DEFAULT_FUNNEL_FILTERS);
+  const filters = value ?? storedFilters;
   const [isLoaded, setIsLoaded] = useState(false);
   const onFilterChangeRef = useRef(onFilterChange);
 
@@ -66,6 +72,7 @@ export function FunnelFilterBar({
   }, [availableCities, filters.city]);
 
   useEffect(() => {
+    if (value) return;
     const syncFromStorage = () => {
       try {
         const restored = getStoredFilters();
@@ -93,11 +100,11 @@ export function FunnelFilterBar({
       window.removeEventListener('storage', handleStorage);
       window.removeEventListener('sahaja_funnel_filter_changed', handleLocalSync);
     };
-  }, []);
+  }, [value]);
 
   const updateFilters = (next: FilterState) => {
     setFilters(next);
-    saveStoredFilters(next);
+    if (!value) saveStoredFilters(next);
     onFilterChangeRef.current(next);
   };
 
@@ -113,7 +120,7 @@ export function FunnelFilterBar({
     if (nextIndex !== null) {
       const nextRange = DATE_RANGES[nextIndex] as DateRange;
       updateFilters({ ...filters, dateRange: nextRange });
-      const targetBtn = document.getElementById(`filter-range-${nextRange}`);
+      const targetBtn = document.getElementById(`${id}-filter-range-${nextRange}`);
       targetBtn?.focus();
     }
   };
@@ -121,7 +128,7 @@ export function FunnelFilterBar({
   const visiblePrograms = availablePrograms.filter(program => filters.city === 'all' || program.city === normalizeProgramCity(filters.city));
   const isFiltered = filters.city !== 'all' || filters.programCode !== 'all' || filters.dateRange !== 'all';
 
-  if (!isLoaded) {
+  if (!isLoaded && !value) {
     return (
       <div className="card funnel-filter-bar" style={{ opacity: 0.6 }}>
         <div className="funnel-filter-controls">
@@ -137,21 +144,23 @@ export function FunnelFilterBar({
   return (
     <div className="card funnel-filter-bar" role="search" aria-label="Bộ lọc dữ liệu theo thành phố và khoảng thời gian">
       <div className="funnel-filter-controls">
-        <label className="funnel-filter-label" htmlFor="filter-city">📍 Thành phố:</label>
+        {!dateOnly && <div className="funnel-filter-field">
+        <label className="funnel-filter-label" htmlFor={`${id}-filter-city`}>📍 Thành phố:</label>
         <select
-          id="filter-city"
+          id={`${id}-filter-city`}
           value={filters.city}
-          onChange={event => updateFilters({ ...filters, city: event.target.value })}
+          onChange={event => updateFilters({ ...filters, city: event.target.value, programCode: 'all' })}
           className="funnel-filter-select"
         >
           <option value="all">Tất cả thành phố</option>
           {cities.filter(city => city !== 'all').map(city => <option key={city} value={city}>{city}</option>)}
         </select>
+        </div>}
 
-        {availablePrograms.length > 0 && <>
-          <label className="funnel-filter-label" htmlFor="filter-program">📚 Chương trình:</label>
+        {!dateOnly && availablePrograms.length > 0 && <div className="funnel-filter-field">
+          <label className="funnel-filter-label" htmlFor={`${id}-filter-program`}>📚 Chương trình:</label>
           <select
-            id="filter-program"
+            id={`${id}-filter-program`}
             value={filters.programCode}
             onChange={event => updateFilters({ ...filters, programCode: event.target.value })}
             className="funnel-filter-select"
@@ -159,12 +168,12 @@ export function FunnelFilterBar({
             <option value="all">Tất cả chương trình</option>
             {visiblePrograms.map(program => <option key={program.code} value={program.code}>{program.code}</option>)}
           </select>
-        </>}
+        </div>}
 
         <div className="funnel-range-group" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <label className="funnel-filter-label" htmlFor="filter-date-range">📅 Khoảng thời gian:</label>
+          <span className="funnel-filter-label" id={`${id}-range-label`}>📅 Khoảng thời gian:</span>
           <div
-            id="filter-date-range"
+            id={`${id}-filter-date-range`}
             className="funnel-range-pills"
             role="radiogroup"
             aria-label="Khoảng thời gian: 1d, 3d, 7d, 14d, 30d, 60d, 90d, all"
@@ -173,7 +182,7 @@ export function FunnelFilterBar({
               const isActive = filters.dateRange === range;
               return (
                 <button
-                  id={`filter-range-${range}`}
+                  id={`${id}-filter-range-${range}`}
                   key={range}
                   type="button"
                   role="radio"

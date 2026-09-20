@@ -241,12 +241,14 @@ export function SeekerSidebar({
                     className="sidebar-recent-messages"
                     compact
                     maxHeight={260}
+                    showMasOrigin
                     messages={sortFacebookMessages(
                       detail.messages.filter(message => !message.content?.includes('[AD SOURCE]'))
                     )
                       .slice(-20)
                       .map(message => ({
                         id: message.id,
+                        masProposed: message.masProposed,
                         sender: message.sender === 'Page' || message.sender === 'Auto_Page' ? (message.sender === 'Auto_Page' ? '@Auto_Page' : 'Page') : (message.sender === 'Customer' ? seeker.name : (message.sender || 'Unknown')),
                         content: message.content,
                         timestamp: message.messageTimestamp,

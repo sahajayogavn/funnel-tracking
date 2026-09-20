@@ -17,6 +17,7 @@ from tools import l5_action_queue as queue
 from tools import l5_mas_recommend as rec
 from adk_agents.tools import l5_seeker_tools as seeker_tools
 from adk_agents.tools import l5_event_tools as event_tools
+from fb_pipeline.persistence import l4_llm_trace as trace
 
 HUNG_BUI = "1548373332058326_100001005716854"
 
@@ -31,7 +32,7 @@ def test_db(monkeypatch, tmp_path):
         setup_database(conn)
         return conn
 
-    for mod in (queue, rec, seeker_tools, event_tools):
+    for mod in (queue, rec, seeker_tools, event_tools, trace):
         monkeypatch.setattr(mod, "get_db_connection", get_test_conn)
 
     conn = get_test_conn()
@@ -196,6 +197,7 @@ def test_two_operator_care_commands_can_coexist_for_one_seeker(test_db, mocked_l
     ("failed", False), ("drafted", False),
     ("explicit_override", False), ("negated_override", True),
     ("quoted_override", True), ("generic_urgent", True),
+    ("paraphrased_override", False), ("interpreter_error", True),
 ])
 def test_trace36_reminder_cadence(test_db, mocked_llm, monkeypatch, variant, blocked):
     from datetime import datetime
@@ -235,20 +237,38 @@ def test_trace36_reminder_cadence(test_db, mocked_llm, monkeypatch, variant, blo
         "explicit_override": " Đây là sự kiện cần nhắc lịch dồn dập.",
         "negated_override": " Không phải đây là sự kiện cần nhắc lịch dồn dập.",
         "quoted_override": ' Seeker nói: "Đây là sự kiện cần nhắc lịch dồn dập".',
-        "generic_urgent": " Hãy nhắc lại ngay, ưu tiên gấp.",
+        "generic_urgent": " Hãy nhắc ngay, ưu tiên gấp.",
+        "paraphrased_override": " Đây là lớp học gấp, nên hoàn toàn được phép giục liên. tục.",
     }.get(variant, "")
+    interpreter_calls = []
+    def interpret(text, **kwargs):
+        interpreter_calls.append((text, kwargs))
+        return {"allow_repeat": variant in {"explicit_override", "paraphrased_override"},
+                "reason": "Operator cho phép nhắc liên tục." if not blocked else "Không có quyền nhắc lại.",
+                "evidence": "hoàn toàn được phép giục liên. tục",
+                **({"error": "timeout"} if variant == "interpreter_error" else {})}
+    monkeypatch.setattr(rec, "interpret_repeat_permission", interpret)
     result = rec.run([HUNG_BUI], "care", care_purpose="class_reminder",
                      trace_id="36", instruction=instruction, regenerate=variant == "regenerate")
     assert result["count"] == (0 if blocked else 1)
     assert len(mocked_llm["care"]) == (0 if blocked else 1)
     assert len(_pending(test_db)) == (1 if blocked else 2)
     if blocked:
-        assert result["skipped"][0]["reason"] == "reminder_already_sent_for_session"
+        assert result["skipped"][0]["reason"] == ("care_instruction_unresolved" if variant == "interpreter_error" else "reminder_already_sent_for_session")
         assert "không" in result["skipped"][0]["note"].lower()
-    elif variant == "explicit_override":
+    elif variant in {"explicit_override", "paraphrased_override"}:
         brief = mocked_llm["care"][0][3]
         assert brief["reminder_cadence"]["repeat_explicitly_requested"] is True
         assert brief["reminder_cadence"]["sent_reminders"][0]["executed_at"] == "2026-09-18 06:39:38"
+    if blocked or variant in {"explicit_override", "paraphrased_override"}:
+        assert interpreter_calls[0][0] == instruction
+        conn = test_db()
+        audit = conn.execute("SELECT * FROM llm_calls WHERE trace_id='36' AND agent_name='CareAdmissionDecision'").fetchone()
+        conn.close()
+        assert audit["subject_id"] == HUNG_BUI
+        assert audit["status"] == ("skipped" if blocked else "ok")
+        assert json.loads(audit["state_json"])["operator_instruction"] == instruction
+        assert json.loads(audit["state_json"])["evidence"]["sent_reminders"]
 
 
 def test_care_no_send_is_explained_without_enqueue(test_db, mocked_llm, monkeypatch):
@@ -274,6 +294,11 @@ def test_intensive_reminder_instruction_does_not_override_opt_out(test_db, mocke
     assert result["skipped"][0]["reason"] == "opt_out"
     assert not mocked_llm["care"]
     assert not _pending(test_db)
+    conn = test_db()
+    row = conn.execute("SELECT * FROM llm_calls WHERE agent_name='CareAdmissionDecision'").fetchone()
+    conn.close()
+    assert row["status"] == "skipped"
+    assert row["outcome_ref"] == "opt_out"
 
 
 def test_all_runs_reply_warmup_event(test_db, mocked_llm):

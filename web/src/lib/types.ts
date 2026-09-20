@@ -72,6 +72,8 @@ export interface MessageRow {
   // from `timestamp`, which is when the scraper wrote the row to SQLite.
   messageAt?: string | null;
   sourceId?: string | null;
+  /** True only when Meta's source id is confirmed as an MAS-proposed message. */
+  masProposed?: boolean;
   senderConfidence?: string | null;
   timePrecision?: string | null;
   replyToMessageId?: string | null;
@@ -137,7 +139,7 @@ export interface SeekerDetail {
 }
 
 export const JOURNEY_STAGES: { key: JourneyStage; label: string; description: string }[] = [
-  { key: 'User', label: 'User', description: 'First interaction: DM or comment on Page' },
+  { key: 'User', label: 'Tiếp nhận (User)', description: 'Contacts ở giai đoạn đầu, chưa chuyển sang Seeker' },
   { key: 'Seeker', label: 'Seeker', description: 'Provided phone number to register' },
   { key: 'Seeker_Public_Program', label: 'Public Program', description: 'Attending public meditation programs' },
   { key: 'Seeker_18_Weeks', label: '18-Week Course', description: 'Committed to 18-week deep learning course' },

@@ -8,7 +8,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const detail = getSeekerById(decodeURIComponent(id));
+    const detail = await getSeekerById(decodeURIComponent(id));
     if (!detail) {
       return NextResponse.json({ error: 'Seeker not found' }, { status: 404 });
     }

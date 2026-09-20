@@ -16,8 +16,10 @@ Usage:
 import argparse
 import logging
 import os
-import sqlite3
 import sys
+
+from fb_pipeline.persistence.db import connect as connect_database, using_postgres
+from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
 
 logger = logging.getLogger("dedup_users")
 logging.basicConfig(
@@ -51,10 +53,9 @@ def score_user(row: dict) -> tuple:
 
 
 # code:tool-dedup-001:find-duplicates
-def find_duplicate_groups(conn: sqlite3.Connection) -> list[list[dict]]:
+def find_duplicate_groups(conn) -> list[list[dict]]:
     """Return a list of groups, each group is a list of user dicts sharing
     the same non-empty fb_url."""
-    conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """
         SELECT fb_url, COUNT(*) as cnt
@@ -77,7 +78,7 @@ def find_duplicate_groups(conn: sqlite3.Connection) -> list[list[dict]]:
 
 
 # code:tool-dedup-001:merge
-def merge_group(conn: sqlite3.Connection, group: list[dict], dry_run: bool) -> dict:
+def merge_group(conn, group: list[dict], dry_run: bool) -> dict:
     """Merge a duplicate group.  Returns a summary dict."""
     # Pick keeper using a stable ordering rule.
     scored = sorted(group, key=score_user)
@@ -152,7 +153,11 @@ def merge_group(conn: sqlite3.Connection, group: list[dict], dry_run: bool) -> d
 # code:tool-dedup-001:main
 def run_dedup(db_path: str = DB_PATH, dry_run: bool = True) -> dict:
     """Run deduplication.  Returns stats dict."""
-    conn = sqlite3.connect(db_path)
+    conn = (
+        get_db_connection()
+        if using_postgres()
+        else connect_database(os.path.dirname(db_path), sqlite_filename=os.path.basename(db_path))
+    )
     groups = find_duplicate_groups(conn)
 
     stats = {

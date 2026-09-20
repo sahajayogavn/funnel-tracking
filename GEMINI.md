@@ -199,9 +199,9 @@ These rules are **absolute** and must never be violated:
 
 ### 10.3 Inbox Replies MUST Be Pure Async (No Live CDP Drafting)
 
-- **Do not automatically type or send messages to users without Telegram HITL.**
+- **Do not type or send messages without human approval of the specific action. WebUI approval is sufficient; Telegram is optional.**
 - The MAS Runner loop must strictly generate the AI response and queue the proposal to the Telegram DB (`telegram_hitl_queue`) and then quickly proceed to the next iteration without opening the Playwright browser interface.
-- The `navigate_to_thread` and `send_reply_via_cdp` functions are EXCLUSIVELY reserved for the independent `hitl_execution_job.py` daemon, which only triggers AFTER receiving a 👍 LIKE reaction from a human operator in Telegram.
+- Facebook composer interaction is reserved for the independent `tools/l5_hitl_execution.py` daemon after WebUI or Telegram approval. `live` defaults to draft-only; `--auto-send` explicitly enables Enter. Verify exact recipient and the MAS message snapshot before and after filling. Changed context must reject the action as Out-date and request a targeted refresh.
 - You must never write MAS LLM evaluation logic that synchronously attempts to type out the draft in the UI before a human has approved the action.
 
 ### 10.4 Page ID Configuration

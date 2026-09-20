@@ -68,7 +68,7 @@ def run_fetch_qa(page_id: str, fetch_started_at: datetime, page, conn, logger) -
             "duration_s": time.time() - start_ts,
             "qa_status": "failed"
         }
-        _save_and_alert(page_id, res, logger, f"QA logic crashed: {e}")
+        _save_and_alert(page_id, res, logger, f"QA logic crashed: {e}", conn)
         return res
 
 def _qa_logic(page_id: str, fetch_started_at: datetime, page, conn, logger) -> dict:
@@ -236,7 +236,7 @@ def _qa_logic(page_id: str, fetch_started_at: datetime, page, conn, logger) -> d
     }
     
     if qa_status in ("failed", "timeout"):
-        _save_and_alert(page_id, res, logger, "Hard fail(s) detected in Fetch QA.")
+        _save_and_alert(page_id, res, logger, "Hard fail(s) detected in Fetch QA.", conn)
     else:
         _save_only(page_id, res, logger)
         
@@ -270,7 +270,7 @@ def _save_only(page_id: str, res: dict, logger):
     except Exception as e:
         pass
 
-def _save_and_alert(page_id: str, res: dict, logger, reason: str):
+def _save_and_alert(page_id: str, res: dict, logger, reason: str, conn):
     _save_only(page_id, res, logger)
     report_path = res.get("qa_report_path", "")
     
@@ -285,11 +285,11 @@ def _save_and_alert(page_id: str, res: dict, logger, reason: str):
             diff_lines.append(f"  DB:  {q['db_raw']}")
             
     try:
-        db.execute(
+        conn.execute(
             "INSERT INTO telegram_hitl_queue (route, thread_id, telegram_message_id, proposed_text, payload_json, status, created_at, updated_at) "
             "VALUES (?, ?, 'qa', ?, ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             ("FETCH-QA", page_id, "\n".join(diff_lines[:10]), json.dumps({"report": report_path}))
         )
-        db.commit()
+        conn.commit()
     except Exception as e:
         logger.error(f"Failed to send Telegram alert for Fetch QA: {e}")

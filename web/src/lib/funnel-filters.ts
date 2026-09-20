@@ -36,8 +36,16 @@ export function dateRangeLabel(dateRange: DateRange) {
  * Client-safe chronological parser that converts UI timestamps (e.g., '10:38 PM',
  * 'Yesterday', 'Mar 29, 2026, 2:51 PM', 'Sun 4:11 PM') or ISO strings into epoch ms.
  */
-export function parseRealDate(ts?: string | null): number {
+export function parseRealDate(ts?: string | number | Date | null): number {
   if (!ts) return 0;
+  if (ts instanceof Date) {
+    const timestamp = ts.getTime();
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+  }
+  if (typeof ts === 'number') {
+    return Number.isFinite(ts) && ts > 0 ? ts : 0;
+  }
+  if (typeof ts !== 'string') return 0;
   const now = new Date();
 
   // Clean string

@@ -8,7 +8,7 @@ export async function GET(request: NextRequest) {
     const city = searchParams.get('city') || undefined;
     const startDate = searchParams.get('startDate') || undefined;
     const endDate = searchParams.get('endDate') || undefined;
-    const graphData = getGraphData({ city, startDate, endDate });
+    const graphData = await getGraphData({ city, startDate, endDate });
     return NextResponse.json(graphData);
   } catch (error) {
     console.error('Graph API error:', error);

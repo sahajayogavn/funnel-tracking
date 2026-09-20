@@ -267,14 +267,14 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn,
 
 # code:inbox-parallel-fetch-001:cli
 def _clamp_workers(workers: int, log=None) -> int:
-    """Clamp --workers to [1, 8] (design doc §6: worker cap)."""
+    """Clamp --workers to [1, 4]: one orchestrator plus at most three workers."""
     log = log or logger
     if workers < 1:
         log.warning(f"--workers {workers} is below the minimum; clamping to 1.")
         return 1
-    if workers > 8:
-        log.warning(f"--workers {workers} exceeds the maximum; clamping to 8.")
-        return 8
+    if workers > 4:
+        log.warning(f"--workers {workers} exceeds the maximum; clamping to 4.")
+        return 4
     return workers
 
 
@@ -301,6 +301,7 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
     from fb_pipeline.session.l2_activity_lock import (
         ROLE_FETCH_CLI, ROLE_SCHEDULER_BROWSER, hold_activity, wait_until_idle,
     )
+    workers = _clamp_workers(workers)
     page_id = parse_page_id(page_input)
     kwargs = dict(show_browser=show_browser, force_refresh=force_refresh, max_threads=max_threads,
                   use_cdp=use_cdp, allow_early_exit=allow_early_exit,
@@ -555,7 +556,7 @@ def main():
     parser.add_argument("--no-early-exit", action="store_true", help="Disable the targeted early-exit algorithm, allowing deep retroactive UI scrolls.")
     parser.add_argument("--workers", type=int, default=10,
                         help="Concurrent workers for classify_city_llm (default: 10). For --cdp fetches, this is "
-                             "the number of tabs and is clamped to [1, 8].")
+                             "the total number of tabs and is clamped to [1, 4] (1 orchestrator + at most 3 worker tabs).")
     parser.add_argument("--skip-qa", action="store_true", help="Skip the QA check after fetching.")
     parser.add_argument("--classify-city", action="store_true",
                         help="After fetch_messages, run the LLM city/program pass on the threads this run "

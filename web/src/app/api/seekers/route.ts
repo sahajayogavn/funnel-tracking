@@ -10,17 +10,17 @@ export async function GET(request: Request) {
 
   try {
     if (action === 'list') {
-      const seekers = getAllSeekers();
+      const seekers = await getAllSeekers();
       return NextResponse.json({ seekers });
     }
 
     if (action === 'activity' && name) {
-      const activity = getSeekerActivity(name);
+      const activity = await getSeekerActivity(name);
       return NextResponse.json({ activity });
     }
 
     if (action === 'touchpoints' && name) {
-      const touchPoints = getSeekerTouchPoints(name);
+      const touchPoints = await getSeekerTouchPoints(name);
       return NextResponse.json({ touchPoints });
     }
 

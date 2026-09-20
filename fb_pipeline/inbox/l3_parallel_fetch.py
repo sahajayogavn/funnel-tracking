@@ -25,6 +25,7 @@ from fb_pipeline.browser.inbox.thread_worker import ThreadWorkerDeps, process_th
 from fb_pipeline.browser.l3_inbox import discover_threads
 from fb_pipeline.contracts.l1_inbox_tasks import ThreadResult, ThreadTask
 from fb_pipeline.contracts.l1_session import WORKER_TAB_ROLE_PREFIX
+from fb_pipeline.persistence.db import connect as connect_database
 
 try:  # pragma: no cover - exact import path depends on installed playwright
     from playwright._impl._errors import TargetClosedError
@@ -217,8 +218,13 @@ def _resolve_psid_hint(conn, page_id: str, thread_name: str) -> str:
 
 
 def _default_get_db_connection(memory_dir):
-    from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
-    return get_db_connection(memory_dir)
+    """Open a worker connection without rerunning schema migrations.
+
+    The orchestrator has already opened and initialized this database before
+    it starts the pool.  Running DDL from every worker races on SQLite's
+    exclusive schema lock and can terminate otherwise healthy workers.
+    """
+    return connect_database(memory_dir, initialize=False)
 
 
 def _default_session_factory(playwright, page_id: str, inbox_url: str, worker_index: int):
@@ -649,6 +655,15 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
         page.on("close", _on_orchestrator_close)
     except Exception:
         pass
+
+    # The caller's orchestrator connection is also used by Stage 1 to resolve
+    # PSID hints.  On PostgreSQL every such read lives in a transaction.  If a
+    # previous setup write is still pending, leaving that transaction open
+    # while workers begin their per-thread UPSERTs can make the entire pool
+    # wait on its transaction ID.  Establish a clean boundary before any
+    # background writer is started.
+    conn.commit()
+
     for i in range(1, workers):
         th = threading.Thread(
             target=loop_fn,

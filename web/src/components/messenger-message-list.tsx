@@ -15,6 +15,8 @@ export interface MessengerMessage {
   recordedAt?: string | null;
   /** True for Page/agent messages, which Messenger places on the right. */
   outgoing?: boolean;
+  /** Confirmed MAS proposal origin, supplied by a caller's data query. */
+  masProposed?: boolean;
   /** Evidence for a reply quote; it is never folded into the message body. */
   quotedSender?: string | null;
   quotedText?: string | null;
@@ -33,6 +35,8 @@ interface MessengerMessageListProps {
   compact?: boolean;
   showDateSeparators?: boolean;
   emptyState?: ReactNode;
+  /** Origin metadata is opt-in so it can remain limited to Recent Messages. */
+  showMasOrigin?: boolean;
 }
 
 const MONTHS: Record<string, string> = {
@@ -97,6 +101,7 @@ export function MessengerMessageList({
   compact = false,
   showDateSeparators = true,
   emptyState,
+  showMasOrigin = false,
 }: MessengerMessageListProps) {
   if (!messages.length) return emptyState ? <>{emptyState}</> : null;
 
@@ -159,7 +164,12 @@ export function MessengerMessageList({
                   ))}
                 </div>
               )}
-              {metaLabel && <time className="messenger-message-time">{metaLabel}</time>}
+              {metaLabel && <time className="messenger-message-time">
+                {showMasOrigin && message.masProposed && (
+                  <span className="messenger-message-mas-origin" title="Tin nhắn được MAS đề nghị" aria-label="Tin nhắn được MAS đề nghị">🤖</span>
+                )}
+                {metaLabel}
+              </time>}
             </article>
           </div>
         );

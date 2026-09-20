@@ -126,6 +126,23 @@ def test_auto_send_requires_new_page_message_evidence(browser, monkeypatch):
     box.press.assert_called_once_with("Enter")
 
 
+def test_auto_send_records_mas_message_provenance(database, browser, monkeypatch):
+    page, box, content = browser
+    proposal = item()
+    proposal["payload"]["source"] = "inbox_mas"
+    sent = {"sender": "Page", "text": proposal["action_text"], "source_id": "fb-auto-sent"}
+
+    def press(_):
+        content[0] = ""
+        monkeypatch.setattr(guard, "read_live_messages", lambda *_: MESSAGES + [sent])
+
+    box.press.side_effect = press
+    assert guard.prepare_draft(page, proposal, auto_send=True) == "sent"
+    with database() as db:
+        row = db.execute("SELECT message_source_id, send_mode FROM mas_message_provenance").fetchone()
+    assert tuple(row) == ("fb-auto-sent", "auto_send")
+
+
 def test_enter_without_delivery_confirmation_is_failure(browser):
     page, box, _ = browser
     with pytest.raises(RuntimeError, match="send_unconfirmed"):
@@ -379,6 +396,30 @@ def test_manual_enter_confirmed_on_next_poll(database, browser, monkeypatch):
         row = db.execute("SELECT * FROM action_queue WHERE id=?", (action,)).fetchone()
     assert row["status"] == "executed" and row["executed_at"]
     box.press.assert_not_called()
+
+
+def test_manual_enter_records_mas_message_provenance(database, browser, monkeypatch):
+    page, _, _ = browser
+    action = enqueue()
+    with database() as db:
+        payload = json.loads(db.execute("SELECT payload_json FROM action_queue WHERE id=?", (action,)).fetchone()[0])
+        payload["source"] = "inbox_mas"
+        db.execute("UPDATE action_queue SET payload_json=? WHERE id=?", (json.dumps(payload), action))
+    queue.approve_action(action, "webui")
+    claimed = queue.claim_next_action("proactive_message", PAGE)
+    guard.set_delivery_result(claimed, "drafted")
+    bootstrap, _ = fake_session(monkeypatch, page)
+    connection = MagicMock()
+    connection.contexts = [MagicMock(pages=[page])]
+    page.evaluate.return_value = f"outbound:{action}"
+    monkeypatch.setattr(bootstrap, "connect_to_cdp_browser", lambda *_: connection)
+    monkeypatch.setattr(guard, "read_live_messages", lambda *_: MESSAGES + [{
+        "sender": "Page", "text": claimed["action_text"], "source_id": "fb-human-sent",
+    }])
+    guard.reconcile_drafts(PAGE)
+    with database() as db:
+        row = db.execute("SELECT message_source_id, send_mode FROM mas_message_provenance").fetchone()
+    assert tuple(row) == ("fb-human-sent", "human_enter")
 
 
 def test_draft_new_message_on_next_tick_rejected_and_cleared(database, browser, monkeypatch):

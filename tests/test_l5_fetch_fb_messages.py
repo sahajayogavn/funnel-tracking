@@ -185,6 +185,11 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         call_count = {"collect": 0, "fingerprint": 0, "scroll_info": 0, "sidebar_snapshot": 0}
 
         def evaluate_side_effect(script, args=None):
+            # ``extract_thread_messages`` now receives an observed-at value as
+            # its second argument.  It is a string too, so identify the
+            # parser's DOM script before the generic string-argument branch.
+            if "let processedBubbles = new Set()" in script:
+                return js_messages
             if "scrollIntoView" in script and "c.click()" in script:
                 return True
             if isinstance(args, dict) and args.get("threadSelector"):
@@ -213,8 +218,6 @@ class TestFetchMessagesHeadless(unittest.TestCase):
                 return {"count": len(js_messages), "scrollHeight": 500, "scrollTop": 0, "scrollableTag": "DIV"}
             if "scrollTop" in script and "dispatchEvent" in script:
                 return None
-            if "Message list container" in script and "x1y1aw1k" in script:
-                return js_messages
             elif "Xem bài viết" in script:
                 return ad_context
             elif "ad_id" in script and "innerText" in script:

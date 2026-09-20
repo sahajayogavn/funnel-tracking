@@ -6,10 +6,12 @@ If a user's phone number was previously extracted from an Admin/Page message,
 it will be set back to NULL if no Customer message contained a valid phone number.
 """
 
-import sqlite3
 import re
 import os
 import logging
+
+from fb_pipeline.persistence.db import using_postgres
+from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(PROJECT_ROOT, "memory", "agent_memory", "frankensqlite.db")
@@ -18,11 +20,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("fix_phones")
 
 def fix_database_phones():
-    if not os.path.exists(DB_PATH):
+    if not using_postgres() and not os.path.exists(DB_PATH):
         logger.error(f"Database not found at {DB_PATH}")
         return
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection(os.path.dirname(DB_PATH))
     cursor = conn.cursor()
 
     # Get all users who currently have a phone number assigned

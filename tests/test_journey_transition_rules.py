@@ -63,13 +63,22 @@ def test_journey_transitions_engine_definitions():
     assert "toStage" in content
     assert "export function normalizeJourneyStage" in content
 
-def test_journey_page_and_flow_normalize_stages():
+def test_journey_redirects_to_stats_and_flow_normalizes_stages():
     page_file = ROOT_DIR / "web" / "src" / "app" / "journey" / "page.tsx"
     flow_file = ROOT_DIR / "web" / "src" / "components" / "journey-flow.tsx"
     
     page_content = page_file.read_text(encoding="utf-8")
     flow_content = flow_file.read_text(encoding="utf-8")
     
-    assert "normalizeJourneyStage" in page_content, "JourneyPage must normalize leadStage to canonical JourneyStage"
+    assert "redirect('/stats#journey')" in page_content
     assert "normalizeJourneyStage" in flow_content, "JourneyFlow must normalize leadStage when aggregating stage counts"
 
+
+def test_journey_flow_applies_every_shared_funnel_filter():
+    flow_file = ROOT_DIR / "web" / "src" / "components" / "journey-flow.tsx"
+    content = flow_file.read_text(encoding="utf-8")
+
+    # Journey uses the persisted FunnelFilterBar state, so every dimension must
+    # constrain its node counts—not just city and date range.
+    assert "filterState.programCode !== 'all' && s.programCode !== filterState.programCode" in content
+    assert "availablePrograms={PROGRAMS}" in content

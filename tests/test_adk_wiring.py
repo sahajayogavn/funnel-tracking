@@ -284,6 +284,52 @@ def test_care_runtime_sends_full_snapshot_to_qa_and_repair_to_next_composer(monk
     assert result["reply_text"] == "Mời bạn ghé lớp lúc 14h30 nhé."
 
 
+@pytest.mark.parametrize("stop_at", ["ConversationAnalyst", "ReplyQAReviewer"])
+def test_care_no_send_stops_without_outward_draft(monkeypatch, stop_at):
+    from tools import l5_inbox_mas_pipeline as pipeline
+    from adk_agents import agent
+
+    service = DummySessionService()
+    calls = []
+    reason = "Đã nhắc lịch hôm qua; hôm nay không phải lúc nhắc lại."
+
+    def fake_run(runner, **kwargs):
+        name = runner.kwargs["agent"].name
+        calls.append(name)
+        key = {"ConversationAnalyst": "conversation_analysis",
+               "KnowledgeLibrarian": "knowledge_brief",
+               "ClassReminderComposer": "draft_reply",
+               "ReplyQAReviewer": "qa_verdict"}[name]
+        service._session.state[key] = "NO_SEND: " + reason if name == stop_at else {
+            "ConversationAnalyst": "Proceed with the selected reminder.",
+            "KnowledgeLibrarian": "Sunday 20/09 14h30.",
+            "ClassReminderComposer": "Chào bạn, chúng ta có hẹn chiều mai nhé.",
+            "ReplyQAReviewer": "PASS",
+        }[name]
+        return []
+
+    with patch("google.adk.sessions.InMemorySessionService", return_value=service), \
+         patch("google.adk.runners.Runner", side_effect=lambda **kw: DummyRunner(**kw)), \
+         patch("google.genai.types", DummyTypes):
+        monkeypatch.setattr(pipeline, "run_runner", fake_run)
+        result = pipeline._run_adk_care_pipeline([
+            {"sender": "Page", "content": "Chúng ta có hẹn 14h30 Chủ Nhật nhé.",
+             "message_at": "2026-09-18 13:39:00"},
+            {"sender": "Customer", "content": "Dạ. Em cảm ơn", "message_at": "2026-09-18 13:40:00"},
+        ], {"name": "Yến"}, "class_reminder", {
+            "verified_session": {"session_date": "2026-09-20"},
+            "operator_instruction": "Soạn tin nhắc lịch phù hợp.",
+        }, now_context="19/09/2026 13:11 Asia/Ho_Chi_Minh")
+    assert calls[-1] == stop_at
+    assert len(calls) == (1 if stop_at == "ConversationAnalyst" else 4)
+    assert result["reply_text"] == result["draft_reply"] == ""
+    assert result["escalation_reason"] == ""
+    assert result["no_send_reason"] == reason
+    assert "NO_SEND:" in agent.conversation_analyst.instruction
+    assert "NO_SEND:" in agent.reply_qa_reviewer.instruction
+    assert "repeat_explicitly_requested" in agent.conversation_analyst.instruction
+
+
 def test_applied_seeker_update_refreshes_the_active_session_profile(monkeypatch):
     from adk_agents.tools import l5_orchestrator_tools as tools
 
@@ -342,3 +388,115 @@ class TestSanitizeReply:
         assert not _is_safe_final_reply("Mình sẽ báo m sau nhé.")
         assert not _is_safe_final_reply("Ok, mình sẽ kiểm tra lịch lớp.")
         assert _is_safe_final_reply("Dạ bạn nhé, mình sẽ kiểm tra lịch lớp và phản hồi bạn sớm.")
+
+
+def test_soul_is_delivered_verbatim_to_all_composers_and_qa():
+    from pathlib import Path
+    from adk_agents import agent
+
+    soul = (Path(PROJECT_ROOT) / "memory/SOUL.md").read_text().strip()
+    for role in (agent.responder, agent.reply_composer, agent.class_reminder_composer,
+                 agent.warmup_composer, agent.event_advertiser, agent.reply_qa_reviewer):
+        assert soul in role.instruction
+
+
+@pytest.mark.parametrize("text,blocked", [
+    ("Chào bạn Vân, chúng ta có hẹn lớp thiền vào 14h30 chiều mai nhé.", False),
+    ("Hẹn gặp lại bạn chiều mai nhé.", False),
+    ("Lớp học hoàn toàn miễn phí nên bạn chỉ cần mặc trang phục thoải mái là được ạ.", True),
+    ("Rất mong và hẹn gặp bạn chiều mai nhé!", True),
+    ("Mình nhắc bạn lịch lớp thiền chiều mai nhé.", True),
+    ("Đừng quên đến lớp nhé.", True),
+    ("RẤT   MONG gặp bạn.", True),
+    ("Dạ lớp học miễn phí bạn nhé.", False),
+    ("Theo hướng dẫn của lớp, bạn có thể mặc trang phục thoải mái.", False),
+])
+def test_reminder_wording_guard(text, blocked):
+    from tools.l5_inbox_mas_pipeline import _reminder_wording_correction
+
+    assert bool(_reminder_wording_correction("class_reminder", text)) is blocked
+    assert _reminder_wording_correction("reply", text) == ""
+
+
+@pytest.mark.parametrize("repairs_succeed", [True, False])
+def test_trace30_false_qa_pass_repairs_or_returns_no_reply(monkeypatch, repairs_succeed):
+    from tools import l5_inbox_mas_pipeline as pipeline
+
+    service = DummySessionService()
+    prompts = []
+    drafts = []
+    bad = "Lớp học hoàn toàn miễn phí nên bạn chỉ cần mặc trang phục thoải mái là được ạ. Rất mong và hẹn gặp bạn chiều mai nhé!"
+    good = "Chào bạn Vân, chúng ta có hẹn lớp thiền vào 14h30 chiều mai, Chủ Nhật 20/09, tại tầng 2, số 40 Vương Thừa Vũ, Hà Nội nhé."
+
+    def run(runner, **kwargs):
+        role = runner.kwargs["agent"]
+        prompt = kwargs["new_message"].parts[0].text
+        state = service._session.state
+        if role.name == "ConversationAnalyst":
+            state["conversation_analysis"] = "Registered for selected class; reminder."
+        elif role.name == "KnowledgeLibrarian":
+            state["knowledge_brief"] = "20/09/2026 14:30, tầng 2, 40 Vương Thừa Vũ."
+        elif role.name == "ClassReminderComposer":
+            prompts.append(prompt)
+            state["draft_reply"] = good if drafts and repairs_succeed else bad
+            drafts.append(state["draft_reply"])
+        elif role.name == "ReplyQAReviewer":
+            assert state["draft_reply"] in prompt
+            state["qa_verdict"] = "PASS"  # Reproduce the actual false PASS.
+        return []
+
+    with patch("google.adk.sessions.InMemorySessionService", return_value=service), \
+         patch("google.adk.runners.Runner", side_effect=lambda **kw: DummyRunner(**kw)), \
+         patch("google.genai.types", DummyTypes):
+        monkeypatch.setattr(pipeline, "run_runner", run)
+        result = pipeline._run_adk_care_pipeline(
+            [{"sender": "Customer", "content": "Mình đăng ký lớp Vương Thừa Vũ", "message_at": "2026-09-15 08:20:00"}],
+            {"name": "Vân", "thread_id": "trace30-fixture"}, "class_reminder",
+            {"verified_session": {"session_date": "2026-09-20", "time_label": "14h30", "address": "40 Vương Thừa Vũ"}},
+            now_context="19/09/2026 09:05 Asia/Ho_Chi_Minh",
+        )
+    assert len(drafts) == (2 if repairs_succeed else 3)
+    assert "Mandatory QA correction" in prompts[1]
+    assert "causal sentence" in prompts[1]
+    assert result["wording_repairs"]
+    assert result["reply_text"] == (good if repairs_succeed else "")
+    if repairs_succeed:
+        assert result["qa_verdict"] == "PASS"
+    else:
+        assert result["qa_verdict"].startswith("REPAIR:")
+
+
+def test_real_adk_requests_include_soul_without_librarian_summary():
+    import asyncio
+    from google.adk.runners import Runner
+    from google.adk.sessions import InMemorySessionService
+    from google.adk.models.llm_response import LlmResponse
+    from google.genai import types
+    from adk_agents.agent import class_reminder_composer, reply_qa_reviewer
+
+    captured = []
+
+    def intercept(callback_context, llm_request):
+        captured.append(llm_request.config.system_instruction)
+        return LlmResponse(content=types.Content(role="model", parts=[types.Part(text="PASS")]))
+
+    async def run():
+        for role in (class_reminder_composer, reply_qa_reviewer):
+            isolated = role.model_copy(update={
+                "before_model_callback": intercept, "after_model_callback": None,
+                "before_tool_callback": None, "after_tool_callback": None,
+                "on_tool_error_callback": None,
+            })
+            service = InMemorySessionService()
+            session = await service.create_session(app_name="voice_test", user_id="test", state={})
+            runner = Runner(agent=isolated, app_name="voice_test", session_service=service)
+            async for _ in runner.run_async(user_id="test", session_id=session.id,
+                    new_message=types.Content(role="user", parts=[types.Part(text="Review appointment.")])):
+                pass
+
+    asyncio.run(run())
+    assert len(captured) == 2
+    for instruction in captured:
+        assert "Gợi lại lịch hẹn lớp thiền" in instruction
+        assert "chúng ta có hẹn" in instruction
+        assert "quan hệ nhân quả" in instruction

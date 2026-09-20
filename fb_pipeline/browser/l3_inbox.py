@@ -340,6 +340,14 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
         for task in round_tasks:
             on_task(task)
 
+        # Stage 1 may have updated ``inbox_sort_index`` for cache-hit rows.
+        # In parallel mode those same rows can be UPSERTed by Stage 2 as soon
+        # as they are dispatched.  Holding the Stage-1 transaction until the
+        # entire 180-day sidebar scan completes makes every worker wait on
+        # that transaction ID.  Commit each dispatched batch so its order
+        # updates remain durable without serializing all detail persistence.
+        conn.commit()
+
         if reached_date_limit:
             break
         if new_in_round == 0:

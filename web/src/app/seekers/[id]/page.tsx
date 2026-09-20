@@ -11,7 +11,7 @@ export default async function SeekerDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const detail = getSeekerById(decodeURIComponent(id));
+  const detail = await getSeekerById(decodeURIComponent(id));
 
   if (!detail) {
     return (

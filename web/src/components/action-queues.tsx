@@ -133,6 +133,47 @@ const QUEUES = [
   ['attendance_check', '6. Điểm danh sau buổi học', '📋'],
 ] as const;
 
+const QUEUE_META = Object.fromEntries(QUEUES.map(([key, title, icon]) => [key, { title, icon }])) as Record<string, { title: string; icon: string }>;
+const STATUS_META: Record<string, { label: string; tone: string }> = {
+  pending: { label: 'Chờ duyệt', tone: 'pending' },
+  approved: { label: 'Approved', tone: 'approved' },
+  executing: { label: 'Approved', tone: 'approved' },
+  executed: { label: 'Processed', tone: 'processed' },
+  failed: { label: 'Processed', tone: 'processed' },
+  rejected: { label: 'Rejected', tone: 'rejected' },
+  deleted: { label: 'Deleted', tone: 'deleted' },
+};
+
+function queueMeta(queueType: unknown): { title: string; icon: string } {
+  const key = typeof queueType === 'string' ? queueType : '';
+  // `hasOwn` avoids inherited object properties such as `constructor` being
+  // treated as queue metadata when a legacy or malformed row reaches the UI.
+  if (Object.hasOwn(QUEUE_META, key)) return QUEUE_META[key];
+  return { title: key || 'Không xác định', icon: '⚡' };
+}
+
+function displayStatus(status: string, payloadJson?: string | null) {
+  const delivery = parsePayload(payloadJson).delivery_status;
+  if (status === 'rejected' && delivery === 'outdated') return { label: 'Out-date', tone: 'rejected' };
+  if (status === 'executing' && delivery === 'drafted') return { label: 'Processed', tone: 'processed' };
+  return STATUS_META[status] || { label: status, tone: status };
+}
+
+function filterStatus(status: string, payloadJson?: string | null) {
+  const delivery = parsePayload(payloadJson).delivery_status;
+  if (status === 'executed' || status === 'failed' || (status === 'executing' && delivery === 'drafted')) return 'processed';
+  if (status === 'executing') return 'approved';
+  return status;
+}
+
+function formatQueueTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('vi-VN', {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+  }).format(date);
+}
+
 // Labels for queues whose "approve" is a human decision, not a Facebook send.
 const DECISION_LABELS: Record<string, { approve: string; reject: string; approvedNote: string }> = {
   session_proposal: { approve: 'Mở phiên nhắc', reject: 'Bỏ qua buổi này', approvedNote: 'Đã mở — MAS đang soạn nháp từng seeker' },
@@ -151,6 +192,10 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
   const [flashJobId, setFlashJobId] = useState<number | null>(null);
   const [selectedQueueItemIds, setSelectedQueueItemIds] = useState<Set<number>>(new Set());
   const selectionAnchorByQueueRef = useRef<Record<string, number>>({});
+  const [masTypeFilter, setMasTypeFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState<string[]>(['pending', 'approved', 'processed']);
+  const [sortBy, setSortBy] = useState<'createdAt' | 'targetName' | 'queueType' | 'status'>('createdAt');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
 
   // Seeker info & MAS reason preview / pinned state
   const [selectedItem, setSelectedItem] = useState<ActionQueueItem | null>(null);
@@ -293,16 +338,16 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
     .filter(item => selectedQueueItemIds.has(item.id) && item.targetType === 'thread' && item.targetId)
     .map(item => item.targetId as string);
 
-  const decide = async (id: number, decision: 'approve' | 'reject') => {
+  const decide = async (id: number, decision: 'approve' | 'reject' | 'reprocess') => {
     setError('');
     const response = await fetch(`/api/action-queue/${id}`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision }),
     });
     if (!response.ok) { setError('Không thể cập nhật quyết định. Vui lòng tải lại trang.'); return; }
     const result = await response.json();
-    setItems(current => current.map(item => item.id === id ? { ...item, status: result.status, approvalSource: 'webui' } : item));
+    setItems(current => current.map(item => item.id === id ? { ...item, status: result.status, approvalSource: result.approvalSource || 'webui' } : item));
     if (selectedItem?.id === id) {
-      setSelectedItem(current => current ? { ...current, status: result.status, approvalSource: 'webui' } : null);
+      setSelectedItem(current => current ? { ...current, status: result.status, approvalSource: result.approvalSource || 'webui' } : null);
     }
   };
 
@@ -317,7 +362,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
     }));
     const deletedIds = new Set(results.filter(result => result.ok).map(result => result.id));
     if (deletedIds.size) {
-      setItems(current => current.filter(item => !deletedIds.has(item.id)));
+      setItems(current => current.map(item => deletedIds.has(item.id) ? { ...item, status: 'deleted' } : item));
       setSelectedQueueItemIds(current => new Set([...current].filter(id => !deletedIds.has(id))));
       if (selectedItem && deletedIds.has(selectedItem.id)) handleCloseSidebar();
       setSuccess(`Đã xóa ${deletedIds.size} đề xuất khỏi hàng đợi.`);
@@ -425,6 +470,26 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
     setSidebarData(null);
   }, []);
 
+  const filteredItems = items
+    .filter(item => masTypeFilter === 'all' || item.queueType === masTypeFilter)
+    .filter(item => statusFilter.includes(filterStatus(item.status, item.payloadJson)))
+    .sort((a, b) => {
+      const direction = sortDirection === 'asc' ? 1 : -1;
+      if (sortBy === 'targetName') return direction * (a.targetName || '').localeCompare(b.targetName || '', 'vi');
+      if (sortBy === 'queueType') return direction * (QUEUE_META[a.queueType]?.title || '').localeCompare(QUEUE_META[b.queueType]?.title || '', 'vi');
+      if (sortBy === 'status') return direction * displayStatus(a.status).label.localeCompare(displayStatus(b.status).label, 'vi');
+      return direction * (new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    });
+
+  const toggleStatusFilter = (status: string) => {
+    setStatusFilter(current => current.includes(status) ? current.filter(value => value !== status) : [...current, status]);
+  };
+
+  const toggleSort = (column: typeof sortBy) => {
+    if (sortBy === column) setSortDirection(direction => direction === 'asc' ? 'desc' : 'asc');
+    else { setSortBy(column); setSortDirection(column === 'createdAt' ? 'desc' : 'asc'); }
+  };
+
   return <>
     {/* Spinner keyframes are needed by inline status badges (approved/executing
         rows) even when no MasProgress panel is mounted to define them. */}
@@ -519,8 +584,69 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
 
     <div className="queue-notice">MAS chỉ tạo đề xuất. Mỗi mục chỉ được worker thực thi sau khi bạn bấm duyệt tại đây hoặc react 👍 trên Telegram. Thứ tự thực hiện là FIFO trong từng queue.</div>
     {error && <div className="queue-error">{error}</div>}
+    <div className="queue-two-column">
+    <section className="queue-table-shell" aria-label="Danh sách action queue hợp nhất">
+      <div className="queue-table-toolbar">
+        <div className="queue-filter-group">
+          <span className="queue-filter-label">Loại MAS</span>
+          <select className="funnel-filter-select" value={masTypeFilter} onChange={event => setMasTypeFilter(event.target.value)} aria-label="Lọc theo loại MAS">
+            <option value="all">Tất cả loại</option>
+            {QUEUES.map(([key, title]) => <option key={key} value={key}>{title}</option>)}
+          </select>
+        </div>
+        <div className="queue-filter-group queue-status-filters">
+          <span className="queue-filter-label">Trạng thái</span>
+          {(['pending', 'approved', 'processed', 'rejected', 'deleted'] as const).map(status => (
+            <label key={status} className={`queue-filter-chip ${statusFilter.includes(status) ? 'is-active' : ''}`}>
+              <input type="checkbox" checked={statusFilter.includes(status)} onChange={() => toggleStatusFilter(status)} />
+              {status === 'pending' ? 'Chờ duyệt' : status[0].toUpperCase() + status.slice(1)}
+            </label>
+          ))}
+        </div>
+        <div className="queue-filter-summary"><strong>{filteredItems.length}</strong> / {items.length} mục</div>
+      </div>
+      <div className="queue-table-scroll" tabIndex={0} role="region" aria-label="Danh sách queue, cuộn ngang để xem thêm cột">
+        <table className="queue-table">
+          <colgroup><col className="queue-col-check" /><col className="queue-col-number" /><col className="queue-col-seeker" /><col className="queue-col-content" /><col className="queue-col-time" /><col className="queue-col-type" /><col className="queue-col-status" /></colgroup>
+          <thead><tr>
+            <th aria-label="Chọn" />
+            <th>#</th>
+            <th><button className="queue-sort-button" onClick={() => toggleSort('targetName')}>Seeker Name <span>{sortBy === 'targetName' ? (sortDirection === 'asc' ? '↑' : '↓') : '↕'}</span></button></th>
+            <th>Nội dung</th>
+            <th><button className="queue-sort-button" onClick={() => toggleSort('createdAt')}>Time <span>{sortBy === 'createdAt' ? (sortDirection === 'asc' ? '↑' : '↓') : '↕'}</span></button></th>
+            <th><button className="queue-sort-button" onClick={() => toggleSort('queueType')}>Loại MAS <span>{sortBy === 'queueType' ? (sortDirection === 'asc' ? '↑' : '↓') : '↕'}</span></button></th>
+            <th><button className="queue-sort-button" onClick={() => toggleSort('status')}>Trạng thái <span>{sortBy === 'status' ? (sortDirection === 'asc' ? '↑' : '↓') : '↕'}</span></button></th>
+          </tr></thead>
+          <tbody>
+            {filteredItems.length === 0 ? <tr><td colSpan={7} className="queue-table-empty">Không có mục phù hợp với bộ lọc.</td></tr> : filteredItems.map((item, index) => {
+              const selected = selectedQueueItemIds.has(item.id);
+              const selectedRow = selectedItem?.id === item.id;
+              const type = queueMeta(item.queueType);
+              const status = displayStatus(item.status, item.payloadJson);
+              const canApprove = item.status === 'pending' || item.status === 'rejected' || item.status === 'deleted';
+              const canReprocess = filterStatus(item.status, item.payloadJson) === 'processed';
+              const decisionLabels = DECISION_LABELS[item.queueType];
+              return <tr key={item.id} className={`${selectedRow ? 'is-focused' : ''} ${selected ? 'is-checked' : ''}`} onClick={() => selectItem(item, false)}>
+                <td><input type="checkbox" checked={selected} onChange={() => setSelectedQueueItemIds(current => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; })} onClick={event => event.stopPropagation()} aria-label={`Chọn mục #${item.id}`} /></td>
+                <td className="queue-table-id">{index + 1}</td>
+                <td><div className="queue-seeker-cell"><Link href={queueSeekerDetailUrl(item)} onClick={event => event.stopPropagation()}>{item.targetName || item.targetType}</Link><button type="button" className="queue-icon-button" onClick={event => { event.stopPropagation(); handleTogglePin(item); }} title="Xem nhanh seeker" aria-label="Xem nhanh seeker">ⓘ</button></div></td>
+                <td className="queue-content-cell"><div>{item.reactionType ? `React: ${item.reactionType}` : item.actionText || '—'}</div>{item.errorText && <small className="queue-failure">{item.errorText}</small>}</td>
+                <td className="queue-time-cell">{formatQueueTime(item.createdAt)}</td>
+                <td><span className={`queue-type-icon queue-type-icon--${item.queueType}`} title={type.title.replace(/^\d+\.\s*/, '')} aria-label={type.title.replace(/^\d+\.\s*/, '')}>{type.icon}</span></td>
+                <td><div className="queue-status-cell"><span className={`queue-status-badge ${status.tone}`} title={item.errorText || undefined}>{status.label}</span><div className="queue-row-actions">
+                  {canApprove && <button type="button" className="queue-icon-action queue-icon-action--approve" onClick={event => { event.stopPropagation(); void decide(item.id, 'approve'); }} title={item.status === 'pending' ? (decisionLabels?.approve || 'Approve') : 'Approve lại'} aria-label={item.status === 'pending' ? (decisionLabels?.approve || 'Approve') : 'Approve lại'}>✓</button>}
+                  {canReprocess && <button type="button" className="queue-icon-action queue-icon-action--reprocess" onClick={event => { event.stopPropagation(); void decide(item.id, 'reprocess'); }} title="Re-process again" aria-label="Re-process again">↻</button>}
+                  {item.status === 'pending' && <button type="button" className="queue-icon-action queue-icon-action--reject" onClick={event => { event.stopPropagation(); void decide(item.id, 'reject'); }} title={decisionLabels?.reject || 'Từ chối'} aria-label={decisionLabels?.reject || 'Từ chối'}>×</button>}
+                  {(item.status === 'pending' || item.status === 'approved') && <button type="button" className="queue-icon-action queue-icon-action--delete" onClick={event => { event.stopPropagation(); void deleteQueueItems([item.id]); }} title="Xóa" aria-label="Xóa">⌫</button>}
+                </div></div></td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
     <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start', position: 'relative' }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ flex: 1, minWidth: 0, display: 'none' }}>
         <div className="queue-grid">
           {QUEUES.map(([key, title, icon]) => {
             const queueItems = items.filter(item => item.queueType === key);
@@ -588,7 +714,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
                   >
                     <div className="queue-item-meta">
                       <span>#{item.id} · vị trí {index + 1}</span>
-                      <span className={`queue-status ${item.status}`}>{item.status}</span>
+                      <span className={`queue-status ${item.status}`}>{displayStatus(item.status, item.payloadJson).label}</span>
                     </div>
                     <div className="queue-item-title-row">
                       <strong
@@ -647,6 +773,9 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
                           );
                         }
                         if (item.status === 'executing') {
+                          if (parsePayload(item.payloadJson).delivery_status === 'drafted') {
+                            return <span>Đã soạn trên Facebook — chờ bạn nhấn Enter</span>;
+                          }
                           return (
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 600, color: '#818cf8', whiteSpace: 'nowrap' }}>
                               <span className="mas-spinner" />
@@ -814,7 +943,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
           );
         })() : null}
         emptyState={<SeekerSidebarEmptyState />}
-        className="queue-seeker-sidebar"
+        className={`queue-seeker-sidebar${selectedItem ? ' is-open' : ''}`}
         style={{
           maxHeight: 'calc(100vh - 140px)',
           position: 'sticky',
@@ -825,6 +954,7 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
           zIndex: 40,
         }}
       />
+    </div>
     </div>
   </>;
 }

@@ -201,10 +201,10 @@ def _safe_insert(kwargs: dict[str, Any]) -> Optional[int]:
         columns = ", ".join(kwargs.keys())
         placeholders = ", ".join(["?"] * len(kwargs))
         cursor = conn.execute(
-            f"INSERT INTO llm_calls ({columns}) VALUES ({placeholders})",
+            f"INSERT INTO llm_calls ({columns}) VALUES ({placeholders}) RETURNING id",
             tuple(kwargs.values()),
         )
-        call_id = cursor.lastrowid
+        call_id = cursor.fetchone()[0]
         conn.commit()
         conn.close()
         return call_id

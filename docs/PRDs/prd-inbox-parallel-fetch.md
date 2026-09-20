@@ -17,7 +17,7 @@ until Stage 1 has scrolled to the end of the range.
 
 ## 2. Goal
 
-Add `--workers N` (default `5`) so that one orchestrator tab performs
+Add `--workers N` (default `4`) so that one orchestrator tab performs
 Stage 1 and streams discovered threads into a queue that `N-1` worker tabs
 consume immediately, each extracting thread details in parallel.
 
@@ -25,7 +25,7 @@ consume immediately, each extracting thread details in parallel.
 
 | ID | Requirement | Priority |
 | --- | --- | --- |
-| `prd:inbox-parallel-fetch-001:cli` | `--workers N` on `fetch_messages`; default 5; clamped to 1–8; `N` = total tabs (1 orchestrator + `N-1` workers). | Must |
+| `prd:inbox-parallel-fetch-001:cli` | `--workers N` on `fetch_messages`; default 4; clamped to 1–4; `N` = total tabs (1 orchestrator + at most 3 worker tabs). | Must |
 | `prd:inbox-parallel-fetch-001:legacy-mode` | `--workers 1` runs the existing sequential path with no threads, no extra tabs, and identical output/stats keys. | Must |
 | `prd:inbox-parallel-fetch-001:stream-dispatch` | The orchestrator enqueues threads as soon as each visible-cards round is parsed; it never waits for Stage 1 to reach the end of the time range before workers start. | Must |
 | `prd:inbox-parallel-fetch-001:worker-isolation` | Each worker owns its own Chrome tab (role `scan_inbox_worker:<i>`), Playwright instance and SQLite connection; no Playwright or DB handle is shared across threads. | Must |
@@ -36,7 +36,7 @@ consume immediately, each extracting thread details in parallel.
 | `prd:inbox-parallel-fetch-001:read-only` | Workers never type, focus the composer, or call `send_reply_via_cdp`; fetching stays read-only (CLAUDE.md §10.3). | Must |
 | `prd:inbox-parallel-fetch-001:orchestrator-joins` | After Stage 1 ends the orchestrator processes tasks on its own tab until the queue is empty. | Should |
 | `prd:inbox-parallel-fetch-001:observability` | Stats add `workers`, `tasks_dispatched`, `tasks_abandoned`, `locate_methods`, `stage1_ms`, `stage2_ms`, `per_worker`; every worker log line carries `[worker:i]`; tasks/results are logged at `DEBUG` as `logs:inbox-parallel-fetch-001:*`. | Should |
-| `prd:inbox-parallel-fetch-001:speedup` | On a 90d `--refresh` with `--workers 5`, Stage 2 wall time ≤ 1/3 of the `--workers 1` baseline. | Should |
+| `prd:inbox-parallel-fetch-001:speedup` | On a 90d `--refresh` with `--workers 4`, Stage 2 wall time ≤ 1/3 of the `--workers 1` baseline. | Should |
 | `prd:inbox-parallel-fetch-001:post-scrape` | LLM city classification and `record_fetch` run exactly once after all workers have finished, never after an empty scrape. | Must |
 
 ## 4. Out of scope
@@ -50,7 +50,7 @@ consume immediately, each extracting thread details in parallel.
 
 1. `pytest tests/` green, including new `tests/test_l3_inbox_worker.py` and `tests/test_l3_parallel_fetch.py`.
 2. Hung Bui snapshot gate passes for `--workers 1` and `--workers 3` (two consecutive runs each, identical `tests/hungbui_test_output.json`).
-3. 7d live run: DB diff between `--workers 1` and `--workers 5` is empty except `last_synced_at`.
+3. 7d live run: DB diff between `--workers 1` and `--workers 4` is empty except `last_synced_at`.
 4. 90d live run: speed-up measured and recorded in `doc:inbox-fetch-pipeline-001` §1.
 
 ## 6. Traceability

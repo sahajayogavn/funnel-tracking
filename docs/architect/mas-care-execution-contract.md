@@ -6,6 +6,16 @@
 
 **Trạng thái:** contract đích, chưa xác nhận mọi nhánh runtime đã tuân thủ.
 
+**Thay đổi được operator phê duyệt 19/09/2026 — delivery:** Approval trực tiếp
+trên WebUI đủ để executor xử lý DM, không cần thêm Telegram HITL. `live` mặc
+định mở đúng thread và điền draft, người vận hành nhấn Enter; `--auto-send`
+cho phép executor nhấn Enter sau kiểm tra. Phải xác minh Page/PSID và tên trong
+panel hội thoại, đối chiếu messages với snapshot input của MAS, rồi kiểm tra
+lại sau khi điền. Context thay đổi → Out-date (`rejected`) và durable targeted
+fetch request. Draft/approval vẫn không phải bằng chứng đã gửi. Quyết định này
+thay thế các câu “mọi DM gửi tay”/“không approval nào thực thi gửi DM” bên dưới
+và trong strategy/audit cũ; không thay đổi các điều kiện chất lượng nội dung.
+
 Tách và chỉnh lý phần kiến trúc, dữ liệu và vận hành Telegram trước đây nằm
 trong [MAS Strategy](../../memory/mas_strategy.md). Policy chăm sóc nằm ở
 strategy; lộ trình khắc phục nằm ở [PRD §7](../PRDs/mas-time-aware-care-plan.md).

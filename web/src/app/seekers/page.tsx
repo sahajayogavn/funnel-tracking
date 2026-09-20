@@ -4,15 +4,15 @@ import { SeekersTable } from '@/components/seekers-table';
 
 export const dynamic = 'force-dynamic';
 
-export default function SeekersPage() {
-  const seekers = getAllSeekers();
+export default async function SeekersPage() {
+  const seekers = await getAllSeekers();
 
   return (
     <>
       <div className="page-header">
         <h1 className="page-title">👥 Seekers</h1>
         <p className="page-subtitle">
-          {seekers.length} seekers tracked across DM and Comment channels
+          {seekers.length} contacts từ DM và bình luận · Bao gồm tất cả giai đoạn hành trình
         </p>
       </div>
       <SeekersTable initialSeekers={seekers} />

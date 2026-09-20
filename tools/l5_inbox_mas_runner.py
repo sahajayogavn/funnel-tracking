@@ -44,6 +44,7 @@ from fb_pipeline.session.l2_bootstrap import attach_to_authorized_session
 
 from tools.l5_inbox_mas_context import setup_llm_env, load_knowledge_context
 from tools.l5_inbox_mas_pipeline import run_adk_pipeline, _sanitize_reply
+from tools.l5_delivery_guard import conversation_snapshot
 from tools.l5_inbox_mas_thread import process_single_thread
 # Setup logging
 os.makedirs(os.path.join(PROJECT_ROOT, 'logs'), exist_ok=True)
@@ -280,6 +281,7 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                 }
                 if payload.get("reaction_events"):
                     pipeline_kwargs["reaction_events"] = payload["reaction_events"]
+                delivery_snapshot = conversation_snapshot(payload["messages"])
                 llm_output = run_adk_pipeline(
                     payload["messages"], payload["seeker"], **pipeline_kwargs,
                 )
@@ -374,8 +376,10 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                     queue_type="reply_message", page_id=page_id, target_type="thread",
                     target_id=thread_id, target_name=thread_name, action_text=reply_text,
                     payload={
+                        "source": "inbox_mas",
                         "classification": classification,
                         "customer_message_timestamp": latest_customer_message_timestamp,
+                        "conversation_snapshot": delivery_snapshot,
                         "seeker": payload["seeker"],
                         "conversation_state": payload["conversation_state"],
                     },

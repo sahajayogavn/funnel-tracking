@@ -115,6 +115,43 @@ class TestDiscoverThreadsDispatch(unittest.TestCase):
         self.assertEqual(events[3], ("task", 2))
         self.assertEqual(events[4], ("scroll", 2))
 
+    def test_commits_dispatched_batch_before_scrolling(self):
+        """Stage-2 writers must not wait for Stage 1's full-range transaction."""
+        class _TrackingConnection:
+            def __init__(self, inner):
+                self.inner = inner
+                self.commits = 0
+
+            def commit(self):
+                self.commits += 1
+                return self.inner.commit()
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        raw_conn = sqlite3.connect(":memory:")
+        raw_conn.row_factory = sqlite3.Row
+        setup_database(raw_conn)
+        conn = _TrackingConnection(raw_conn)
+        page = _Page()
+
+        def fake_scroll(_page, _logger, scroll_round, timeout_ms=60000):
+            self.assertGreaterEqual(conn.commits, 1)
+            return {"elapsed_ms": 0}
+
+        with patch("fb_pipeline.browser.l3_inbox.wait_for_inbox_shell", return_value=""), \
+             patch("fb_pipeline.browser.l3_inbox.wait_for_initial_threads", return_value={"elapsed_ms": 0}), \
+             patch("fb_pipeline.browser.l3_inbox.extract_visible_threads", side_effect=[[_vt("User A", 0, "a1", 100)], []]), \
+             patch("fb_pipeline.browser.l3_inbox.scroll_sidebar_and_wait", side_effect=fake_scroll):
+            discover_threads(
+                page, "1548373332058326", "7d", max_threads=10, conn=conn, logger=_Logger(),
+                record_fetch=lambda *a, **k: None,
+                skip_navigation=True, force_refresh=True, allow_early_exit=True,
+                target_total_messages=None, on_task=lambda _task: None,
+            )
+
+        raw_conn.close()
+
 
 class TestProcessThreadTaskOutcomes(unittest.TestCase):
     """(b) process_thread_task status mapping for 0-message vs successful threads."""

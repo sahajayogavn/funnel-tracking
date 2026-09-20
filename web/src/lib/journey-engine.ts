@@ -106,6 +106,18 @@ export function normalizeJourneyStage(leadStage?: string | null): JourneyStage {
 }
 
 // ── Get available transitions from a stage ──
+/** Funnel totals: a contact in a later stage also counts toward each earlier step. */
+export function cumulativeJourneyCounts(counts: Record<string, number>): Record<string, number> {
+  const result: Record<string, number> = {};
+  let total = 0;
+  for (let i = JOURNEY_STAGES.length - 1; i >= 0; i--) {
+    const key = JOURNEY_STAGES[i].key;
+    total += counts[key] || 0;
+    result[key] = total;
+  }
+  return result;
+}
+
 export function getTransitionsFromStage(stage: JourneyStage): JourneyTransition[] {
   return JOURNEY_TRANSITIONS.filter(t => t.fromStage === stage);
 }

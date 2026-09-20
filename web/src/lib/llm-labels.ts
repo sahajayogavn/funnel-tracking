@@ -36,6 +36,7 @@ export function getLlmRouteInfo(route?: string | null, trigger?: string | null):
 }
 
 export function getLlmStatusLabel(status?: string | null): string {
+  if (status === 'skipped') return 'Không đề xuất';
   if (status === 'ok' || status === 'success') return 'OK';
   if (status === 'sanitized_empty') return 'Sanitized empty';
   if (status === 'empty') return 'Empty';

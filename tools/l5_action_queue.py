@@ -24,7 +24,7 @@ INTERNAL_QUEUE_TYPES = {
     "attendance_check",
 }
 QUEUE_TYPES = OUTBOUND_QUEUE_TYPES | INTERNAL_QUEUE_TYPES
-TERMINAL_STATUSES = {"executed", "rejected", "failed"}
+TERMINAL_STATUSES = {"executed", "rejected", "failed", "deleted"}
 
 
 # code:bug-action-queue-duplicate-proposal-001:dedup-guard
@@ -38,7 +38,7 @@ def active_proposal_status(target_id: Optional[str], queue_type: str, payload_ty
     try:
         query = (
             "SELECT status FROM action_queue WHERE target_id = ? AND queue_type = ? "
-            "AND status NOT IN ('executed', 'rejected', 'failed')"
+            "AND status NOT IN ('executed', 'rejected', 'failed', 'deleted')"
         )
         params: list[Any] = [target_id, queue_type]
         if payload_type:
@@ -106,7 +106,7 @@ def _insert_action(*, queue_type: str, page_id: str, target_type: str,
     insert_sql = """INSERT INTO action_queue
                     (queue_type, page_id, target_type, target_id, target_name,
                      action_text, reaction_type, payload_json, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')"""
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending') RETURNING id"""
     insert_params = (queue_type, page_id, target_type, target_id, target_name,
                      action_text, reaction_type, json.dumps(payload, ensure_ascii=False))
     conn = get_db_connection()
@@ -125,7 +125,10 @@ def _insert_action(*, queue_type: str, page_id: str, target_type: str,
                 "UPDATE action_queue SET status='rejected', approval_source=?, updated_at=datetime('now') WHERE id=?",
                 [(source, old_id) for old_id in superseded],
             )
-        new_id = int(conn.execute(insert_sql, insert_params).lastrowid)
+        inserted = conn.execute(insert_sql, insert_params).fetchone()
+        if not inserted:
+            raise RuntimeError("action_queue insert did not return an id")
+        new_id = int(inserted[0])
         if superseded:
             conn.executemany(
                 "UPDATE action_queue SET error_text=? WHERE id=?",
@@ -171,8 +174,11 @@ def reject_action(queue_id: int, source: str, reason: str = "") -> bool:
         conn.close()
 
 
-def claim_next_action(queue_type: str) -> Optional[dict[str, Any]]:
-    """Atomically claim the head of one queue, but never skip an undecided head."""
+def claim_next_action(queue_type: str, page_id: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """Claim once. Page-scoped delivery processes approvals without waiting on pending drafts.
+
+    Legacy internal callers without a Page retain strict decision FIFO.
+    """
     if queue_type not in QUEUE_TYPES:
         raise ValueError(f"Unknown queue type: {queue_type}")
     conn = get_db_connection()
@@ -180,8 +186,16 @@ def claim_next_action(queue_type: str) -> Optional[dict[str, Any]]:
         conn.execute("BEGIN IMMEDIATE")
         head = conn.execute(
             """SELECT * FROM action_queue WHERE queue_type=?
-               AND status NOT IN ('executed','rejected','failed') ORDER BY id LIMIT 1""",
-            (queue_type,),
+               AND status NOT IN ('executed','rejected','failed','deleted')
+               AND COALESCE(json_extract(payload_json, '$.delivery_status'), '') != 'drafted'
+               AND (? IS NULL OR page_id=?)
+               AND (? IS NULL OR status IN ('approved','executing'))
+               AND (? IS NULL OR NOT EXISTS (
+                   SELECT 1 FROM action_queue busy WHERE busy.id != action_queue.id
+                   AND busy.page_id=action_queue.page_id AND busy.target_id=action_queue.target_id
+                   AND busy.status='executing' AND busy.queue_type IN ('reply_message','proactive_message')
+               )) ORDER BY id LIMIT 1""",
+            (queue_type, page_id, page_id, page_id, page_id),
         ).fetchone()
         if not head or head["status"] != "approved":
             conn.commit()
@@ -201,7 +215,7 @@ def claim_next_action(queue_type: str) -> Optional[dict[str, Any]]:
         conn.close()
 
 
-def peek_next_approved(queue_type: str) -> Optional[dict[str, Any]]:
+def peek_next_approved(queue_type: str, page_id: Optional[str] = None) -> Optional[dict[str, Any]]:
     """Read-only preview of what `claim_next_action` would pick up next, without
     claiming it. Used by dry-run execution to log intent without ever touching
     the live queue or opening a real browser session."""
@@ -211,8 +225,16 @@ def peek_next_approved(queue_type: str) -> Optional[dict[str, Any]]:
     try:
         head = conn.execute(
             """SELECT * FROM action_queue WHERE queue_type=?
-               AND status NOT IN ('executed','rejected','failed') ORDER BY id LIMIT 1""",
-            (queue_type,),
+               AND status NOT IN ('executed','rejected','failed','deleted')
+               AND COALESCE(json_extract(payload_json, '$.delivery_status'), '') != 'drafted'
+               AND (? IS NULL OR page_id=?)
+               AND (? IS NULL OR status IN ('approved','executing'))
+               AND (? IS NULL OR NOT EXISTS (
+                   SELECT 1 FROM action_queue busy WHERE busy.id != action_queue.id
+                   AND busy.page_id=action_queue.page_id AND busy.target_id=action_queue.target_id
+                   AND busy.status='executing' AND busy.queue_type IN ('reply_message','proactive_message')
+               )) ORDER BY id LIMIT 1""",
+            (queue_type, page_id, page_id, page_id, page_id),
         ).fetchone()
         if not head or head["status"] != "approved":
             return None
@@ -226,8 +248,9 @@ def finish_action(queue_id: int, error: Optional[str] = None) -> None:
     try:
         status = "failed" if error else "executed"
         conn.execute(
-            """UPDATE action_queue SET status=?, error_text=?, executed_at=datetime('now'), updated_at=datetime('now')
-               WHERE id=? AND status='executing'""", (status, error, queue_id)
+            """UPDATE action_queue SET status=?, error_text=?,
+               executed_at=CASE WHEN ?='executed' THEN datetime('now') ELSE NULL END,
+               updated_at=datetime('now') WHERE id=? AND status='executing'""", (status, error, status, queue_id)
         )
         conn.commit()
     finally:

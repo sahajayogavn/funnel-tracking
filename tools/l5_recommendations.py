@@ -134,7 +134,8 @@ def generate_comment_recommendations(
     try:
         # Check if comments table exists
         has_comments = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='comments'"
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            ("comments",),
         ).fetchone()
         if not has_comments:
             return []
@@ -253,7 +254,9 @@ def generate_event_recommendations(
     try:
         # Check upcoming events
         event = None
-        has_events = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'").fetchone()
+        has_events = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", ("events",)
+        ).fetchone()
         if has_events:
             event = conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT 1").fetchone()
 

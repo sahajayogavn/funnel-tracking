@@ -150,6 +150,49 @@ class TestWorkerMain(unittest.TestCase):
 class TestRunParallelFetchDispatch(unittest.TestCase):
     """(1) tasks are dispatched to workers BEFORE Stage 1 finishes."""
 
+    def test_commits_orchestrator_connection_before_workers_and_stage1(self):
+        """A pending PostgreSQL transaction must not block parallel UPSERTs."""
+        class _TrackingConnection:
+            def __init__(self, inner):
+                self.inner = inner
+                self.commits = 0
+
+            def commit(self):
+                self.commits += 1
+                return self.inner.commit()
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        raw_conn = sqlite3.connect(":memory:")
+        raw_conn.row_factory = sqlite3.Row
+        setup_database(raw_conn)
+        conn = _TrackingConnection(raw_conn)
+
+        def fake_worker_loop(*args, **kwargs):
+            task_q = args[3]
+            while task_q.get() is not None:
+                pass
+
+        def fake_discover(page, page_id, time_range, max_threads, received_conn, logger, record_fetch,
+                          *, skip_navigation, force_refresh, allow_early_exit,
+                          target_total_messages, on_task):
+            self.assertIs(received_conn, conn)
+            self.assertGreaterEqual(conn.commits, 1)
+            return {"early_exit": False, "stats": _legacy_stats(), "existing_message_count": 0}
+
+        deps = ThreadWorkerDeps(extract_ad_id_labels=None, extract_user_info=None, detect_city=None)
+        with patch.object(parallel_fetch, "discover_threads", side_effect=fake_discover), \
+             patch.object(parallel_fetch, "reset_sidebar_to_top", return_value={"found": False}):
+            run_parallel_fetch(
+                _Page(), "123", "7d", 50, conn, _Logger(), lambda *a, **k: None, deps,
+                workers=2, inbox_url="inbox_url", skip_navigation=True, force_refresh=True,
+                allow_early_exit=True, target_total_messages=None, memory_dir=None,
+                worker_loop=fake_worker_loop, assignment_log_dir=None,
+            )
+        self.assertGreaterEqual(conn.commits, 1)
+        raw_conn.close()
+
     def test_dispatch_before_stage1_completes(self):
         received_event = threading.Event()
         release_event = threading.Event()
@@ -440,15 +483,15 @@ class TestCliWorkersOne(unittest.TestCase):
 
 
 class TestCliWorkersClamp(unittest.TestCase):
-    """(7) --workers clamps 0->1 and 20->8."""
+    """(7) --workers clamps 0->1 and values above 4->4."""
 
     def test_clamp(self):
         import tools.l5_fetch_fb_messages as cli
         self.assertEqual(cli._clamp_workers(0, _Logger()), 1)
-        self.assertEqual(cli._clamp_workers(20, _Logger()), 8)
+        self.assertEqual(cli._clamp_workers(20, _Logger()), 4)
         self.assertEqual(cli._clamp_workers(4, _Logger()), 4)
         self.assertEqual(cli._clamp_workers(1, _Logger()), 1)
-        self.assertEqual(cli._clamp_workers(8, _Logger()), 8)
+        self.assertEqual(cli._clamp_workers(8, _Logger()), 4)
 
 
 if __name__ == '__main__':

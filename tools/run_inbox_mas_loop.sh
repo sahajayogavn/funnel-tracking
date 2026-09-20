@@ -17,7 +17,11 @@ PYTHON="$PROJECT_ROOT/.venv/bin/python"
 
 PAGE_ID="${FUNNEL_PAGE_ID:-1548373332058326}"
 INTERVAL_SECONDS="${FUNNEL_INTERVAL_SECONDS:-900}"
-FETCH_WORKERS="${FUNNEL_FETCH_WORKERS:-5}"
+# Total browser tabs: 1 orchestrator + at most 3 worker tabs.
+FETCH_WORKERS="${FUNNEL_FETCH_WORKERS:-4}"
+FETCH_TIME_RANGE="${FUNNEL_FETCH_TIME_RANGE:-7d}"
+FETCH_MAX_THREADS="${FUNNEL_FETCH_MAX_THREADS:-1000}"
+FETCH_NO_EARLY_EXIT="${FUNNEL_FETCH_NO_EARLY_EXIT:-0}"
 MAS_MAX_THREADS="${FUNNEL_MAS_MAX_THREADS:-5}"
 CLASSIFY_WORKERS="${FUNNEL_CLASSIFY_WORKERS:-10}"
 MAS_CITY="${FUNNEL_MAS_CITY:-Hà Nội}"
@@ -42,18 +46,22 @@ run_fetch() {
   # The loop polls for changes, so unchanged threads must remain eligible for
   # Stage 1's preview/cache skip. Use FUNNEL_FETCH_FORCE_REFRESH=1 only for a
   # deliberate full re-scan.
-  local refresh_args=()
-  case "$FETCH_FORCE_REFRESH" in
-    1|true|TRUE|yes|YES) refresh_args+=(--refresh) ;;
-  esac
-
-  "$PYTHON" "$PROJECT_ROOT/tools/l5_fetch_fb_messages.py" \
+  # Do not expand an empty array while ``set -u`` is active: bash 3.x treats
+  # ``${empty_array[@]}`` as an unbound variable. Build argv incrementally so
+  # both optional flags can be absent on the normal fetch path.
+  set -- "$PYTHON" "$PROJECT_ROOT/tools/l5_fetch_fb_messages.py" \
     --pageId "$PAGE_ID" \
     --credential default \
-    --time_range 7d \
-    --cdp \
-    "${refresh_args[@]}" \
-    --workers "$FETCH_WORKERS"
+    --time_range "$FETCH_TIME_RANGE" \
+    --cdp
+  case "$FETCH_FORCE_REFRESH" in
+    1|true|TRUE|yes|YES) set -- "$@" --refresh ;;
+  esac
+  case "$FETCH_NO_EARLY_EXIT" in
+    1|true|TRUE|yes|YES) set -- "$@" --no-early-exit ;;
+  esac
+  set -- "$@" --workers "$FETCH_WORKERS" --maxThreads "$FETCH_MAX_THREADS"
+  "$@"
 }
 
 run_mas() {

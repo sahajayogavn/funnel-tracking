@@ -45,8 +45,16 @@ interface HoveredNodeDetails {
   error?: string;
 }
 
+function isGraphData(data: unknown): data is GraphData {
+  return Boolean(data)
+    && typeof data === 'object'
+    && Array.isArray((data as GraphData).nodes)
+    && Array.isArray((data as GraphData).links);
+}
+
 export function NetworkGraph() {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
+  const [graphError, setGraphError] = useState<string | null>(null);
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
   const [hoveredNodeDetails, setHoveredNodeDetails] = useState<HoveredNodeDetails | null>(null);
   const fgRef = useRef<{ d3Force: (name: string) => { strength: (s: number) => void } | undefined }>(null);
@@ -145,17 +153,33 @@ export function NetworkGraph() {
     }
   }, [fetchNodeDetails]);
 
-  const fetchGraph = useCallback((filters: FilterState) => {
+  const fetchGraph = useCallback(async (filters: FilterState) => {
     const params = new URLSearchParams();
     if (filters.city !== 'all') params.set('city', filters.city);
     const { startDate, endDate } = getDateRangeBounds(filters.dateRange);
     if (startDate) params.set('startDate', startDate);
     if (endDate) params.set('endDate', endDate);
     const query = params.toString() ? `?${params.toString()}` : '';
-    fetch(`/api/graph${query}`)
-      .then(res => res.json())
-      .then(data => setGraphData(data))
-      .catch(console.error);
+    setGraphError(null);
+
+    try {
+      const response = await fetch(`/api/graph${query}`);
+      const data: unknown = await response.json().catch(() => null);
+      if (!response.ok) {
+        const message = data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
+          ? data.error
+          : 'Không thể tải dữ liệu mạng.';
+        throw new Error(message);
+      }
+      if (!isGraphData(data)) {
+        throw new Error('Máy chủ trả về dữ liệu mạng không hợp lệ.');
+      }
+      setGraphData(data);
+    } catch (error) {
+      console.error('Failed to fetch graph data:', error);
+      setGraphData(null);
+      setGraphError(error instanceof Error ? error.message : 'Không thể tải dữ liệu mạng.');
+    }
   }, []);
 
   const handleFilterChange = useCallback((filters: FilterState) => {
@@ -221,11 +245,15 @@ export function NetworkGraph() {
     <div style={{ position: 'relative' }}>
       <FunnelFilterBar
         onFilterChange={handleFilterChange}
-        totalCount={graphData?.nodes.length || 0}
-        filteredCount={graphData?.nodes.length || 0}
+        totalCount={graphData?.nodes?.length ?? 0}
+        filteredCount={graphData?.nodes?.length ?? 0}
         unitLabel="nút mạng"
       />
-      {!graphData ? (
+      {graphError ? (
+        <div className="card" role="alert" style={{ marginTop: '16px', color: 'var(--text-secondary)' }}>
+          Không thể tải đồ thị: {graphError}
+        </div>
+      ) : !graphData ? (
         <div className="loading-spinner"><div className="spinner" /></div>
       ) : (
         <>

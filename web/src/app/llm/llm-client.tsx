@@ -56,6 +56,22 @@ type ToolEvent = {
   tool?: unknown;
 };
 
+type ToolOutput = {
+  fields?: Array<{ label: string; value: string; status?: boolean }>;
+  raw?: string;
+  text?: string;
+  tone: "error" | "ok";
+};
+
+type AgentInvocation = {
+  /**
+   * A presentation-only grouping. `calls` always retains the unmodified,
+   * individually selectable audit rows from llm_calls.
+   */
+  calls: LlmCall[];
+  toolEvents: ToolEvent[];
+};
+
 function extractToolEvents(call: LlmCall): ToolEvent[] {
   const response = parseJson(call.response_json) as Record<
     string,
@@ -76,6 +92,131 @@ function toolEventName(event: ToolEvent): string {
     return String(tool.name || tool.function_name || "Tool call");
   }
   return "Tool call";
+}
+
+function hasExecutedTool(call: LlmCall): boolean {
+  const phases = new Set(
+    extractToolEvents(call)
+      .map((event) => String(event.phase || "").toLowerCase())
+      .filter(Boolean),
+  );
+  // A requested function call by itself is not enough: grouping it with a
+  // later same-agent call could hide a retry. A recorded start/result proves
+  // this was the tool-turn continuation of the preceding model call.
+  return phases.has("requested") && (phases.has("started") || phases.has("completed"));
+}
+
+function countToolExecutions(events: ToolEvent[]): number {
+  type Execution = { id: number; started: boolean };
+  const activeBySignature = new Map<string, Execution[]>();
+  const ids = new Set<number>();
+  let nextId = 0;
+
+  events.forEach((event) => {
+    const embedded = event.tool && typeof event.tool === "object"
+      ? event.tool as Record<string, unknown>
+      : null;
+    const args = event.arguments ?? (embedded && embedded.args);
+    const signature = `${toolEventName(event)}:${JSON.stringify(args || {})}`;
+    const active = activeBySignature.get(signature) || [];
+    const phase = String(event.phase || "requested").toLowerCase();
+
+    if (phase === "requested") {
+      const execution = { id: ++nextId, started: false };
+      active.push(execution);
+      ids.add(execution.id);
+    } else {
+      let execution = phase === "started"
+        ? active.find((item) => !item.started)
+        : active[0];
+      if (!execution) {
+        execution = { id: ++nextId, started: false };
+        active.push(execution);
+        ids.add(execution.id);
+      }
+      execution.started = true;
+      if (phase === "completed" || phase === "error") active.shift();
+    }
+    activeBySignature.set(signature, active);
+  });
+  return ids.size;
+}
+
+/**
+ * Groups only a direct, adjacent model continuation after a recorded tool
+ * execution. The database's parent_call_id is a general causal chain, so it
+ * alone must not merge retries or separate turns by the same agent.
+ */
+export function groupTraceAgentInvocations(calls: LlmCall[]): AgentInvocation[] {
+  const ordered = [...calls].sort(
+    (left, right) => left.seq_in_trace - right.seq_in_trace || left.id - right.id,
+  );
+  const groups: AgentInvocation[] = [];
+
+  for (const call of ordered) {
+    const prior = groups.at(-1);
+    const previousCall = prior?.calls.at(-1);
+    const isDirectToolContinuation = Boolean(
+      prior &&
+        previousCall &&
+        call.trace_id === previousCall.trace_id &&
+        call.agent_name &&
+        call.agent_name === previousCall.agent_name &&
+        call.parent_call_id === previousCall.id &&
+        call.seq_in_trace === previousCall.seq_in_trace + 1 &&
+        call.attempt === previousCall.attempt &&
+        hasExecutedTool(previousCall),
+    );
+
+    if (isDirectToolContinuation && prior && previousCall) {
+      prior.calls.push(call);
+      prior.toolEvents.push(...extractToolEvents(previousCall));
+    } else {
+      groups.push({ calls: [call], toolEvents: [] });
+    }
+  }
+  return groups;
+}
+
+function toolFieldLabel(key: string): string {
+  const labels: Record<string, string> = {
+    chars: "Characters",
+    city: "City",
+    count: "Count",
+    status: "Status",
+  };
+  return labels[key] || key.replace(/[_-]+/g, " ");
+}
+
+function formatToolFieldValue(value: unknown): string {
+  if (value === null) return "—";
+  if (typeof value === "number") return new Intl.NumberFormat().format(value);
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return `${value.length} items`;
+  if (value && typeof value === "object")
+    return `${Object.keys(value).length} fields`;
+  return String(value);
+}
+
+function toolEventOutput(event: ToolEvent): ToolOutput | null {
+  if (event.error) return { text: event.error, tone: "error" };
+  if (!("result" in event) || event.result === undefined) return null;
+  if (typeof event.result === "string")
+    return { text: event.result, tone: "ok" };
+  if (event.result && typeof event.result === "object" && !Array.isArray(event.result)) {
+    const result = event.result as Record<string, unknown>;
+    return {
+      fields: Object.entries(result).map(([key, value]) => ({
+        label: toolFieldLabel(key),
+        value: formatToolFieldValue(value),
+        status: key === "status",
+      })),
+      raw: JSON.stringify(event.result, null, 2),
+      tone: "ok",
+    };
+  }
+  return { text: formatToolFieldValue(event.result), tone: "ok" };
 }
 
 function messageText(value: unknown): string | null {
@@ -262,10 +403,13 @@ function traceDuration(trace: Trace): number {
     0,
   );
 }
-function traceTokens(trace: Trace): number {
+function traceTokenUsage(trace: Trace): { input: number; output: number } {
   return trace.calls.reduce(
-    (total, call) => total + (call.tokens_in || 0) + (call.tokens_out || 0),
-    0,
+    (usage, call) => ({
+      input: usage.input + (call.tokens_in || 0),
+      output: usage.output + (call.tokens_out || 0),
+    }),
+    { input: 0, output: 0 },
   );
 }
 function traceKind(trace: Trace): string {
@@ -299,6 +443,7 @@ export default function LlmObservabilityClient({
   const [showRouteBreakdown, setShowRouteBreakdown] = useState(false);
   const [conversationExpanded, setConversationExpanded] = useState(false);
   const [draftFilters, setDraftFilters] = useState(filters);
+  const [deletingLog, setDeletingLog] = useState<string | null>(null);
 
   useEffect(() => {
     if (!toast) return;
@@ -348,6 +493,36 @@ export default function LlmObservabilityClient({
     setExpandedTraces((current) => new Set(current).add(traceId));
     setActiveTab("Context");
     setConversationExpanded(false);
+  };
+  const deleteLog = async (options: { traceId?: string; clearAll?: boolean }) => {
+    const isClearAll = options.clearAll === true;
+    if (
+      isClearAll &&
+      !window.confirm("Permanently delete every LLM log entry? This cannot be undone.")
+    )
+      return;
+
+    const deletionKey = isClearAll ? "all" : options.traceId || null;
+    setDeletingLog(deletionKey);
+    try {
+      const response = await fetch("/api/llm", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(options),
+      });
+      const result = (await response.json()) as { deleted?: number; error?: string };
+      if (!response.ok) throw new Error(result.error || "Could not delete the log.");
+      setToast(
+        isClearAll
+          ? `Cleared ${result.deleted || 0} LLM log entries`
+          : `Deleted ${result.deleted || 0} calls from this run`,
+      );
+      router.refresh();
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Could not delete the log.");
+    } finally {
+      setDeletingLog(null);
+    }
   };
 
   const selectedCall =
@@ -417,6 +592,15 @@ export default function LlmObservabilityClient({
           </p>
         </div>
         <div className="llm-header-actions">
+          <button
+            type="button"
+            className="llm-clear-log-action"
+            onClick={() => void deleteLog({ clearAll: true })}
+            disabled={deletingLog !== null || !traces.length}
+            title="Permanently clear all LLM log entries"
+          >
+            <span aria-hidden="true">⌫</span> Clear LLM Log
+          </button>
           <Link href="/queues" className="llm-secondary-action">
             Open approval queues <span>↗</span>
           </Link>
@@ -523,6 +707,7 @@ export default function LlmObservabilityClient({
               onChange={(event) => updateDraft("status", event.target.value)}
             >
               <option value="">All statuses</option>
+              <option value="skipped">Không đề xuất</option>
               <option value="ok">OK</option>
               <option value="empty">Empty</option>
               <option value="sanitized_empty">Sanitized empty</option>
@@ -650,6 +835,7 @@ export default function LlmObservabilityClient({
               const isRunning = trace.calls.some(
                 (call) => getLlmStatusTone(call.status) === "running",
               );
+              const tokenUsage = traceTokenUsage(trace);
               return (
                 <article
                   className={`llm-trace-card ${getTraceTone(trace.calls)} ${isExpanded ? "is-expanded" : ""}`}
@@ -700,9 +886,11 @@ export default function LlmObservabilityClient({
                       <small>
                         {traceKind(trace)} ·{" "}
                         <code>{trace.traceId.slice(0, 12)}…</code> ·{" "}
-                        {trace.calls.length} calls ·{" "}
+                        {trace.calls.filter((call) => call.model !== "deterministic").length} calls ·{" "}
+                        {trace.calls.filter((call) => call.model === "deterministic").length} decisions ·{" "}
                         {formatMs(traceDuration(trace))} total ·{" "}
-                        {formatTokens(traceTokens(trace))} tokens
+                        {formatTokens(tokenUsage.input)} in ·{" "}
+                        {formatTokens(tokenUsage.output)} out
                       </small>
                     </span>
                     <span className="llm-trace-result">
@@ -725,47 +913,106 @@ export default function LlmObservabilityClient({
                       </span>
                     </span>
                   </button>
+                  <button
+                    type="button"
+                    className="llm-trace-delete"
+                    onClick={() => void deleteLog({ traceId: trace.traceId })}
+                    disabled={deletingLog !== null}
+                    aria-label={`Delete LLM run ${trace.traceId}`}
+                    title="Delete this LLM run"
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M3.5 4.5h9M6.25 2.5h3.5l.75 2H5.5l.75-2ZM5 6.5v5.5M8 6.5v5.5M11 6.5v5.5M4.5 4.5l.55 9h5.9l.55-9" />
+                    </svg>
+                  </button>
                   {isExpanded && (
                     <div className="llm-call-list">
-                      {trace.calls.map((call) => {
-                        const callRoute = getLlmRouteInfo(
-                          call.route,
-                          call.trigger,
+                      {groupTraceAgentInvocations(trace.calls).map((invocation) => {
+                        const [firstCall] = invocation.calls;
+                        const invocationTokens = invocation.calls.reduce(
+                          (usage, call) => ({
+                            input: usage.input + (call.tokens_in || 0),
+                            output: usage.output + (call.tokens_out || 0),
+                            duration: usage.duration + (call.duration_ms || 0),
+                          }),
+                          { input: 0, output: 0, duration: 0 },
                         );
-                        const selected = selectedCall?.id === call.id;
+                        const hasContinuation = invocation.calls.length > 1;
                         return (
-                          <button
-                            className={`llm-call-row ${selected ? "selected" : ""}`}
-                            type="button"
-                            key={call.id}
-                            onClick={() => selectCall(call, trace.traceId)}
+                          <section
+                            className={`llm-agent-invocation ${hasContinuation ? "is-tool-continuation" : ""}`}
+                            key={firstCall.id}
+                            aria-label={hasContinuation ? `${firstCall.agent_name || "Agent"} tool-assisted invocation` : undefined}
                           >
-                            <span className="llm-call-seq">
-                              {String(call.seq_in_trace).padStart(2, "0")}
-                            </span>
-                            <span
-                              className={`llm-call-dot ${getLlmStatusTone(call.status)}`}
-                            />
-                            <span className="llm-call-copy">
-                              <strong>
-                                {call.agent_name || callRoute.shortLabel}
-                              </strong>
-                              <small>
-                                {callRoute.shortLabel} ·{" "}
-                                {call.subject_label ||
-                                  call.subject_id ||
-                                  "batch"}
-                              </small>
-                            </span>
-                            <span className="llm-call-metrics">
-                              <span
-                                className={`llm-status-badge ${getLlmStatusTone(call.status)}`}
-                              >
-                                {getLlmStatusLabel(call.status)}
-                              </span>
-                              <small>{formatMs(call.duration_ms)}</small>
-                            </span>
-                          </button>
+                            {hasContinuation && (
+                              <div className="llm-agent-invocation-summary">
+                                <strong>{firstCall.agent_name || "Agent"}</strong>
+                                <span>
+                                  {invocation.calls.length} LLM calls · {countToolExecutions(invocation.toolEvents)} tool execution{countToolExecutions(invocation.toolEvents) === 1 ? "" : "s"} · {formatMs(invocationTokens.duration)} · {formatTokens(invocationTokens.input)} in · {formatTokens(invocationTokens.output)} out
+                                </span>
+                              </div>
+                            )}
+                            {invocation.calls.map((call, callIndex) => {
+                              const callRoute = getLlmRouteInfo(
+                                call.route,
+                                call.trigger,
+                              );
+                              const selected = selectedCall?.id === call.id;
+                              const isToolTurn = callIndex === 0 && invocation.toolEvents.length > 0;
+                              return (
+                                <div key={call.id}>
+                                  <button
+                                    className={`llm-call-row ${selected ? "selected" : ""}`}
+                                    type="button"
+                                    onClick={() => selectCall(call, trace.traceId)}
+                                  >
+                                    <span className="llm-call-seq">
+                                      {String(call.seq_in_trace).padStart(2, "0")}
+                                    </span>
+                                    <span
+                                      className={`llm-call-dot ${getLlmStatusTone(call.status)}`}
+                                    />
+                                    <span className="llm-call-copy">
+                                      <strong>
+                                        {call.agent_name || callRoute.shortLabel}
+                                      </strong>
+                                      <small>
+                                        {call.model === "deterministic" ? "Quyết định điều kiện · Không gọi model · " : ""}
+                                        {callRoute.shortLabel} ·{" "}
+                                        {call.subject_label ||
+                                          call.subject_id ||
+                                          "batch"}
+                                      </small>
+                                    </span>
+                                    <span className="llm-call-metrics">
+                                      <span
+                                        className={`llm-status-badge ${getLlmStatusTone(call.status)}`}
+                                      >
+                                        {getLlmStatusLabel(call.status)}
+                                      </span>
+                                      <small>{formatMs(call.duration_ms)}</small>
+                                      <small
+                                        className="llm-call-token-usage"
+                                        title={`${formatTokens(call.tokens_in || 0)} input tokens · ${formatTokens(call.tokens_out || 0)} output tokens`}
+                                      >
+                                        {formatTokens(call.tokens_in || 0)} in ·{" "}
+                                        {formatTokens(call.tokens_out || 0)} out
+                                      </small>
+                                    </span>
+                                  </button>
+                                  {isToolTurn && (
+                                    <div className="llm-tool-lifecycle" aria-label="Tool execution lifecycle">
+                                      {invocation.toolEvents.map((event, index) => (
+                                        <span key={`${toolEventName(event)}-${event.phase || "requested"}-${index}`}>
+                                          <b>{String(event.phase || "requested").toUpperCase()}</b> · {toolEventName(event)}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </section>
                         );
                       })}
                     </div>
@@ -936,6 +1183,58 @@ export default function LlmObservabilityClient({
                             : "No response text recorded.")}
                       </p>
                     </div>
+                    {selectedToolEvents.some((event) => Boolean(toolEventOutput(event))) && (
+                      <section
+                        className="llm-tool-output-card"
+                        aria-label="Tool calling output"
+                      >
+                        <span className="llm-card-label">Tool Calling Output</span>
+                        {selectedToolEvents.map((event, index) => {
+                          const output = toolEventOutput(event);
+                          if (!output) return null;
+                          return (
+                            <div
+                              className={`llm-tool-output-item ${output.tone}`}
+                              key={`${toolEventName(event)}-${index}`}
+                            >
+                              <div className="llm-tool-output-heading">
+                                <span className="llm-tool-output-icon" aria-hidden="true">
+                                  {output.tone === "error" ? "!" : "✓"}
+                                </span>
+                                <div>
+                                  <strong>{toolEventName(event)}</strong>
+                                  <small>
+                                    {output.tone === "error"
+                                      ? "Tool execution failed"
+                                      : "Tool result received"}
+                                  </small>
+                                </div>
+                              </div>
+                              {output.fields ? (
+                                <div className="llm-tool-output-fields">
+                                  {output.fields.map((field) => (
+                                    <div key={field.label}>
+                                      <span>{field.label}</span>
+                                      <strong className={field.status ? "llm-tool-output-status" : ""}>
+                                        {field.value}
+                                      </strong>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p>{output.text}</p>
+                              )}
+                              {output.raw && (
+                                <details className="llm-tool-output-raw">
+                                  <summary>View raw result</summary>
+                                  <pre>{output.raw}</pre>
+                                </details>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </section>
+                    )}
                     {selectedCall.error && (
                       <div className="llm-error-box">
                         <strong>Call error</strong>

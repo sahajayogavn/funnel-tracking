@@ -87,7 +87,11 @@ nhiêu trace_id thật đang bị lẫn vào nhau.
    (input mà nó thực sự nhận được), không đoán từ response.
 6. Đối chiếu `action_queue`: draft có được enqueue không, trạng thái cuối là
    gì. `rejected` bởi người vận hành nghĩa là lỗi đã được người thật xác
-   nhận, không chỉ là cảm nhận.
+  nhận, không chỉ là cảm nhận.
+   Với proactive reminder, kiểm tra cả các action đã executed cho cùng
+   Page/thread/class/session_date qua mọi command ID. Draft/approval không phải
+   bằng chứng đã gửi; quote legacy không xác định sender cũng không phải bằng
+   chứng độc lập. Reactive gate không thay thế kiểm tra tần suất proactive.
 7. Viết kết luận theo khung ở Mục 5.
 
 ## 3. Bản đồ codebase MAS (đọc code, không đoán)
@@ -712,3 +716,428 @@ lại từ đầu.
   **213 passed, 3 skipped**. `cd web && npm run build` pass. `pytest-cov` không cài; full
   pytest không chạy lại vì lần trước treo ngoài phạm vi, nên không ghi nhận là
   pass. Cần DOM snapshot Facebook đã ẩn dữ liệu riêng trước pilot rollout.
+
+### 2026-09-19 — care reminder tự thêm lời dặn không có căn cứ và closing gây áp lực
+
+- **Trace/thread điều tra:** trace `30`, thread
+  `1548373332058326_a1b27ae3f95bf3ed`, Quách Khánh Vân; action queue #301
+  đang `pending`. Không gửi Facebook trong lượt điều tra.
+- **Trigger thật sự:** `operator_care_command`, route `care`, purpose
+  `class_reminder` (không phải phản hồi một tin nhắn mới). Gate tính lại là
+  `closed_by_human/react` vì khách đã kết thúc bằng “Thanks bạn” ngày
+  15/09; care T-1 vẫn hợp lệ vì operator đã chọn seeker và có
+  `verified_session` ngày 20/09 14:30 tại Vương Thừa Vũ.
+- **Sai lệch:** call #3412 (`ClassReminderComposer`) sinh “Lớp học hoàn toàn
+  miễn phí nên bạn chỉ cần mặc trang phục thoải mái là được ạ. Rất mong và
+  hẹn gặp bạn chiều mai nhé!”. “Trang phục thoải mái” không có trong
+  `verified_session`, operator instruction, transcript, hay factual brief;
+  đây là suy diễn của model, không phải fact được phép thêm. “Rất mong” tạo
+  kỳ vọng/áp lực trái `memory/SOUL.md:35-37` và
+  `memory/mas_strategy.md:9-11`; lời nhắc chỉ cần closing tự nguyện, ví dụ
+  “Hẹn gặp lại bạn chiều mai nhé.”
+- **Nguyên nhân gốc, có bằng chứng:** ConversationAnalyst #3409 đã đưa
+  “Completely free of charge” vào `Required Facts` dù mục đích reminder chỉ
+  cần lịch/địa điểm; KnowledgeLibrarian #3411 lại nhắc fee. Prompt composer
+  `adk_agents/agent.py:243-255` chỉ nói “Mention that it is free only if
+  natural” và bắt buộc “End with a gentle hẹn gặp line”; cả hai là ràng buộc
+  mơ hồ, không cấm suy diễn hướng dẫn tham dự hoặc lời mong đợi. Prompt QA
+  `adk_agents/agent.py:401-409` chỉ kiểm tra fact, safety, concise và form
+  xưng hô, không có check “chỉ facts cần cho purpose”/“không thúc giục”, nên
+  call #3413 trả `PASS`. `_is_safe_final_reply()` tại
+  `tools/l5_inbox_mas_pipeline.py:360-379` chỉ chặn reasoning và viết tắt,
+  do đó không phải một backstop cho lỗi tone này.
+- **Đề xuất sửa nhỏ, theo thứ tự:** (1) siết handoff/composer: class reminder
+  chỉ gồm thời gian, địa điểm và một thông tin logistics *chỉ khi* có trong
+  verified brief và cần cho chuyến đi; không nhắc miễn phí trừ khi seeker vừa
+  hỏi hoặc operator yêu cầu; cấm thêm trang phục/chuẩn bị/lợi ích không có
+  nguồn. Closing là tùy chọn, ngắn và không chứa “rất mong”, “mong được đón”,
+  “hy vọng bạn sắp xếp”, “đừng quên”, hay từ ngữ tạo nghĩa vụ. (2) siết QA
+  thành `REPAIR` khi có fact/khuyến nghị không phục vụ mục đích đã chọn hoặc
+  ngôn ngữ thúc giục; QA phải nêu replacement cụ thể. (3) thêm backstop
+  deterministic trước enqueue cho các phrase đã biết để một QA PASS bất ngờ
+  fail-closed thay vì tạo draft. (4) regression: fixture care với đúng facts
+  của trace này phải chấp nhận draft lịch + “Hẹn gặp lại bạn chiều mai nhé”,
+  nhưng REPAIR/chặn draft chứa “trang phục thoải mái” và “Rất mong ... hẹn
+  gặp”; kiểm tra prompt QA/composer chứa policy mới và test runtime không
+  enqueue draft bị backstop từ chối.
+
+### 2026-09-19 — triển khai voice policy và repair cho reminder trace 30
+
+- **Trace/trigger:** follow-up trace `30`, thread
+  `1548373332058326_a1b27ae3f95bf3ed`, `operator_care_command`. Giữ nguyên
+  gate; sửa chất lượng draft sau khi care đã được admit. Không regenerate hay
+  thay queue #301 và không gửi tin khách trong lượt này.
+- **Policy:** `memory/SOUL.md` bổ sung giọng đồng hành “chúng ta có hẹn” khi
+  có bằng chứng đăng ký/cuộc hẹn; không dùng “mình nhắc bạn”, “Rất mong” hay
+  lời thúc giục. Closing tùy chọn; miễn phí chỉ nhắc khi có nhu cầu hiện tại;
+  không tự thêm logistics hoặc suy ra nhân quả giữa các facts độc lập.
+- **Implementation:** `adk_agents/agent.py:243` siết reminder composer;
+  Analyst/Librarian phân biệt required facts và background, QA kiểm tra
+  relevance/source/logic/pressure với REPAIR. `:471-478` nạp SOUL nguyên văn
+  trực tiếp vào instruction của sáu role viết/review, gồm legacy composers,
+  độc lập librarian summary. Policy nạp lúc import, process lâu dài cần reload.
+- **Runtime:** `tools/l5_inbox_mas_pipeline.py:248-254,297-311` phát hiện các
+  phrase reminder gây áp lực đã biết và fee-to-clothing causation. False PASS
+  chuyển thành effective REPAIR, truyền correction vào composer, tối đa hai
+  rewrite rồi trả reply rỗng. Model verdict gốc vẫn ở trace; kết quả pipeline
+  có `wording_repairs`. Guard chỉ áp dụng class_reminder và không phải bộ
+  kiểm chứng ngữ nghĩa tổng quát; những diễn đạt khác vẫn cần QA/operator.
+- **Kiểm chứng:** 123 tests pass với `test_adk_wiring`, `test_mas_recommend`,
+  `test_conversation_state`, `test_class_schedule_and_care_routes`. Có test
+  ADK Runner thật chặn tại before_model để xác nhận rendered instruction của
+  composer/QA chứa SOUL khi không có librarian summary; không gọi model live.
+  Fixture trace 30 kiểm tra false PASS → sửa thành công và hết budget → rỗng;
+  unit cases cho lời hẹn hợp lệ, closing, fees/preparation không có causal lỗi.
+  Coverage hai module thay đổi: 82%; các dòng guard/repair mới đều được chạy.
+  `git diff --check` pass. Chưa đánh giá chất lượng sinh câu bằng model live;
+  test offline không chứng minh mọi biến thể ngôn ngữ đều được bắt.
+
+### 2026-09-19 — trace 31 Warm Up: vai đại diện Page và câu hỏi về thực hành
+
+- **Trace/thread:** `31`, `1548373332058326_100001005716854`, Bùi Duy Hùng;
+  calls #3446–3450, queue #302 `approved` tại lúc rà soát. Approval không chứng
+  minh tin đã được gửi. Chỉ đọc trace/DB và ghi nhật ký; chưa sửa runtime case này.
+- **Trigger/gate:** `operator_care_command`, purpose `warmup`. Reactive gate
+  hiện là `already_answered/skip`, khách nói cuối ngày 08/03/2017, Page có tin
+  ngày 31/03/2026. Đây là proactive care theo operator, không phải reactive
+  reply; không dùng skip của inbox để kết luận riêng việc chọn warmup là sai.
+- **Bằng chứng:** Analyst #3446 đề xuất “anh Hùng – em / Sahaja Yoga”; lịch sử
+  có cách gọi “anh”, nhưng không thiết lập người đại diện hiện tại xưng “em”.
+  Librarian #3448 lặp đề xuất đó. Composer #3449 sinh “lâu rồi em mới có dịp…”
+  và “việc hành thiền ... vẫn an lành và đều đặn chứ”; QA #3450 PASS.
+  System prompt #3449 và #3450 đều có `Authoritative voice policy` cùng SOUL
+  mới của bản sửa reminder. Không phải lỗi chưa reload policy.
+- **Nguồn sai lệch:** `memory/SOUL.md` bảng xưng hô vẫn có “anh/chị – em”;
+  `adk_agents/agent.py:204-212` yêu cầu casual check-in, “like a friend” và
+  bắt buộc CTA. Analyst `:302` chưa tách danh xưng người nhận khỏi vai người
+  gửi; QA `:401` cho phép respectful form, chưa có contract Page/anh cho
+  warmup. Guard `tools/l5_inbox_mas_pipeline.py::_reminder_wording_correction`
+  chỉ chạy class_reminder, không kiểm tra warmup.
+- **Lỗi bổ sung:** “vẫn ... đều đặn” lấy thông tin thực hành năm 2017 như một
+  trạng thái liên tục tới 2026; “ghé lại” ngầm khẳng định từng tham dự tập thể
+  dù lịch sử đang thấy chỉ có ý định tham dự. Analyst còn gắn nhãn Yogi và
+  Librarian nói quen anh Thi từ một câu Page hỏi, không có customer xác nhận.
+- **Đề xuất:** policy riêng warmup xưng Page/Sahaja Yoga Việt Nam, giữ danh
+  xưng anh/chị có evidence nhưng không suy ra “em”. Dùng “thực hành thiền” và
+  câu hỏi “Dạo này việc thực hành thiền của anh có tiến triển tốt không ạ?”;
+  không mô tả việc thực hành là “an lành”, không mặc định đều đặn từ lịch sử
+  cũ. CTA tùy chọn. Đồng bộ SOUL, Analyst, Librarian, WarmUpComposer và QA;
+  REPAIR các lỗi vai người gửi, kết hợp từ và giả định tiếp diễn/tham dự.
+  Regression cần chứa đúng transcript cũ, Page/anh hợp lệ, em/anh bị sửa,
+  không suy diễn attendance/Yogi; guard nếu thêm phải phân biệt “em” tự xưng
+  với “anh em” chỉ cộng đồng.
+- **Tokens in/out theo call:** #3446 Analyst 2267/370; #3447 Librarian retrieval
+  2464/36; #3448 Librarian brief 5965/507; #3449 Composer 5033/65;
+  #3450 QA 9970/1. Tổng 25699/979; Librarian cộng hai calls 8429/543.
+  Đây là prompt/candidate token counts đã lưu, không phải tổng billing gồm
+  mọi reasoning/cache token.
+
+### 2026-09-19 — approved Warm-up không được executor xử lý; delivery contract được đổi
+
+- **Case/trigger:** trace `31`, action #302, Bùi Duy Hùng; operator tạo Warm-up
+  trên web và approved. Executor bị vô hiệu hoá bởi `OUTBOUND_QUEUE_TYPES=()`
+  trong commit `42cc0e2`; đây là nguyên nhân không claim, không phải reactive
+  gate `already_answered` hay cờ `dry_run` trên LLM trace.
+- **Quyết định operator mới:** WebUI approval đủ quyền executor xử lý, không
+  cần Telegram. `live` mặc định mở tab và draft, người vận hành nhấn Enter;
+  `live --auto-send` cho phép gửi sau kiểm tra. Amendment trong care execution
+  contract thay thế policy cũ cấm mọi delivery sau approval.
+- **Implementation:** `tools/l5_hitl_execution.py` xử lý hai queue DM,
+  Page-scoped atomic claim; draft pending khác không chặn approval, cùng người
+  nhận không được có hai draft đang xử lý. Telegram lỗi không chặn web work.
+  `tools/l5_delivery_guard.py` xác minh Page/PSID trong URL live,
+  đọc messages trực tiếp trước/sau fill; không overwrite composer có sẵn.
+  Web MAS snapshot toàn lịch sử DB trước khi gọi model, giữ body/actor/ID/time/
+  quote/count; phát hiện cả tin lặp giống hệt khi thiếu platform message ID.
+- **Trạng thái:** draft dùng `executing` + `delivery_status=drafted`, không có
+  `executed_at`; poll tab để xác nhận manual send. Tin/context thay đổi →
+  `rejected` + `delivery_status=outdated`, error Out-date và durable
+  `fetch_request=pending`; targeted refresh dùng parser/persistence hiện có,
+  lỗi giữ pending để retry. Chỉ auto/manual send có message evidence mới
+  thành executed; send không chắc chắn không tự retry.
+- **Live evidence đọc-only:** tab PSID `100001005716854` hiện có header
+  `Hung Bui`, DB `threads/users.thread_name` vẫn `Bùi Duy Hùng`. Header Meta
+  dùng `div._4ik4._4ik5`, không có semantic heading. Tên Facebook chỉ là
+  metadata, không được dùng làm identity. #302 còn thiếu input snapshot;
+  cần fetch đồng bộ tên/history rồi tạo/approve proposal mới. Không backfill
+  snapshot cũ bằng DB hiện tại; không thay queue production trong lượt sửa.
+- **Kiểm chứng:** focused pytest cho queue, delivery guard, executor, MAS
+  recommendation/runner, care routes và Telegram; real Chrome local fixture
+  xác minh ID/header, fill multiline không Enter. Web production build, shell
+  syntax và diff checks pass. Kết quả cuối: **105 tests passed**;
+  coverage queue/executor/guard **84%** (guard riêng 89%).
+  Chưa chạy live auto-send; không gửi Facebook/Telegram hay inference live.
+
+### 2026-09-19 — targeted refetch action #302 xác minh nhầm bằng tên Meta
+
+- **Trace/thread điều tra:** action #302, Page `1548373332058326`, PSID
+  `100001005716854`, recipient lưu là `Bùi Duy Hùng`.
+- **Trigger thật sự:** `refresh_outdated_actions()` đã mở đúng direct URL và
+  composer (log 11:57:12/11:57:27), nhưng `assert_recipient()` từ chối header
+  nên durable fetch request cứ giữ `pending`.
+- **Nguyên nhân:** Meta render header là `Hung Bui` (bỏ tên đệm, đảo trật tự),
+  trong khi `tools/l5_delivery_guard.py` chỉ chấp nhận chuỗi NFC bằng tuyệt
+  đối. URL Page/PSID vẫn chính xác và header hiện diện, nhưng so sánh tên quá
+  chặt làm retry không thể hoàn thành. Lỗi `div._5_n1` xảy ra ở fallback
+  sidebar của một lần direct navigation chưa ổn định; lần retry direct URL đã
+  xác nhận được đúng thread.
+- **Sửa cuối:** bỏ hoàn toàn heading/name khỏi điều kiện delivery. Facebook
+  display name có thể đổi hoặc sai; duy nhất `asset_id` + numeric
+  `selected_item_id` (Page-scoped PSID) là identity. Regression xác nhận tên
+  đổi vẫn tiếp tục được, còn Page/PSID sai vẫn fail-closed.
+
+### 2026-09-19 — action #304 bị Out-date giả vì so snapshot DB đầy đủ với DOM live rút gọn
+
+- **Trace/thread điều tra:** trace `33`, action queue #304, Page
+  `1548373332058326`, thread/PSID `1548373332058326_100001005716854` (Bùi
+  Duy Hùng). Chỉ đọc trace/DB/log và code; không regenerate, không sửa queue,
+  không gửi Facebook.
+- **Trigger thật sự:** `operator_care_command`, purpose `warmup`. Đây là
+  outreach chủ động; reactive gate tính lại `already_answered/skip` là thông
+  tin context, không phải nguyên nhân delivery bị từ chối.
+- **Gate/kỳ vọng vs thực tế:** #304 có `conversation_snapshot.version=1`,
+  `complete=true`, 28 rows (21 lịch sử 2017, 1 Page 2026, 6 message test có
+  source ID). Lúc delivery, log xác nhận direct URL và composer đã sẵn sàng;
+  `scroll_up_message_panel` kết luận chỉ 8 element và `extract_thread_messages`
+  trả representation live rút gọn. `assert_context_current()` vì vậy ném
+  `conversation_changed: message count differs from MAS snapshot`. Không có
+  bằng chứng khách gửi/edit tin nhắn giữa lúc tạo #304 (05:21:44) và kiểm tra
+  (05:24:57); count khác là khác nguồn dữ liệu, không phải conversation change.
+- **Nguyên nhân gốc:** `_load_thread()` ở `tools/l5_mas_recommend.py:105-132`
+  lấy toàn bộ `messages` đã persist trong DB rồi đóng snapshot `complete=True`.
+  Delivery lại đọc riêng DOM hiện tại ở `tools/l5_delivery_guard.py:76-94`.
+  Guard `:44-54` diễn giải mọi khác biệt độ dài của snapshot complete là dữ
+  liệu mới/mất. `scroll_up_message_panel()` không chứng minh browser đã materialize
+  cùng canonical history DB (đặc biệt với virtualized/clustered Messenger DOM).
+  Refetch `:194-205` persist lại DOM rút gọn nhưng không sửa snapshot đóng băng
+  của action #304, nên chỉ tạo dữ liệu DB lai và yêu cầu regenerate, không phải
+  xác minh rằng action đã thực sự outdated.
+- **Đề xuất sửa/test:** snapshot delivery phải bắt nguồn từ *cùng live DOM
+  representation* sẽ được kiểm trước send, hoặc dùng stable Facebook
+  `source_id` cho suffix/identity comparison và chỉ cho `complete=true` khi
+  browser chứng minh full-history coverage. Khi coverage không chứng minh được,
+  fail `unverifiable_context`/ask operator thay vì ghi sai `conversation_changed`.
+  Bổ sung regression: DB full 28 rows vs DOM equivalent/latest 8 rows không
+  được gọi `conversation_changed` khi không có source ID mới; một source ID mới,
+  source-ID edit, hay verified complete-history count change vẫn phải block.
+
+### 2026-09-19 — implementation: delivery guard chỉ xác minh latest stable message
+
+- **Phạm vi:** sửa action delivery snapshot/guard và regression offline; không
+  chạy browser live, không thay action #304 hay gửi Facebook.
+- **Thay đổi:** `tools/l5_mas_recommend.py::_load_thread` không còn snapshot
+  full DB history. Nó đóng snapshot v2 của event cuối từ transcript đã fetch.
+  `tools/l5_delivery_guard.py::assert_context_current` so event cuối đó với
+  event cuối browser trước và sau khi fill composer; v1 snapshot cũ cũng chỉ
+  dùng event cuối để #304 không còn fail chỉ vì 28 vs 8 DOM rows. Latest event
+  phải có `source_id` Facebook; không có ID trả `unverifiable_context` và
+  không draft/send. `tools/l5_hitl_execution.py` cũng không còn scroll-up
+  history trong delivery path. New/latest edit/delete vẫn trả
+  `conversation_changed`.
+- **Kiểm chứng:** regression gồm virtualized DB history 28 rows vs live tail
+  8 rows, legacy v1 full snapshot, no-ID fail-closed, mutation/new message,
+  prepare/reconcile draft. `pytest tests/test_hitl_delivery_guard.py
+  tests/test_l5_hitl_execution.py tests/test_mas_recommend.py -q` → **70
+  passed**. Coverage chạy bằng `coverage.py` (pytest-cov không cài): delivery
+  guard 88%, executor 72%, recommend 88%, total 85%. `py_compile` và
+  `git diff --check` pass.
+
+### 2026-09-19 — trace 33: hai Librarian items là hai LLM requests, không phải tool-only row
+
+- **Trace/thread/trigger:** `33`, thread `1548373332058326_100001005716854`,
+  `operator_care_command`, purpose warmup. Đã chạy report trước đọc calls;
+  reactive gate hiện `already_answered/skip`, không phải gate quyết định cho
+  operator care. Phạm vi review observability; không inference, gửi tin, sửa
+  runtime hay queue. Action #304 rejected tại lúc kiểm tra, delivery đã được
+  điều tra riêng ở entry trước.
+- **Bằng chứng:** #3457 KnowledgeLibrarian là model request thật: 2943 input,
+  42 candidate output, 69 thoughts tokens, 3645 ms. Response không có text
+  nhưng có function_call get_knowledge ID `call_295900`, city Hà Nội, question
+  lớp Hà Nội/online/lịch cộng đồng. requested/started/completed đều nằm trong
+  response_json.tool_calls của chính row này; completion trả refreshed,
+  chars=10289. #3458 là model request tiếp theo, 6452 input/518 candidate
+  output, 375 thoughts tokens, 6672 ms, viết factual brief. messages_json
+  chứa function_call và function_response cùng ID call_295900.
+- **Nguyên nhân:** `adk_agents/agent.py:331` yêu cầu first call get_knowledge;
+  `adk_agents/tools/l5_orchestrator_tools.py:120` thực thi build_knowledge_context
+  (file/DB retrieval, không LLM) và ghi knowledge_context vào session.
+  `l4_llm_trace.py:408,454` tạo/kết thúc row theo model callback;
+  `:492,507` append tool events vào row đã gọi tool, không tạo tool-only row.
+  `web/src/app/llm/llm-client.tsx:835` map trace.calls thành từng hàng, vì vậy
+  cùng role xuất hiện hai lần. Đây là call-level view đúng số requests nhưng
+  dễ nhầm khi operator muốn agent-level view.
+- **UI đã triển khai:** giữ nguyên raw #3457/#3458 và render một invocation
+  KnowledgeLibrarian với badge `2 LLM calls / 1 tool execution`, hai child
+  rows có thể chọn riêng, và lifecycle `REQUESTED → STARTED → COMPLETED` ở
+  giữa. Điều kiện group cố ý chặt: cùng trace/agent/attempt, child trực tiếp
+  (`parent_call_id`), liền sequence, và call trước có tool `requested` cùng
+  `started` hoặc `completed`. Group tổng input 9395, candidate output 560,
+  model duration 10317 ms; wall time từ đầu #3457 đến cuối #3458 khoảng
+  10.334s. Không coi response_text rỗng là không inference, không cộng
+  requested/started/completed thành ba executions. Events chưa có
+  timestamp/duration riêng, không suy thời gian tool chính xác từ gap.
+  Cần `agent_invocation_id`/stage/repair iteration cho grouping bền vững;
+  `parent_call_id` hiện là last-call chain (`l4_llm_trace.py:424`), không phải
+  hierarchy agent. Vì thế UI không group retry, call không liền kề, hoặc
+  cùng agent nhưng không có tool execution đã ghi nhận.
+- **Tối ưu độc lập với UI:** nếu cần giảm inference thực, coordinator có thể
+  prefetch theo city/purpose/scope đã xác thực rồi cho Librarian viết brief
+  một lượt. Khoản 3.645s của #3457 chỉ là cơ hội giảm trên trace này, không
+  phải benchmark hoặc bảo đảm latency mới. Cần regression scope/knowledge
+  failure/QA trước thay đổi. Gộp UI đơn thuần không giảm tokens hay cost.
+- **Kiểm chứng tests:** `pytest tests/test_llm_trace.py -q`: 6 passed,
+  1 failed. Các tests ADK model/tool callbacks pass; test City HTTP trace
+  fail tại monkeypatch `LLM_STREAM` vì module city_llm hiện không còn thuộc
+  tính đó (`tests/test_llm_trace.py:310`), trước khi kiểm tra usage. Không
+  báo cả suite pass; chưa sửa test/provider ngoài phạm vi review này.
+
+### 2026-09-19 — Job #35: nút nhắc lịch bị chặn sai khi UI không lọc lớp
+
+- **Trace/thread điều tra:** recommendation job `#35`, thread
+  `1548373332058326_9401961e0ea95278` (Trader Nguyễn). Đọc-only DB/job và
+  `l5_mas_trace_debug.py report`; không chạy lại job, không tạo queue hay gửi
+  Facebook trong lượt điều tra.
+- **Trigger thật sự:** `operator_care_command`, `type=care`, purpose
+  `class_reminder`; request không có `programCode` vì UI đang ở bộ lọc lớp
+  `all`. Job hoàn tất trong một giây với `count=0`, skip
+  `class_session_not_unique`; do dừng trước `run_adk_care_pipeline`, không có
+  LLM trace của job để sanitize hay enqueue.
+- **Gate/kỳ vọng vs thực tế:** hồ sơ seeker đã có
+  `program_code=14h30-CN-Vương Thừa Vũ-HN` và lịch 7 ngày có đúng một buổi
+  tương ứng: 20/09/2026 14:30. Nhưng cùng cửa sổ còn nhiều lớp khác. Mã cũ
+  tại `tools/l5_mas_recommend.py:310-316` lọc `upcoming_sessions()` bằng
+  `not program_code`, nên khi filter trống nó đòi *toàn bộ catalogue* có đúng
+  một buổi và trả `class_session_not_unique`. Đây không phải seeker thiếu
+  đăng ký hoặc sự cố ADK.
+- **Sửa:** explicit `programCode` vẫn là scope chung và phải resolve đúng một
+  buổi; không có filter thì mỗi selected seeker resolve session bằng
+  `seeker.program_code` đã xác thực. Mã lớp không có/không resolve duy nhất
+  vẫn fail-closed với `class_session_not_found`/`class_session_not_unique`.
+- **Kiểm chứng:** thêm regression cho selected seeker không có UI program
+  filter nhưng có `program_code` xác thực; kiểm tra session trong Care brief
+  và queue payload. `pytest tests/test_mas_recommend.py
+  tests/test_class_schedule_and_care_routes.py -q` → **45 passed**;
+  `pytest-cov` không được cài trong `.venv`; `git diff --check` pass.
+
+### 2026-09-19 — trace 36: nhắc lại buổi 20/09 dù đã gửi hôm trước
+
+- **Trace/thread:** `36`, call #3461–3465, thread
+  `1548373332058326_9401961e0ea95278` (Trader Nguyễn / Yến). Chạy `report 36`
+  và đọc state/calls/queue. #299 `executed`, `executed_at=2026-09-18 06:39:38`
+  UTC, payload `class_reminder` cho `14h30-CN-Vương Thừa Vũ-HN`, ngày
+  20/09/2026. #305 tạo 19/09 06:11:56 UTC, cùng buổi, còn pending lúc review.
+  User xác nhận đã nhắc hôm trước; không gọi LLM live hay gửi tin trong sửa này.
+- **Trigger thật:** `operator_care_command`, purpose `class_reminder`, instruction
+  mặc định “Soạn tin nhắc lịch học phù hợp ...”. Không chỉ định nhắc dồn dập.
+  Reactive state `closed_by_human/react` là context; quyết định cần có của care
+  là không nhắc lại cùng buổi đã được nhắc, không phải ép dùng gate reactive.
+- **Thực tế:** Analyst #3461 đề xuất cá nhân hóa lời nhắc bằng người đi cùng
+  thay vì từ chối nhắc lặp; Composer #3464 soạn “Chào bạn Yến, chúng ta có hẹn
+  ... chiều mai ...”; QA #3465 PASS. Transcript legacy có reminder cũ nằm trong
+  quote Unknown sender, nên không coi riêng quote là bằng chứng đã gửi.
+  Queue #299 cung cấp session/send record mà care brief trước sửa không có.
+- **Nguyên nhân/file:** `tools/l5_mas_recommend.py::recommend_care` chỉ dedupe
+  theo command_id, không xét sent history. Analyst instruction tại
+  `adk_agents/agent.py:314` còn nói precheck đã admit, không được override;
+  coordinator luôn chuyển Analyst → Librarian → Composer, không có stop bình
+  thường vì timing không phù hợp. QA chỉ tập trung wording/facts.
+- **Sửa:** `_reminder_cadence` tại `tools/l5_mas_recommend.py:293` đọc executed
+  reminder theo Page/thread/class/session_date, bỏ drafted/outdated/uncertain;
+  `:386` chặn trước inference, kể cả regenerate/new command. Không coi pending,
+  approved, rejected hoặc failed là đã gửi. Một câu operator khẳng định độc lập
+  “Đây là sự kiện cần nhắc lịch dồn dập.” hoặc “Đây là buổi học cần nhắc lịch
+  dồn dập.” mở ngoại lệ có chủ đích; không dùng substring để nhận phủ định/quote.
+  Opt-out và scope vẫn ưu tiên. Brief có evidence cùng cờ override đáng tin cậy.
+- **Stop semantics:** Analyst/QA có `NO_SEND: <lý do tiếng Việt>`; runtime tại
+  `tools/l5_inbox_mas_pipeline.py:221,256` dừng với `reply_text/draft_reply` rỗng,
+  không escalation/repair. Recommendation trả skipped reason và note; web
+  summary tại `web/src/app/api/action-queue/recommendations/route.ts:418` giải
+  thích “Chưa phù hợp để nhắc lại ... không tạo tin để tránh làm phiền”. SOUL
+  và response runbook đồng bộ policy một reminder đã gửi cho mỗi buổi.
+- **Giới hạn:** deterministic evidence dùng action queue sent record; tin gửi
+  tay ngoài queue được Analyst/QA đánh giá qua transcript, chưa có semantic
+  detector deterministic cho mọi cách diễn đạt. Không sửa scheduler legacy hay
+  tự reject #305; bản nháp cũ vẫn cần operator xử lý. Policy/prompt mới cần
+  reload ở process giữ agent trong bộ nhớ. Không chạy pilot model live.
+- **Kiểm chứng:** read-only replay helper trên snapshot #3461 tìm đúng #299,
+  `repeat_explicitly_requested=false`, `blocked=true`. Regression DB tạm bao
+  gồm ngày kế tiếp, regenerate, khác ngày/lớp/Page/thread, trạng thái chưa gửi,
+  override/negation/quote/urgency và opt-out; fake ADK kiểm chứng Analyst dừng
+  trước retrieval/composer, QA dừng không repair, adapter không enqueue.
+  `pytest tests/test_mas_recommend.py tests/test_adk_wiring.py
+  tests/test_conversation_state.py tests/test_class_schedule_and_care_routes.py
+  -q` → **143 passed**; coverage.py ba module sửa **87%** (recommend 90%,
+  pipeline 83%, agent 82%). Các nhánh cadence/NO_SEND mới đều được thực thi;
+  toàn bộ scenario trong test plan runbook đã được cover offline. Web production
+  build và `git diff --check` pass. Không coi kết quả mock là đánh giá chất lượng
+  suy luận model live cho các diễn đạt ngoài fixture.
+
+### 2026-09-19 — job 38: quyền nhắc lại bị khóa vào câu mẫu và skip mất trace
+
+- **Trace/thread/trigger:** job `38`, `operator_care_command`, thread
+  `1548373332058326_9401961e0ea95278`, class_reminder. Report thread resolve
+  trace 36 vì job 37/38 dừng trước model nên chưa có row `llm_calls`.
+  Đọc request/result job 38 xác nhận instruction nguyên văn có “Đây là lớp
+  học gấp, nên hoàn toàn được phép giục liên. tục.”. Job 37 là lệnh mặc định.
+- **Kỳ vọng vs thực tế:** #38 đã chỉ định quyền nhắc liên tục, đáng lẽ được
+  vượt điều kiện “đã nhắc cùng buổi” rồi tiếp tục workflow/QA bình thường;
+  code cũ trả `reminder_already_sent_for_session`. Reactive state vẫn
+  `closed_by_human/react`; không phải gate dùng để quyết định quyền này.
+- **Nguyên nhân:** `_reminder_cadence` trước sửa split instruction bằng
+  `[.!?\n]+` rồi so cả câu với set đúng hai chuỗi, không hiểu paraphrase hay
+  typo. `recommend_care` append skipped và continue không ghi trace;
+  result có `/llm?trace=38` nhưng bảng llm_calls không có row tương ứng.
+  Đây là giới hạn của implementation trace 36, không phải operator nhập sai.
+- **Sửa:** `tools/l5_care_admission.py::interpret_repeat_permission` (dòng 31)
+  gọi Gemini native một lượt khi đã có sent reminder, nhận JSON boolean,
+  trích nguyên văn permission từ instruction và lý do tiếng Việt. True thiếu
+  literal evidence/JSON sai/provider error → `care_instruction_unresolved`,
+  không nhầm với operator không cho phép. Prompt phân biệt generic urgency,
+  phủ định, quote, mâu thuẫn và explicit permission; không dùng magic phrase.
+  `tools/l5_mas_recommend.py:383` chuyển decision/evidence vào care brief và
+  queue payload; không bỏ opt-out, registration/session, workflow hay QA.
+- **Observability:** `record_care_decision` ghi mọi skip bên trong
+  recommend_care và lần admit repeat vào cùng trace/thread/Page. Row
+  `CareAdmissionDecision`, model `deterministic`, event_kind care_decision,
+  model_called=false, 0 tokens; skipped không phải API error. Actual inference
+  có row `CareInstructionInterpreter`, prompt/input/output/usage riêng.
+  `web/src/app/llm/page.tsx:77` loại audit row khỏi inference count/latency,
+  giữ trong timeline và sort theo insert id khi ADK reset seq. UI có filter
+  “Không đề xuất” và nhãn “Không gọi model”.
+- **Dữ liệu vận hành:** bổ sung đúng hai audit rows hồi cứu cho job 37/38,
+  idempotent theo trace/agent; giữ original request, result skip, reminder #299,
+  original timestamp và `retrospective=true`. Ghi rõ #38 bị chặn sai bởi rule
+  cũ. Không giả tạo model call lịch sử, không chạy lại job, không tạo queue hay
+  gửi Facebook/Telegram; không thay #305. GET port 9995 `/llm?trace=37/38`
+  xác nhận cả event, nguyên nhân, no-model và skip label hiển thị.
+- **Kiểm chứng:** 155 focused tests pass (admission/recommendation/ADK wiring/
+  conversation/schedule). Coverage module mới 100%, recommend 90%, pipeline
+  83%, tổng 88%. Native Gemini live trong SQLite tạm: 6/6 đúng gồm nguyên văn
+  #38, default, negation, customer quote, paraphrase permission và urgency-only;
+  không có send/queue action. Đây là sample validation, không bảo đảm model
+  phân loại hoàn hảo mọi câu. Model interpretation thêm một request cho case
+  đã có sent evidence; không thể gọi đây là gate “không inference” như trước.
+  Web production build và diff check pass. Test plan và runbook đã được sửa
+  để không còn yêu cầu operator dùng đúng một câu mẫu.
+
+### 2026-09-20 — Recent Messages hiển thị snapshot re-fetch chưa định danh
+
+- **Thread/case:** `1548373332058326_9401961e0ea95278` (Trader Nguyễn). Không
+  chạy fetch mới, không gọi model và không sửa/xóa dữ liệu production.
+- **Bằng chứng:** `l5_mas_trace_debug.py report` cho thấy 16 message có
+  `message_at` và sender đã lưu, sau đó là các rows `Unknown` lặp body, không
+  có `message_at`; truy vấn DB xác nhận các row re-fetch này được append với
+  sequence mới. Sidebar dùng `.slice(-20)`, nên chọn chính các rows chưa có
+  thời điểm và hiển thị chúng như lịch sử gần đây.
+- **Khắc phục UI/API:** `web/src/lib/queries.ts::displayableMessageHistory`
+  giữ lịch sử có `message_at` khi cùng thread đã có timeline xác định; thread
+  legacy hoàn toàn không có thời điểm vẫn giữ nguyên rows. Không suy luận lại
+  sender/time và không xóa evidence crawl thiếu thông tin. Full detail và
+  sidebar cùng dùng response này, nên count `Messages` phản ánh 16 sự kiện có
+  thể hiển thị thay vì 64 rows lai.
+- **Kiểm chứng:** regression UI contract cho mixed/legacy path pass;
+  `cd web && npm run build` pass. Đọc lại `/seekers/5691` trên local Edge cho
+  thấy 16 messages, các ngày 16/09 và 18/09 theo thứ tự, không còn dòng
+  `Unknown at 1:40 PM` lặp. Test UI cũ về `handleSort('lastMessageDate')`
+  fail vì API sort đó đã bị thay trong worktree trước case này; không thuộc
+  thay đổi history.

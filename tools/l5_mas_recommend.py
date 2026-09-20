@@ -24,9 +24,7 @@ import argparse
 import json
 import logging
 import os
-import re
 import sys
-import unicodedata
 from datetime import datetime
 from typing import Any, Optional
 
@@ -39,6 +37,7 @@ from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
 from fb_pipeline.persistence.l4_llm_trace import link_outcome, span
 from tools.l5_action_queue import active_proposal_status, enqueue_action, replace_action
 from tools.l5_delivery_guard import conversation_snapshot
+from tools.l5_care_admission import interpret_repeat_permission, record_care_decision
 from tools.l5_inbox_mas_context import setup_llm_env
 from tools.l5_inbox_mas_pipeline import _approved_draft, _sanitize_reply, run_adk_care_pipeline, run_adk_pipeline
 from adk_agents.tools.l5_event_tools import get_upcoming_events
@@ -290,20 +289,11 @@ def _prior_page_lines(thread: dict, limit: int = 3) -> list[str]:
 
 
 # code:tool-mas-recommend-001:reminder-cadence
-def _reminder_cadence(thread_id: str, page_id: str, session: dict,
-                      instruction: str) -> dict:
+def _reminder_cadence(thread_id: str, page_id: str, session: dict) -> dict:
     """Sent evidence is scoped to a recipient and a concrete class occurrence.
 
-    A new command ID or regeneration is not permission to contact again. Only
-    a standalone affirmative operator sentence opts into intensive reminders;
-    substring matches would also authorize negations and quoted customer text.
+    Interpretation of operator permission is a separate, traced semantic step.
     """
-    normalized = unicodedata.normalize("NFC", instruction).casefold()
-    sentences = {" ".join(part.split()) for part in re.split(r"[.!?\n]+", normalized)}
-    repeat = bool(sentences & {
-        "đây là sự kiện cần nhắc lịch dồn dập",
-        "đây là buổi học cần nhắc lịch dồn dập",
-    })
     conn = get_db_connection()
     try:
         rows = conn.execute("""
@@ -321,7 +311,7 @@ def _reminder_cadence(thread_id: str, page_id: str, session: dict,
             ORDER BY executed_at DESC, id DESC
         """, (page_id, thread_id, session.get("session_date"),
               session.get("class_key") or session.get("program_code"))).fetchall()
-        return {"repeat_explicitly_requested": repeat,
+        return {"repeat_explicitly_requested": False,
                 "sent_reminders": [dict(row) for row in rows]}
     finally:
         conn.close()
@@ -340,8 +330,15 @@ def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, ci
     from fb_pipeline.contracts.l1_class_schedule import upcoming_sessions
     from fb_pipeline.contracts.l1_conversation_state import format_now_context
 
+    def skipped_result(t: dict, reason: str, note: str = "", evidence: dict | None = None) -> dict:
+        record_care_decision(page_id=page_id, thread=t, instruction=instruction,
+                             purpose=care_purpose or "", reason=reason, note=note,
+                             evidence=evidence or {"seeker": t.get("seeker"),
+                                                   "conversation_state": t.get("conversation_state")})
+        return {"threadId": t["thread_id"], "reason": reason, **({"note": note} if note else {})}
+
     if care_purpose not in CARE_PURPOSES:
-        return [], [{"threadId": t["thread_id"], "reason": "care_purpose_required"} for t in threads]
+        return [], [skipped_result(t, "care_purpose_required") for t in threads]
     route = care_purpose
     # Command idempotency is separate from the sent-reminder cadence below.
     dedupe_key = f"operator-care:{route}:{command_id or instruction.strip()}"
@@ -357,12 +354,12 @@ def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, ci
         matching = [s for s in sessions if s.program_code == program_code] if program_code else []
         if program_code and len(matching) != 1:
             reason = "class_session_not_unique" if matching else "class_session_not_found"
-            return [], [{"threadId": t["thread_id"], "reason": reason} for t in threads]
+            return [], [skipped_result(t, reason) for t in threads]
         scoped_session = matching[0].to_dict() if matching else None
 
     event = _pick_event(city, event_id) if route == "event" else None
     if route == "event" and not event:
-        return [], [{"threadId": t["thread_id"], "reason": "no_event"} for t in threads]
+        return [], [skipped_result(t, "no_event") for t in threads]
 
     created: list[dict] = []
     skipped: list[dict] = []
@@ -381,24 +378,36 @@ def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, ci
                 else:
                     session = matching[0].to_dict()
         if reason:
-            skipped.append({"threadId": t["thread_id"], "reason": reason})
+            skipped.append(skipped_result(t, reason))
             continue
-        cadence = _reminder_cadence(t["thread_id"], page_id, session, instruction) if route == "class_reminder" else {}
+        cadence = _reminder_cadence(t["thread_id"], page_id, session) if route == "class_reminder" else {}
+        if cadence.get("sent_reminders"):
+            interpretation = interpret_repeat_permission(
+                instruction, page_id=page_id, thread=t, session=session,
+                sent_reminders=cadence["sent_reminders"],
+            )
+            cadence["operator_interpretation"] = interpretation
+            cadence["repeat_explicitly_requested"] = interpretation.get("allow_repeat") is True and not interpretation.get("error")
+            if interpretation.get("error"):
+                skipped.append(skipped_result(t, "care_instruction_unresolved", interpretation["reason"], cadence))
+                continue
         if cadence.get("sent_reminders") and not cadence.get("repeat_explicitly_requested"):
-            skipped.append({
-                "threadId": t["thread_id"], "reason": "reminder_already_sent_for_session",
-                "note": "Chưa phù hợp để nhắc lại: seeker đã được nhắc cho buổi học này. Không tạo tin nhắn để tránh làm phiền.",
-                "reminderEvidence": cadence["sent_reminders"],
-            })
+            skipped.append(skipped_result(t, "reminder_already_sent_for_session",
+                "Chưa phù hợp để nhắc lại: seeker đã được nhắc cho buổi học này. "
+                + cadence["operator_interpretation"]["reason"], cadence))
             continue
+        if cadence.get("repeat_explicitly_requested"):
+            record_care_decision(page_id=page_id, thread=t, instruction=instruction, purpose=route,
+                                 reason="explicit_repeat_permission", note=cadence["operator_interpretation"]["reason"],
+                                 evidence=cadence, allowed=True)
         kind = route
         active = active_proposal_status(t["thread_id"], "proactive_message", dedupe_key=dedupe_key)
         if active == "executing":
-            skipped.append({"threadId": t["thread_id"], "reason": "executing_care_command_exists"})
+            skipped.append(skipped_result(t, "executing_care_command_exists"))
             continue
         if active and not regenerate:
             reason = "pending_care_command_exists"
-            skipped.append({"threadId": t["thread_id"], "reason": reason})
+            skipped.append(skipped_result(t, reason))
             continue
         strategy = select_warmup_strategy(seeker.get("lead_stage") or "Intake", _days_dormant(seeker)) if route == "warmup" else None
         strategy = strategy or ({"type": "manual_warmup", "cool_step": None} if route == "warmup" else None)
@@ -421,16 +430,15 @@ def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, ci
             reaction_events=t.get("reaction_events") or [],
         )
         if llm.get("no_send_reason"):
-            skipped.append({"threadId": t["thread_id"], "reason": "care_not_appropriate_now",
-                            "note": llm["no_send_reason"]})
+            skipped.append(skipped_result(t, "care_not_appropriate_now", llm["no_send_reason"], care_brief))
             continue
         if llm.get("escalation_reason"):
-            skipped.append({"threadId": t["thread_id"], "reason": f"escalated_{llm['escalation_reason']}"})
+            skipped.append(skipped_result(t, f"escalated_{llm['escalation_reason']}", llm.get("escalation_note", ""), care_brief))
             continue
         text = _approved_draft(llm)
         skip_reason = _outbound_skip_reason(text)
         if skip_reason:
-            skipped.append({"threadId": t["thread_id"], "reason": skip_reason})
+            skipped.append(skipped_result(t, skip_reason, evidence=care_brief))
             continue
         action_id, old = _enqueue(
             regenerate, queue_type="proactive_message", page_id=page_id, target_type="thread",
@@ -441,6 +449,7 @@ def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, ci
                      "instruction": instruction, "city": seeker.get("city"),
                      "dedupe_key": dedupe_key,
                      "session": session, "event_id": event.get("id") if event else None,
+                     "reminder_cadence": cadence,
                      "conversation_state": t.get("conversation_state")},
         )
         created.append(_proposal(action_id, "proactive_message", t, text, kind, old))

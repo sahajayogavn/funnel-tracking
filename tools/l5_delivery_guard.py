@@ -141,6 +141,7 @@ def prepare_draft(page, item, *, auto_send=False):
                         and _text(latest[-1].get("text", latest[-1].get("content"))) == _text(text)
                         and conversation_snapshot(latest) != conversation_snapshot(messages)):
                     assert_context_current(snapshot, latest[:-1])
+                    record_mas_delivery(item, latest[-1], "auto_send")
                     return "sent"
             raise RuntimeError("send_unconfirmed: Enter was pressed; verify Facebook before retrying")
         page.bring_to_front()
@@ -171,6 +172,27 @@ def set_delivery_result(item, outcome, reason=""):
             """UPDATE action_queue SET status=?, payload_json=?, error_text=?, updated_at=datetime('now')
                WHERE id=? AND status='executing'""",
             (status, json.dumps(payload, ensure_ascii=False), reason or None, item["id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def record_mas_delivery(item, message, send_mode):
+    """Record the actual Facebook message id of a delivered MAS proposal."""
+    if (item.get("payload") or {}).get("source") != "inbox_mas":
+        return
+    source_id = _text(message.get("source_id"))
+    if not source_id:
+        return
+    from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            """INSERT OR IGNORE INTO mas_message_provenance
+               (message_source_id, page_id, thread_id, action_queue_id, send_mode)
+               VALUES (?, ?, ?, ?, ?)""",
+            (source_id, item["page_id"], item["target_id"], item["id"], send_mode),
         )
         conn.commit()
     finally:
@@ -269,6 +291,7 @@ def reconcile_drafts(page_id):
                 if (not box.inner_text().strip() and messages[-1].get("sender") == "Page"
                         and _text(messages[-1].get("text", messages[-1].get("content"))) == _text(item["action_text"])):
                     assert_context_current(snapshot, messages[:-1])
+                    record_mas_delivery(item, messages[-1], "human_enter")
                     finish_action(item["id"])
                     logger.info("Confirmed manual send for action #%s", item["id"])
                     continue

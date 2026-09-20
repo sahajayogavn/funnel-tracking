@@ -292,29 +292,21 @@ def test_thuy_do_message_trace_chains_four_pass_calls_and_optional_repair(setup_
 def test_city_http_trace_persists_usage_metadata(setup_test_db, monkeypatch):
     import fb_pipeline.contracts.l1_city_llm as city_llm
 
-    class Response:
-        headers = {"Content-Type": "application/json"}
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "choices": [{"message": {"content": '{"city":"Hà Nội"}'}}],
-                "usage": {"prompt_tokens": 12, "completion_tokens": 4},
-            }
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(city_llm, "LLM_STREAM", False)
-    monkeypatch.setattr(city_llm.requests, "post", lambda *args, **kwargs: Response())
+    # City detection now uses the shared native Gemini transport rather than
+    # the retired OpenAI-compatible ``chat_completion_text`` helper.
+    monkeypatch.setattr(
+        city_llm,
+        "generate_text",
+        lambda **kwargs: ('{"city":"Hà Nội"}', {"prompt_tokens": 12, "completion_tokens": 4}),
+    )
 
     with span(trigger="scheduler", route="classify_detect", subject=("batch", "batch:1", "1 seeker")):
-        text = city_llm.chat_completion_text(
-            "https://llm.test/chat/completions",
-            {"model": "test-model", "messages": [{"role": "system", "content": "Classify"}]},
-            {},
+        text = city_llm.gemini_completion_text(
+            {"provider": "google", "model": "test-model"},
+            "Classify",
+            "Classify this seeker",
+            0.0,
+            30,
             30,
         )
 

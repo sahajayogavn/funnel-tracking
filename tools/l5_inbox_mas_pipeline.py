@@ -214,6 +214,14 @@ def _run_adk_care_pipeline(thread_messages: list, seeker_context: dict, care_pur
 
     try:
         run_specialist(conversation_analyst, "Analyze this selected care action using the session state. Do not draft.")
+        analyzed = asyncio.run(service.get_session(
+            app_name="sahajayoga_care", user_id="care_runner", session_id=session.id,
+        ))
+        analysis = str((analyzed.state if analyzed else {}).get("conversation_analysis") or "").strip()
+        if analysis.upper().startswith("NO_SEND:"):
+            result["classification"] = analysis
+            result["no_send_reason"] = analysis.partition(":")[2].strip() or "Chưa phù hợp để liên hệ lúc này."
+            return result
         run_specialist(knowledge_librarian, "Ground this selected care action using the session state. Do not draft.")
         repair_feedback = ""
         for repair_attempt in range(3):
@@ -245,6 +253,18 @@ def _run_adk_care_pipeline(thread_messages: list, seeker_context: dict, care_pur
             ))
             final_state = final_session.state if final_session else {}
             verdict = str(final_state.get("qa_verdict") or "").strip()
+            if verdict.upper().startswith("NO_SEND:"):
+                result["classification"] = analysis
+                result["qa_verdict"] = verdict
+                result["no_send_reason"] = verdict.partition(":")[2].strip() or "Chưa phù hợp để liên hệ lúc này."
+                return result
+            correction = _reminder_wording_correction(care_purpose, draft_state.get("draft_reply", ""))
+            if verdict.upper() == "PASS" and correction:
+                # Preserve the model verdict in the trace; expose the effective
+                # verdict separately and feed the correction through bounded repair.
+                verdict = "REPAIR: " + correction
+                result.setdefault("wording_repairs", []).append(correction)
+                final_state = {**final_state, "qa_verdict": verdict}
             result["loop_count"] += 2
             if verdict.upper() == "PASS":
                 break
@@ -287,6 +307,23 @@ def _populate_care_result(result: dict, state: dict) -> dict:
     return result
 
 
+def _reminder_wording_correction(purpose: str, draft: str) -> str:
+    """Known reminder failures; semantic relevance/source checks remain with QA."""
+    if purpose != "class_reminder":
+        return ""
+    import unicodedata
+
+    text = " ".join(unicodedata.normalize("NFC", draft or "").casefold().split())
+    pressure = ("mình nhắc bạn", "nhắc bạn nhớ", "đừng quên", "rất mong",
+                "mong được đón", "mọi người đang chờ bạn", "hy vọng bạn sắp xếp")
+    corrections = []
+    if any(phrase in text for phrase in pressure):
+        corrections.append("Remove reminder commands and expectations. Use a companionable appointment opening only with evidence; closing is optional.")
+    if re.search(r"miễn phí[^.!?\n]{0,100}\bnên\b[^.!?\n]{0,100}(?:trang phục|quần áo|mặc)", text):
+        corrections.append("Remove the unsupported free-fee-to-clothing causal sentence; retain only relevant verified session facts.")
+    return " ".join(corrections)
+
+
 def _care_qa_prompt(*, care_purpose: str, now_context: str, conversation_text: str,
                     conversation_state: dict, seeker_context: dict, care_brief: dict,
                     analysis: str, knowledge: str, draft: str) -> str:
@@ -307,7 +344,8 @@ def _care_qa_prompt(*, care_purpose: str, now_context: str, conversation_text: s
         f"Conversation analysis:\n{analysis}\n"
         f"Verified knowledge brief:\n{knowledge}\n"
         f"Draft under review:\n{draft}\n"
-        "Return only PASS, REPAIR: <correction>, or ESCALATE: <reason_code>: <note>."
+        "Return only PASS, NO_SEND: <Vietnamese reason if care is inappropriate now>, "
+        "REPAIR: <correction>, or ESCALATE: <reason_code>: <note>."
     )
 
 

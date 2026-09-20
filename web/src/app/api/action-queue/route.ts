@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getActionQueueItems, getSeekerActionQueueItems } from '@/lib/queries';
-import { getDb } from '@/lib/db';
+import { queryOne } from '@/lib/db';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -8,11 +8,11 @@ export async function GET(request: NextRequest) {
   const targetName = searchParams.get('targetName');
 
   if (targetId || targetName) {
-    const items = getSeekerActionQueueItems(targetId, targetName);
+    const items = await getSeekerActionQueueItems(targetId, targetName);
     return NextResponse.json(items);
   }
 
-  const items = getActionQueueItems();
+  const items = await getActionQueueItems();
   return NextResponse.json(items);
 }
 
@@ -25,11 +25,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    const db = getDb();
-    const result = db.prepare(`
+    const result = await queryOne<{ id: number }>(`
       INSERT INTO action_queue (queue_type, page_id, target_type, target_id, target_name, action_text, reaction_type, payload_json)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      RETURNING id
+    `, [
       queueType,
       pageId,
       targetType,
@@ -38,9 +38,9 @@ export async function POST(request: NextRequest) {
       actionText || null,
       reactionType || null,
       JSON.stringify(payload || {})
-    );
+    ]);
 
-    return NextResponse.json({ id: Number(result.lastInsertRowid), status: 'pending' }, { status: 201 });
+    return NextResponse.json({ id: result?.id, status: 'pending' }, { status: 201 });
   } catch (error) {
     console.error('Failed to enqueue action:', error);
     return NextResponse.json({ error: 'Failed to enqueue action' }, { status: 500 });

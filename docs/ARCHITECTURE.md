@@ -432,7 +432,7 @@ L2 CDP9222 / browser handle
 3. `fb_pipeline.browser.l3_inbox.scrape_inbox_ui(...)` executes a resilient Two-Stage Fetching Strategy:
    - **Stage 1 (Discovery)**: Temporarily disables message extraction to iteratively scroll the inbox sidebar backward in time, accumulating a list of target threads strictly bounded by `timerange` and `maxThreads`.
    - **Stage 2 (Extraction)**: Resets the viewport to the top and sequentially navigates through *only* the discovered thread list from Stage 1 to safely extract deep message payloads without breaking DOM virtualization.
-   - **Target — `--workers N`** (`prd:inbox-parallel-fetch-001`): Stage 1 streams discovered threads into a queue while `N-1` worker tabs run Stage 2 concurrently. See [`architect/inbox-fetch-pipeline.md`](architect/inbox-fetch-pipeline.md) (`doc:inbox-fetch-pipeline-001`) for the design and implementation plan.
+   - **Target — `--workers N`** (`prd:inbox-parallel-fetch-001`): Stage 1 streams discovered threads into a queue while `N-1` worker tabs run Stage 2 concurrently. `N` is capped at 4 total tabs: one orchestrator plus at most three workers. See [`architect/inbox-fetch-pipeline.md`](architect/inbox-fetch-pipeline.md) (`doc:inbox-fetch-pipeline-001`) for the design and implementation plan.
 4. `fb_pipeline.inbox.l3_pipeline.build_thread_record(...)` normalizes thread metadata
 5. `fb_pipeline.inbox.l3_pipeline.enrich_thread_record(...)` derives contact info, city, ad IDs, and builds a `MasHandoff`
 6. `fb_pipeline.inbox.l3_pipeline.persist_thread_record(...)` writes `threads`, `messages`, `users`, `user_ad_ids`, and `ad_posts`

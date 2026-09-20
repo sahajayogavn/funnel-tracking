@@ -6,7 +6,7 @@ Welcome to the **Funnel Tracking** repository. This project builds AI Agents to 
 
 1. **Facebook Fanpage Integration**: Automatically fetch and process inbox messages from seekers.
 2. **Telegram Notification**: Forward inquiries to a designated Telegram group.
-3. **Seeker Information Storage**: Store and manage seeker data (phone, email, city, FB URL) in FrankenSQLite.
+3. **Seeker Information Storage**: Store and manage seeker data (phone, email, city, FB URL) in PostgreSQL on `10.0.1.42`; the former FrankenSQLite file is a read-only audit snapshot.
 4. **Agent Memory**: The inbox MAS loads `memory/SOUL.md`, `memory/agent_memory/faq.md`, `memory/agent_memory/lop-hoc.md`, `memory/agent_memory/su-kien.md`, `memory/research.md`, and `memory/mas_strategy.md` into runtime `knowledge_context`.
 5. **AI Agent Software (ADK)**: Google ADK powers the inbox reply flow (Classifier → Responder), while reaction / warm-up / event routes are scaffolded in the scheduler and tools.
 6. **Web Dashboard**: Next.js 16 full-stack application with:
@@ -58,20 +58,50 @@ session) and **6. Điểm danh** (`attendance_check`, approve = attended, reject
 `tools/run_inbox_mas_loop.sh pipeline` now skips the MAS step when the fetch stored no new
 messages (`FUNNEL_MAS_ALWAYS=1` restores unconditional runs).
 
+Inbox fetch concurrency is capped at four browser tabs in total: one
+orchestrator and at most three worker tabs. `FUNNEL_FETCH_WORKERS` defaults to
+`4`; higher values are clamped to `4` by `tools/l5_fetch_fb_messages.py`.
+
 ## ✅ Human-approved action executor (HITL)
 
-HITL delivery is a separate process: it only polls approvals and executes
-already-approved outbound actions. It does not run fetch, classification, or MAS.
+The independent executor accepts approval directly on `/queues`; Telegram is
+optional. It handles approved `reply_message` and `proactive_message` actions.
+Pending drafts for other seekers do not block a web-approved action. Another
+active DM for the same recipient still blocks delivery to avoid competing drafts.
+Before filling the composer it verifies the exact Page, Facebook recipient ID,
+rendered conversation name, and current messages against the MAS input snapshot.
 
 ```bash
 # Preview approved actions only; never opens Facebook or changes queue state.
 FUNNEL_PAGE_ID=1548373332058326 ./tools/run_hitl_execution_loop.sh dry-run
 
-# Execute approved outbound actions every 30 seconds through the CDP browser.
-FUNNEL_PAGE_ID=1548373332058326 ./tools/run_hitl_execution_loop.sh live
+# Default: open the recipient tab and fill the draft; operator presses Enter.
+FUNNEL_PAGE_ID=1548373332058326 FUNNEL_HITL_INTERVAL_SECONDS=15 ./tools/run_hitl_execution_loop.sh live
+
+# Explicit equivalent of the default.
+FUNNEL_PAGE_ID=1548373332058326 ./tools/run_hitl_execution_loop.sh live --draft-only
+
+# Opt in to Enter after identity, context and composer verification.
+FUNNEL_PAGE_ID=1548373332058326 ./tools/run_hitl_execution_loop.sh live --auto-send
 ```
 
 Set `FUNNEL_HITL_INTERVAL_SECONDS` to change the polling interval.
+
+`Draft — chờ Enter` is stored as `executing` with `delivery_status=drafted`,
+not as a sent action. The worker observes the dedicated tab on later ticks and
+marks `executed` only after confirming the approved text as a new Page message.
+Keep the tab and worker open for this confirmation. It never retries an uncertain
+send automatically. An operator-edited message or a closed tab needs manual verification.
+
+New web proposals freeze the complete persisted history before model execution,
+including message counts, so identical repeated messages are detected too.
+Changed or unverifiable context becomes **Out-date** (`rejected`, with a reason).
+A durable `fetch_request=pending` in the action payload instructs the executor's
+targeted refresh step to fetch and persist that exact thread; errors remain pending
+for retry. Generate and approve a fresh MAS proposal after refresh. Legacy actions
+without an input snapshot must also be refreshed/regenerated; a snapshot must not
+be reconstructed from today's DB and falsely attributed to an earlier MAS run.
+Missing recipient evidence fails closed. Existing operator composer text is never overwritten.
 
 ## 🔧 Facebook Message Fetcher (`tools/fetch_fb_messages.py`)
 

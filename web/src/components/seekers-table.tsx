@@ -308,14 +308,14 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
   }, [sorted]);
 
   return (
-    <div>
+    <div className="seekers-workspace">
       {/* ── City & Date Range Filter Bar ── */}
       <FunnelFilterBar
         onFilterChange={setFilterState}
         availablePrograms={PROGRAMS}
         totalCount={seekers.length}
         filteredCount={sorted.length}
-        unitLabel="seekers"
+        unitLabel="contacts"
         extraControls={
           <>
           {journeyStage && (
@@ -392,7 +392,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: '0px', position: 'relative' }}>
+      <div className={`seekers-table-layout${selectedSeeker ? ' has-sidebar' : ''}`} style={{ display: 'flex', gap: '0px', position: 'relative' }}>
         {/* Main table area */}
         <div style={{ flex: 1, minWidth: 0 }}>
           {/* Search */}
@@ -411,21 +411,18 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
           </div>
 
           {/* Table */}
-          <div className="card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
+          <div className="card seekers-table-scroll" tabIndex={0} role="region" aria-label="Danh sách seekers, cuộn ngang để xem thêm cột" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
             <table className="data-table">
               <thead>
                 <tr>
                   <th style={{ width: '36px' }}>#</th>
                   <th onClick={() => handleSort('name')}>Name {sortField === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}</th>
                   <th onClick={() => handleSort('phone')}>Phone</th>
-                  <th onClick={() => handleSort('lastMessageDate')} style={{ cursor: 'pointer' }}>
-                    Last Message {(sortField === 'lastMessageDate' || sortField === 'lastMessageTimestampText') ? (sortDir === 'asc' ? '↑' : '↓') : ''}
-                  </th>
                   <th onClick={() => handleSort('city')} style={{ minWidth: '230px' }}>City / Class</th>
                   <th onClick={() => handleSort('leadStage')} style={{ minWidth: '130px', textAlign: 'center' }}>
                     Stage {sortField === 'leadStage' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
                   </th>
-                  <th style={{ minWidth: '260px' }}>Pending message</th>
+                  <th className="pending-message-heading" style={{ minWidth: selectedSeeker ? '130px' : '260px' }}>Pending message</th>
                 </tr>
               </thead>
               <tbody>
@@ -503,19 +500,6 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
 
                       <td>{seeker.phone || '—'}</td>
                       <td>
-                        <div className="last-message-cell">
-                          <time
-                            dateTime={seeker.lastMessageDate || seeker.lastInteraction || undefined}
-                            title={seeker.lastMessageDate || seeker.lastMessageTimestampText || seeker.lastInteraction || undefined}
-                          >
-                            {formatRelativeElapsed(seeker.lastMessageDate || seeker.lastInteraction || seeker.lastMessageTimestampText)}
-                          </time>
-                          <div className="last-message-activity" aria-label="Hoạt động tương tác trong 12 tháng qua">
-                            <InteractionHistogram data={activityData[seeker.name] || []} />
-                          </div>
-                        </div>
-                      </td>
-                      <td>
                         {seeker.classificationStatus === 'unknown' ? (
                           <span className="badge" style={{ background: 'rgba(107, 114, 128, 0.12)', color: '#9ca3af' }}>—</span>
                         ) : (
@@ -540,12 +524,23 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                           </div>
                         )}
                       </td>
-                      <td style={{ textAlign: 'center' }}>
+                      <td className="seeker-stage-cell">
                         <SevenStarProgress leadStage={seeker.leadStage} />
+                        <div className="last-message-cell">
+                          <time
+                            dateTime={seeker.lastMessageDate || seeker.lastInteraction || undefined}
+                            title={seeker.lastMessageDate || seeker.lastMessageTimestampText || seeker.lastInteraction || undefined}
+                          >
+                            {formatRelativeElapsed(seeker.lastMessageDate || seeker.lastInteraction || seeker.lastMessageTimestampText)}
+                          </time>
+                          <div className="last-message-activity" aria-label="Hoạt động tương tác trong 12 tháng qua">
+                            <InteractionHistogram data={activityData[seeker.name] || []} />
+                          </div>
+                        </div>
                       </td>
-                      <td onClick={event => event.stopPropagation()}>
+                      <td className="pending-message-cell">
                         {seeker.pendingMessage ? (
-                          <div title={seeker.pendingMessage} style={{ maxWidth: '320px', color: '#fcd34d', fontSize: '11px', lineHeight: 1.4 }}>
+                          <div title={seeker.pendingMessage} style={{ color: '#fcd34d', fontSize: '11px', lineHeight: 1.4 }}>
                             <div style={{ fontSize: '10px', color: '#a5b4fc', fontWeight: 700, marginBottom: '3px' }}>
                               ⏳ {seeker.pendingMessageKind || 'MAS'}
                             </div>
@@ -557,7 +552,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                   );
                 })}
                 {sorted.length === 0 && (
-                  <tr><td colSpan={8} style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>No seekers found</td></tr>
+                  <tr><td colSpan={6} style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>No seekers found</td></tr>
                 )}
               </tbody>
           </table>
@@ -600,7 +595,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
           onClick={closeBatchModal}
         >
           <div
-            className="card"
+            className="card seekers-batch-modal"
             style={{
               width: '460px',
               maxWidth: '90vw',
