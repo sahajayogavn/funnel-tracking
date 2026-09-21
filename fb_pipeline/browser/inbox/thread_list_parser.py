@@ -58,22 +58,44 @@ def extract_visible_threads(page) -> list[dict]:
                 }
             }
 
-            function pickSidebarTimestamp(lines) {
+            function pickSidebarTimestamp(el, lines) {
                 const timePattern = /^\d{1,2}:\d{2}\s*(?:am|pm)$/i;
                 const datePattern = /^(?:\d+[smhdw]|today|yesterday|hôm nay|hôm qua|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|th(?:g|áng)?)\s*\d{1,2}(?:(?:,\s*|\s+)\d{4})?|\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|th(?:g|áng)?)(?:(?:,\s*|\s+)\d{4})?|\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?)$/i;
+                // code:inbox-sidebar-time-001:utime-first
+                // Meta renders the conversation time as
+                //   <span class="accessible_elem">Sunday</span>
+                //   <abbr class="timestamp" title="Sunday" data-utime="1789896374.244">Sun</abbr>
+                // followed by label chips ("Intake", "Qualified", "ad_id...").
+                // The abbr is authoritative: its text is the visible token and
+                // data-utime the exact epoch.  Both the abbr text and the
+                // screen-reader duplicate must be removed from the preview.
+                const abbr = el.querySelector('abbr[data-utime]');
+                if (abbr) {
+                    const text = (abbr.textContent || '').trim();
+                    const parts = new Set([text, (abbr.getAttribute('title') || '').trim()]);
+                    for (const sr of Array.from(el.querySelectorAll('.accessible_elem'))) {
+                        parts.add((sr.textContent || '').trim());
+                    }
+                    parts.delete('');
+                    const utime = Number.parseFloat(abbr.getAttribute('data-utime') || '');
+                    return { text, parts: Array.from(parts), source: 'utime', utimeMs: Number.isFinite(utime) ? utime * 1000 : null };
+                }
+                // Fallback (no abbr): first date-looking line after the name.
+                // A date inside the preview can be mistaken for it, so Stage 1
+                // treats source="scan" as untrustworthy for skip decisions.
                 for (let i = 1; i < lines.length; i++) {
                     const token = (lines[i] || '').trim();
                     if (!datePattern.test(token)) continue;
                     const next = (lines[i + 1] || '').trim();
                     // Meta renders the date and clock as distinct DOM lines.
-                    if (timePattern.test(next)) return { text: `${token} ${next}`, parts: [token, next] };
-                    return { text: token, parts: [token] };
+                    if (timePattern.test(next)) return { text: `${token} ${next}`, parts: [token, next], source: 'scan', utimeMs: null };
+                    return { text: token, parts: [token], source: 'scan', utimeMs: null };
                 }
                 for (let i = 1; i < lines.length; i++) {
                     const token = (lines[i] || '').trim();
-                    if (timePattern.test(token)) return { text: token, parts: [token] };
+                    if (timePattern.test(token)) return { text: token, parts: [token], source: 'scan', utimeMs: null };
                 }
-                return { text: '', parts: [] };
+                return { text: '', parts: [], source: '', utimeMs: null };
             }
 
             return candidates.map((el, idx) => {
@@ -87,11 +109,11 @@ def extract_visible_threads(page) -> list[dict]:
                 const text = (el.innerText || '').trim();
                 const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
                 const name = lines[0] || '';
-                const sidebarTimestamp = pickSidebarTimestamp(lines);
+                const sidebarTimestamp = pickSidebarTimestamp(el, lines);
                 const sidebarTimeText = sidebarTimestamp.text;
+                const sidebarTimeSource = sidebarTimestamp.source;
                 const previewLines = lines.slice(1).filter(line => !sidebarTimestamp.parts.includes(line));
-                const timestampEl = el.querySelector('abbr[data-utime]');
-                const sidebarTimestampMs = timestampEl ? Number.parseFloat(timestampEl.getAttribute('data-utime') || '') * 1000 : null;
+                const sidebarTimestampMs = sidebarTimestamp.utimeMs;
                 const hrefEl = el.closest('a[href]') || el.querySelector('a[href]');
                 const href = hrefEl ? (hrefEl.getAttribute('href') || '') : '';
                 
@@ -141,6 +163,7 @@ def extract_visible_threads(page) -> list[dict]:
                     lines,
                     previewText: previewLines.join(' ').trim(),
                     sidebarTimeText,
+                    sidebarTimeSource,
                     sidebarTimestampMs: Number.isFinite(sidebarTimestampMs) ? sidebarTimestampMs : null,
                     sidebarIdentityKey,
                     facebookUid,
@@ -253,12 +276,28 @@ def parse_sidebar_time_token(token: str, now: datetime | None = None) -> dict:
     if lower in TIME_YESTERDAY:
         return {"kind": "yesterday", "token": token, "days_ago": 1, "parsed_at": (now.date() - timedelta(days=1)).isoformat()}
     if lower in DAY_NAMES:
-        return {"kind": "weekday", "token": token, "days_ago": 6, "parsed_at": None}
+        # code:inbox-sidebar-time-001:weekday
+        # Meta shows a bare weekday for messages within the last 7 days.  A
+        # bare "Tue" therefore means the most recent Tuesday strictly before
+        # today (today itself renders as a clock), not a fixed 6 days ago.
+        days_map = {'mon': 0, 'tue': 1, 'wed': 2, 'thu': 3, 'fri': 4, 'sat': 5, 'sun': 6}
+        target_weekday = days_map[lower[:3]]
+        days_diff = now.weekday() - target_weekday
+        if days_diff <= 0:
+            days_diff += 7
+        parsed = now.date() - timedelta(days=days_diff)
+        return {"kind": "weekday", "token": token, "days_ago": days_diff, "parsed_at": parsed.isoformat()}
     from fb_pipeline.browser.inbox.constants import SLASH_DATE_RE, MONTH_DAY_RE, MONTH_DAY_REV_RE
     
     if SLASH_DATE_RE.match(lower):
         m = SLASH_DATE_RE.match(lower)
-        d, mo_num, y = m.groups()
+        # code:inbox-sidebar-time-001:slash-date
+        # Meta's English UI renders m/d/yy ("12/29/24", "3/8/25"), consistent
+        # with its "Aug 6" tokens.  Swap only when the first field cannot be a
+        # month, so a dd/mm locale still parses instead of returning unknown.
+        mo_num, d, y = m.groups()
+        if int(mo_num) > 12 and int(d) <= 12:
+            mo_num, d = d, mo_num
         y = y if y else str(now.year)
         if len(y) == 2: y = "20" + y
         try:

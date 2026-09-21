@@ -201,7 +201,7 @@ class TestRunParallelFetchDispatch(unittest.TestCase):
                 pass
 
         def fake_discover(page, page_id, time_range, max_threads, received_conn, logger, record_fetch,
-                          *, skip_navigation, force_refresh, allow_early_exit,
+                          *, skip_navigation, force_refresh, refresh_older_than_days=None, allow_early_exit,
                           target_total_messages, on_task):
             self.assertIs(received_conn, conn)
             self.assertGreaterEqual(conn.commits, 1)
@@ -238,7 +238,7 @@ class TestRunParallelFetchDispatch(unittest.TestCase):
                                            status="persisted", messages_added=1, worker=f"worker:{worker_index}"))
 
         def fake_discover(page, page_id, time_range, max_threads, conn, logger, record_fetch,
-                          *, skip_navigation, force_refresh, allow_early_exit,
+                          *, skip_navigation, force_refresh, refresh_older_than_days=None, allow_early_exit,
                           target_total_messages, on_task):
             on_task(_task("A", 0))
             on_task(_task("B", 1))
@@ -272,7 +272,7 @@ class TestRunParallelFetchDispatch(unittest.TestCase):
 class TestRunParallelFetchSentinels(unittest.TestCase):
     """(2) sentinel shutdown: N-1 workers each get exactly one None and exit."""
 
-    def test_each_worker_gets_one_sentinel(self):
+    def test_each_worker_gets_one_sentinel_and_internal_cap_limits_pool_to_two(self):
         sentinel_counts = {}
         lock = threading.Lock()
 
@@ -291,7 +291,7 @@ class TestRunParallelFetchSentinels(unittest.TestCase):
                 sentinel_counts[worker_index] = count
 
         def fake_discover(page, page_id, time_range, max_threads, conn, logger, record_fetch,
-                          *, skip_navigation, force_refresh, allow_early_exit,
+                          *, skip_navigation, force_refresh, refresh_older_than_days=None, allow_early_exit,
                           target_total_messages, on_task):
             for i in range(5):
                 on_task(_task(f"T{i}", i))
@@ -311,10 +311,12 @@ class TestRunParallelFetchSentinels(unittest.TestCase):
                 worker_loop=fake_worker_loop, assignment_log_dir=None,
             )
 
-        self.assertEqual(len(sentinel_counts), 3)
+        # Even an internal caller requesting four total tabs is capped at one
+        # orchestrator plus two worker tabs.
+        self.assertEqual(len(sentinel_counts), 2)
         for count in sentinel_counts.values():
             self.assertEqual(count, 1)
-        self.assertEqual(stats["workers"], 4)
+        self.assertEqual(stats["workers"], 3)
         conn.close()
 
 
@@ -358,7 +360,7 @@ class TestRunParallelFetchTargetMessages(unittest.TestCase):
                                  status="persisted", messages_added=5)
 
         def fake_discover(page, page_id, time_range, max_threads, conn, logger, record_fetch,
-                          *, skip_navigation, force_refresh, allow_early_exit,
+                          *, skip_navigation, force_refresh, refresh_older_than_days=None, allow_early_exit,
                           target_total_messages, on_task):
             for i in range(10):
                 on_task(_task(f"T{i}", i))
@@ -400,7 +402,7 @@ class TestRunParallelFetchAggregation(unittest.TestCase):
                                  status="persisted", messages_added=2, locate_method="direct_url")
 
         def fake_discover(page, page_id, time_range, max_threads, conn, logger, record_fetch,
-                          *, skip_navigation, force_refresh, allow_early_exit,
+                          *, skip_navigation, force_refresh, refresh_older_than_days=None, allow_early_exit,
                           target_total_messages, on_task):
             # Dispatch out of "natural" completion order relative to ordinal 2 vs 0
             # to prove aggregation sorts processed_thread_ids by ordinal, not
@@ -453,7 +455,7 @@ class TestRunParallelFetchEarlyExit(unittest.TestCase):
         }
 
         def fake_discover(page, page_id, time_range, max_threads, conn, logger, record_fetch,
-                          *, skip_navigation, force_refresh, allow_early_exit,
+                          *, skip_navigation, force_refresh, refresh_older_than_days=None, allow_early_exit,
                           target_total_messages, on_task):
             return {"early_exit": True, "stats": dict(early_stats)}
 
@@ -509,15 +511,15 @@ class TestCliWorkersOne(unittest.TestCase):
 
 
 class TestCliWorkersClamp(unittest.TestCase):
-    """(7) --workers clamps 0->1 and values above 4->4."""
+    """(7) --workers clamps 0->1 and values above 3->3."""
 
     def test_clamp(self):
         import tools.l5_fetch_fb_messages as cli
         self.assertEqual(cli._clamp_workers(0, _Logger()), 1)
-        self.assertEqual(cli._clamp_workers(20, _Logger()), 4)
-        self.assertEqual(cli._clamp_workers(4, _Logger()), 4)
+        self.assertEqual(cli._clamp_workers(20, _Logger()), 3)
+        self.assertEqual(cli._clamp_workers(4, _Logger()), 3)
         self.assertEqual(cli._clamp_workers(1, _Logger()), 1)
-        self.assertEqual(cli._clamp_workers(8, _Logger()), 4)
+        self.assertEqual(cli._clamp_workers(8, _Logger()), 3)
 
 
 if __name__ == '__main__':
@@ -589,7 +591,7 @@ class TestOrchestratorTabClosed(unittest.TestCase):
                                  status="persisted", messages_added=1)
 
         def fake_discover(p, page_id, time_range, max_threads, conn, logger, record_fetch,
-                          *, skip_navigation, force_refresh, allow_early_exit,
+                          *, skip_navigation, force_refresh, refresh_older_than_days=None, allow_early_exit,
                           target_total_messages, on_task):
             for i in range(20):
                 on_task(_task(f"T{i}", i))
@@ -789,7 +791,7 @@ class TestRequeueAndCircuitBreaker(unittest.TestCase):
                 result_q.put(r)
 
         def fake_discover(page, page_id, time_range, max_threads, conn, logger, record_fetch,
-                          *, skip_navigation, force_refresh, allow_early_exit,
+                          *, skip_navigation, force_refresh, refresh_older_than_days=None, allow_early_exit,
                           target_total_messages, on_task):
             for i in range(3):
                 on_task(_task(f"T{i}", i))

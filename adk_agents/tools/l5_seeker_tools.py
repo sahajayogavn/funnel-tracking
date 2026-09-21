@@ -20,6 +20,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from fb_pipeline.persistence.l4_sqlite_store import get_db_connection
+from fb_pipeline.contracts.l1_message_kind import canonical_sender_for_actor
 
 
 def lookup_seeker(thread_id: str) -> dict:
@@ -129,7 +130,11 @@ def get_thread_messages(thread_id: str, limit: int = 150) -> dict:
             if total_chars + char_cost > 3500 and total_chars > 0:
                 break
             messages.append({
-                "sender": r["sender"],
+                # A legacy CSS-derived Page/Customer label is not safe input
+                # when it also contains a merged quote/reaction fragment.
+                # The shared contract downgrades precisely that known-corrupt
+                # shape without blanketing all readable legacy history.
+                "sender": canonical_sender_for_actor(dict(r)),
                 "content": content,
                 "timestamp": r["message_timestamp"],
                 "message_at": r["message_at"],

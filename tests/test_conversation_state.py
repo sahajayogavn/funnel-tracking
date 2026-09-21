@@ -190,6 +190,40 @@ def test_unknown_sender_body_requires_review_instead_of_silent_no_customer_skip(
     assert state.reason == "unresolved_sender_with_message_body"
 
 
+def test_css_era_merged_customer_claim_without_sender_evidence_requires_review():
+    """Only the legacy merged quote/reply shape invalidates its actor claim."""
+    state = compute_conversation_state([{
+        **_m("Customer", "Mình muốn đăng ký lớp\n[Quoted Reply/Link]: Hỏi chi tiết", "2026-09-17 12:00:00", 1),
+        "sender_confidence": "unknown",
+        "sender_evidence": None,
+    }], now=NOW)
+
+    assert state.state == STATE_UNCERTAIN_SENDER
+    assert state.action == ACTION_NEEDS_REVIEW
+    assert state.reason == "unresolved_sender_with_message_body"
+
+
+def test_unverified_merged_page_claim_after_customer_turn_cannot_close_the_gate():
+    state = compute_conversation_state([
+        {**_m("Customer", "Lớp học ở đâu ạ?", "2026-09-17 12:00:00", 1), "sender_confidence": "explicit"},
+        {**_m("Page", "Ở Hà Nội nhé\n[Quoted Reply/Link]: Dạ", "2026-09-17 12:02:00", 2), "sender_confidence": "unknown"},
+    ], now=NOW)
+
+    assert state.state == STATE_UNCERTAIN_SENDER
+    assert state.action == ACTION_NEEDS_REVIEW
+    assert state.reason == "unresolved_sender_after_last_customer_turn"
+
+
+def test_explicit_sender_evidence_still_allows_normal_page_closure():
+    state = compute_conversation_state([
+        {**_m("Customer", "Lớp học ở đâu ạ?", "2026-09-17 12:00:00", 1), "sender_confidence": "explicit"},
+        {**_m("Page", "Ở Hà Nội nhé", "2026-09-17 12:02:00", 2), "sender_confidence": "explicit"},
+    ], now=NOW)
+
+    assert state.state == STATE_ALREADY_ANSWERED
+    assert state.action == ACTION_SKIP
+
+
 def test_fresh_closer_without_human_reply_allows_short_reply():
     msgs = [
         _m("Auto_Page", "KHÓA HỌC THIỀN MIỄN PHÍ", "2026-09-17 12:00:00", 1),
@@ -258,6 +292,16 @@ def test_format_conversation_lines_keeps_sender_and_time_uncertainty_visible():
     }])
     assert "Customer (sender confidence: unknown)" in text
     assert "precision: unknown; raw: 9:00 AM; day context: Sep 10, 2026" in text
+
+
+def test_format_conversation_lines_does_not_repeat_legacy_page_claim_as_actor():
+    text = format_conversation_lines([{
+        **_m("Page", "Chào bạn\n[Quoted Reply/Link]: Hỏi chi tiết", "2026-09-17 12:00:00", 1),
+        "sender_confidence": "unknown",
+    }])
+    assert "[2026-09-17 12:00 | Unknown (unverified stored sender claim: Page; confidence: unknown)] Chào bạn" in text
+    assert "Reply/quote metadata] Hỏi chi tiết" in text
+    assert "NOT a statement from Unknown (unverified stored sender claim: Page" in text
 
 
 def test_quote_cannot_create_a_customer_question_or_phone_signal():

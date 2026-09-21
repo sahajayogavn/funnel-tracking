@@ -1,4 +1,5 @@
 import hashlib
+import re
 import json
 from collections import Counter
 from datetime import datetime
@@ -75,19 +76,42 @@ def _compute_thread_id(page_id: str, visible_thread: dict, name: str, preview_te
 
 
 
+# code:inbox-sync-skip-001:normalize-preview
+def normalize_preview_text(text: str | None) -> str:
+    """Reduce a sidebar preview / message body to a comparable key.
+
+    Strips the ad-source banner and the "You:"/"Bạn:" sender label, then keeps
+    only lowercase alphanumerics so punctuation, whitespace and truncation
+    marks rendered differently by Meta do not defeat the comparison.
+    """
+    if not text:
+        return ""
+    s = re.sub(r'^---\s*\[AD SOURCE\]:.*?---\s*', '', text, flags=re.DOTALL)
+    s = re.sub(r'^(you|bạn):\s*', '', s, flags=re.IGNORECASE)
+    return ''.join(c.lower() for c in s if c.isalnum())
+
+
 def build_thread_record(page_id: str, visible_thread: dict) -> ThreadRecord:
     name = (visible_thread.get("name") or "").strip()
     thread_text_full = visible_thread.get("text", "")
     thread_lines = [l.strip() for l in thread_text_full.split('\n') if l.strip()]
     sidebar_time_text = (visible_thread.get("sidebarTimeText") or "").strip()
     sidebar_time_kind = (visible_thread.get("sidebarTimeKind") or "").strip()
+    sidebar_time_source = (visible_thread.get("sidebarTimeSource") or "").strip()
     sidebar_identity_key = (visible_thread.get("sidebarIdentityKey") or "").strip()
     selected_item_id = (visible_thread.get("selectedItemId") or "").strip()
     fb_url = (visible_thread.get("fbUrl") or "").strip()
 
     preview_lines = list(thread_lines[1:]) if len(thread_lines) > 1 else []
     if sidebar_time_text:
-        preview_lines = [line for line in preview_lines if line.strip() != sidebar_time_text]
+        # The extractor may join a date line and a clock line ("Today 8:56 PM");
+        # drop both halves as well as the joined form.
+        time_parts = {sidebar_time_text}
+        halves = sidebar_time_text.rsplit(" ", 2)
+        if len(halves) == 3:
+            time_parts.add(halves[0])
+            time_parts.add(f"{halves[1]} {halves[2]}")
+        preview_lines = [line for line in preview_lines if line.strip() not in time_parts]
     preview_text = " ".join(preview_lines).strip()
 
     return ThreadRecord(
@@ -111,6 +135,7 @@ def build_thread_record(page_id: str, visible_thread: dict) -> ThreadRecord:
         sidebar_time_text=sidebar_time_text,
         sidebar_timestamp_ms=visible_thread.get("sidebarTimestampMs"),
         sidebar_time_kind=sidebar_time_kind,
+        sidebar_time_source=sidebar_time_source,
         sidebar_identity_key=sidebar_identity_key,
         selected_item_id=selected_item_id,
         fb_url=fb_url,
@@ -193,6 +218,7 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
         sidebar_time_text=thread_record.sidebar_time_text,
         sidebar_timestamp_ms=thread_record.sidebar_timestamp_ms,
         sidebar_time_kind=thread_record.sidebar_time_kind,
+        sidebar_time_source=thread_record.sidebar_time_source,
         sidebar_identity_key=thread_record.sidebar_identity_key,
         selected_item_id=thread_record.selected_item_id,
         fb_url=fb_url,
@@ -570,22 +596,46 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     if not last_message_at and sidebar_time.get("parsed_at") and " " in sidebar_time["parsed_at"]:
         last_message_at = sidebar_time["parsed_at"].replace("T", " ")
 
+    # code:inbox-sync-skip-001:persist-fetched-marker
+    # Record the sidebar card as it looked when this sync happened, even when
+    # no new message was inserted: the marker is what lets the next Stage 1
+    # skip the thread without opening it.  A detail-only refresh (no sidebar
+    # token) leaves the previous marker untouched.
+    fetched_token = (thread_record.sidebar_time_text or "").strip() or None
+    fetched_kind = sidebar_time.get("kind") if fetched_token else None
+    fetched_preview = normalize_preview_text(thread_record.preview_text) if fetched_token else None
+    fetched_utime_ms = int(thread_record.sidebar_timestamp_ms) if (fetched_token and thread_record.sidebar_timestamp_ms) else None
     cursor.execute('''
-        INSERT INTO threads (id, page_id, thread_name, last_synced_time, inbox_sort_index, last_message_at)
-        VALUES (?, ?, ?, datetime('now'), ?, ?)
+        INSERT INTO threads (id, page_id, thread_name, last_synced_time, inbox_sort_index, last_message_at,
+                             fetched_sidebar_token, fetched_sidebar_kind, fetched_sidebar_utime_ms, fetched_preview_norm, fetched_at)
+        VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now', 'localtime') END)
         ON CONFLICT(id) DO UPDATE SET
             thread_name=excluded.thread_name,
             last_synced_time=excluded.last_synced_time,
             -- A targeted detail refresh does not have a sidebar ordinal.
             -- Retain the Stage-1 order in that case.
             inbox_sort_index=COALESCE(excluded.inbox_sort_index, threads.inbox_sort_index),
-            last_message_at=COALESCE(excluded.last_message_at, threads.last_message_at)
+            last_message_at=COALESCE(excluded.last_message_at, threads.last_message_at),
+            fetched_sidebar_token=COALESCE(excluded.fetched_sidebar_token, threads.fetched_sidebar_token),
+            fetched_sidebar_kind=COALESCE(excluded.fetched_sidebar_kind, threads.fetched_sidebar_kind),
+            -- Reset (not COALESCE) the utime when a fresh sidebar token is
+            -- stored without one, so a stale epoch can never outlive its token.
+            fetched_sidebar_utime_ms=CASE WHEN excluded.fetched_sidebar_token IS NULL
+                                          THEN threads.fetched_sidebar_utime_ms
+                                          ELSE excluded.fetched_sidebar_utime_ms END,
+            fetched_preview_norm=COALESCE(excluded.fetched_preview_norm, threads.fetched_preview_norm),
+            fetched_at=COALESCE(excluded.fetched_at, threads.fetched_at)
     ''', (
         thread_record.thread_id,
         thread_record.page_id,
         thread_record.thread_name,
         thread_record.dom_index,
         last_message_at,
+        fetched_token,
+        fetched_kind,
+        fetched_utime_ms,
+        fetched_preview,
+        fetched_token,
     ))
 
     for aid in thread_record.ad_ids:

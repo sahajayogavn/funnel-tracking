@@ -107,6 +107,24 @@ def test_dom_parser_never_copies_cluster_source_id_to_sibling_bodies(dom_page):
     assert [message["source_id"] for message in messages] == [None, None]
 
 
+def test_dom_parser_does_not_copy_page_actor_from_shared_cluster(dom_page):
+    messages = _extract(dom_page, '''<div role="region" aria-label="message history">
+        <div class="x1fqp7bg" aria-label="You sent a message">
+          <div class="x1y1aw1k" data-message-id="greeting" aria-label="You sent a message">Chào Châu</div>
+          <div class="x1y1aw1k" data-message-id="quickreply">Hỏi chi tiết</div>
+        </div></div>''')
+    assert [(m["sender"], m["body"]) for m in messages] == [
+        ("Page", "Chào Châu"), ("Unknown", "Hỏi chi tiết")]
+
+
+def test_dom_parser_conflicting_actor_labels_remain_unknown(dom_page):
+    messages = _extract(dom_page, '''<div role="region" aria-label="message history">
+        <div class="x1fqp7bg" aria-label="You sent a message">
+          <div class="x1y1aw1k" data-message-id="m1" aria-label="Lan sent a message">Dạ</div>
+        </div></div>''')
+    assert messages[0]["sender"] == "Unknown"
+
+
 def test_dom_parser_keeps_reaction_control_id_distinct_from_target_and_uses_observed_time(dom_page):
     messages = _extract(
         dom_page,

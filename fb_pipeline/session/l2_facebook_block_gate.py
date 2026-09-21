@@ -38,7 +38,13 @@ class FacebookTemporaryBlockError(RuntimeError):
 def _rendered_page_text(page) -> str:
     """Read body text without making a failed DOM query a safety decision."""
     try:
-        return page.locator("body").inner_text(timeout=1500) or ""
+        # Browser tooling can inject its own document/body into the same CDP
+        # page. ``locator('body')`` then matches both bodies and Playwright's
+        # strict mode raises; use the document's first body, which is Meta's
+        # rendered page, instead of falling back to injected HTML.
+        body = page.locator("body")
+        body = getattr(body, "first", body)
+        return body.inner_text(timeout=1500) or ""
     except Exception:
         try:
             return page.content() or ""

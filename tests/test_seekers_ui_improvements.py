@@ -114,8 +114,23 @@ def test_seeker_detail_hides_unresolved_refetch_rows_when_timeline_exists():
     # their existing history via the fallback in this helper.
     assert "function displayableMessageHistory" in content
     assert "parseRealDate(message.messageAt) > 0" in content
-    assert "return timestamped.length > 0 ? timestamped : messages" in content
+    assert "const chronological = timestamped.length > 0 ? timestamped : messages;" in content
+    assert "const actorLabelled = chronological.filter" in content
+    assert "return actorLabelled.length > 0 ? actorLabelled : chronological;" in content
     assert "messages = displayableMessageHistory(messages);" in content
+
+
+def test_message_history_separates_the_known_css_era_quote_merge_without_relabelling_all_legacy_rows():
+    queries_file = ROOT_DIR / "web" / "src" / "lib" / "queries.ts"
+    content = queries_file.read_text(encoding="utf-8")
+
+    # The reader-facing query must split the known merged quote/reply shape,
+    # without blanketing all historical Page/Customer rows as Unknown.
+    assert "function normalizeMessageSender(" in content
+    assert "function separateLegacyQuotedPresentation" in content
+    assert "[Quoted Reply/Link]:" in content
+    assert "content: body" in content
+    assert "normalizeMessageSender(r.content, r.sender, r.senderConfidence)" in content
 
 def test_seekers_table_icons_before_name_single_line():
     table_file = ROOT_DIR / "web" / "src" / "components" / "seekers-table.tsx"

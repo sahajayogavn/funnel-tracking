@@ -17,16 +17,19 @@ PYTHON="$PROJECT_ROOT/.venv/bin/python"
 
 PAGE_ID="${FUNNEL_PAGE_ID:-1548373332058326}"
 INTERVAL_SECONDS="${FUNNEL_INTERVAL_SECONDS:-900}"
-# Total browser tabs: 1 orchestrator + at most 3 worker tabs.
-FETCH_WORKERS="${FUNNEL_FETCH_WORKERS:-4}"
-FETCH_TIME_RANGE="${FUNNEL_FETCH_TIME_RANGE:-7d}"
-FETCH_MAX_THREADS="${FUNNEL_FETCH_MAX_THREADS:-1000}"
+# Total browser tabs: 1 orchestrator + at most 2 worker tabs.
+FETCH_WORKERS="${FUNNEL_FETCH_WORKERS:-3}"
+FETCH_TIME_RANGE="${FUNNEL_FETCH_TIME_RANGE:-720d}"
+FETCH_MAX_THREADS="${FUNNEL_FETCH_MAX_THREADS:-10000}"
 FETCH_NO_EARLY_EXIT="${FUNNEL_FETCH_NO_EARLY_EXIT:-0}"
 MAS_MAX_THREADS="${FUNNEL_MAS_MAX_THREADS:-5}"
 CLASSIFY_WORKERS="${FUNNEL_CLASSIFY_WORKERS:-10}"
 MAS_CITY="${FUNNEL_MAS_CITY:-Hà Nội}"
 MAS_ALWAYS="${FUNNEL_MAS_ALWAYS:-0}"
 FETCH_FORCE_REFRESH="${FUNNEL_FETCH_FORCE_REFRESH:-0}"
+# Re-fetch threads whose "fetched" sidebar-token marker is older than N days
+# even if the token is unchanged (catches edits/deletions). Empty = disabled.
+FETCH_REFRESH_OLDER_THAN="${FUNNEL_FETCH_REFRESH_OLDER_THAN:-}"
 MODE="${1:-}"
 
 if [[ ! -x "$PYTHON" ]]; then
@@ -44,8 +47,9 @@ esac
 
 run_fetch() {
   # The loop polls for changes, so unchanged threads must remain eligible for
-  # Stage 1's preview/cache skip. Use FUNNEL_FETCH_FORCE_REFRESH=1 only for a
-  # deliberate full re-scan.
+  # Stage 1's sidebar-token ("fetched" marker) / preview skip. Use
+  # FUNNEL_FETCH_FORCE_REFRESH=1 (--refresh) only for a deliberate full
+  # re-scan of every thread in range.
   # Do not expand an empty array while ``set -u`` is active: bash 3.x treats
   # ``${empty_array[@]}`` as an unbound variable. Build argv incrementally so
   # both optional flags can be absent on the normal fetch path.
@@ -60,6 +64,9 @@ run_fetch() {
   case "$FETCH_NO_EARLY_EXIT" in
     1|true|TRUE|yes|YES) set -- "$@" --no-early-exit ;;
   esac
+  if [[ -n "$FETCH_REFRESH_OLDER_THAN" ]]; then
+    set -- "$@" --refresh-older-than "$FETCH_REFRESH_OLDER_THAN"
+  fi
   set -- "$@" --workers "$FETCH_WORKERS" --maxThreads "$FETCH_MAX_THREADS"
   "$@"
 }
@@ -119,6 +126,10 @@ while true; do
     run_fetch || fetch_status=$?
     if (( fetch_status != 0 )); then
       echo "[$(date '+%Y-%m-%d %H:%M:%S')] Inbox fetch failed with status $fetch_status"
+      if (( fetch_status == 76 )); then
+        echo "Fetch verification failed: stopping for evidence review; no automatic full rescan."
+        exit 76
+      fi
       if (( fetch_status == 75 )); then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Facebook temporary-block gate tripped; stopping this loop."
         exit 75

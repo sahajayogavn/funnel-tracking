@@ -367,7 +367,10 @@ def test_refetch_failure_is_durable_then_success_persists_exact_thread(database,
     assert payload["fetch_request"] == "pending"
     assert "unavailable" in payload["fetch_error"]
     captured = []
-    monkeypatch.setattr(guard, "read_live_messages", lambda *a: MESSAGES)
+    verified_messages = [{**MESSAGES[0], "timestamp": "Sep 19, 2026 9:00 AM",
+                          "day_context": "2026-09-19", "time_precision": "date_time",
+                          "sender_confidence": "explicit", "sender_evidence": "Lan sent a message"}]
+    monkeypatch.setattr(guard, "read_live_messages", lambda *a: verified_messages)
     monkeypatch.setattr(l3_pipeline, "persist_thread_record", lambda conn, record: captured.append(record))
     guard.refresh_outdated_actions(PAGE)
     assert captured[0].thread_id == THREAD and captured[0].page_id == PAGE
@@ -376,6 +379,27 @@ def test_refetch_failure_is_durable_then_success_persists_exact_thread(database,
         row = db.execute("SELECT * FROM action_queue WHERE id=?", (action,)).fetchone()
     assert row["status"] == "rejected"
     assert json.loads(row["payload_json"])["fetch_request"] == "completed"
+
+
+def test_refetch_unverified_evidence_requires_review_without_repeated_scan(database, monkeypatch):
+    from fb_pipeline.inbox import l3_pipeline
+    action = enqueue()
+    queue.approve_action(action, "webui")
+    guard.set_delivery_result(queue.claim_next_action("proactive_message", PAGE), "outdated", "Out-date")
+    fake_session(monkeypatch, MagicMock())
+    monkeypatch.setattr(guard, "assert_recipient", lambda *a: None)
+    reader = MagicMock(return_value=MESSAGES)
+    monkeypatch.setattr(guard, "read_live_messages", reader)
+    persist = MagicMock()
+    monkeypatch.setattr(l3_pipeline, "persist_thread_record", persist)
+    guard.refresh_outdated_actions(PAGE)
+    guard.refresh_outdated_actions(PAGE)
+    persist.assert_not_called()
+    reader.assert_called_once()
+    with database() as db:
+        payload = json.loads(db.execute("SELECT payload_json FROM action_queue WHERE id=?", (action,)).fetchone()[0])
+    assert payload["fetch_request"] == "needs_review"
+    assert "fetch_integrity_failed" in payload["fetch_error"]
 
 
 def test_manual_enter_confirmed_on_next_poll(database, browser, monkeypatch):

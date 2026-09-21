@@ -149,8 +149,8 @@ class TestThreadDetailParser(unittest.TestCase):
         )
         
         # Assert
-        self.assertTrue(verified_status)
-        self.assertEqual(fb_url, "original_hovercard_fb_url")
+        self.assertFalse(verified_status)
+        self.assertEqual(fb_url, "")
 
     def test_verify_thread_switch_first_thread_fallback(self):
         class _Page:
@@ -180,8 +180,8 @@ class TestThreadDetailParser(unittest.TestCase):
         )
 
         # Assert early return still sets fallback fb_url
-        self.assertTrue(verified_status)
-        self.assertEqual(fb_url, "hovercard_first_thread")
+        self.assertFalse(verified_status)
+        self.assertEqual(fb_url, "")
 
 class TestInboxContracts(unittest.TestCase):
     def setUp(self):
@@ -359,6 +359,8 @@ class TestInboxContracts(unittest.TestCase):
 
             def evaluate(self, script, *args, **kwargs):
                 self.evaluate_calls.append(script)
+                if "domMoved" in script:
+                    return {"before": 0, "after": 0, "domMoved": False, "targetX": 200, "targetY": 300, "targetHeight": 500, "conversationCardCount": 1}
                 if "config.threadSelector" in script: return {"count": 2, "loadingCount": 0, "globalLoadingCount": 0, "hasContainer": True, "fingerprint": "fp-eval"}
                 if "sidebarIdentityKey" in script: return True
                 if "querySelectorAll('.x14vqqas" in script or "results.push({htmlStr" in script: return [{"text": "Hello", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Today"}]
@@ -421,7 +423,10 @@ class TestInboxContracts(unittest.TestCase):
         # The script targets the resolved sidebar geometry before scrolling.
         self.assertTrue(page.mouse.moves)
         self.assertTrue(any("scrollIntoView" in script for script in page.evaluate_calls))
-        self.assertEqual(record_fetch_calls, [("1548373332058326", 1, 1)])
+        # Discovery/scrolling does not authorize storing a message when this
+        # fixture has neither a recipient ID nor actor/time evidence.
+        self.assertEqual(record_fetch_calls, [("1548373332058326", 1, 0)])
+        self.assertTrue(stats["failed_threads"])
 
     # Gate 2: code:test-validation-001:l3-to-l1
     def test_enrich_thread_record_builds_mas_payload(self):
@@ -798,6 +803,41 @@ class TestInboxContracts(unittest.TestCase):
         ).fetchone()
         self.assertEqual(thread["inbox_sort_index"], 7)
         self.assertIn("2026-03-31 10:31:00", thread["last_message_at"])
+
+    # code:test-validation-001:stage1-sync-skip
+    def test_persist_writes_fetched_marker_even_when_no_message_added(self):
+        card = {"name": "Hung Bui", "text": "Hung Bui\nHello\nAug 6", "previewText": "Hello",
+                "sidebarTimeText": "Aug 6", "sidebarTimeSource": "utime", "sidebarTimestampMs": 1786000000123.0,
+                "domIndex": 3}
+        record = enrich_thread_record(
+            build_thread_record("page1", card),
+            [{"sender": "Customer", "text": "Hello", "timestamp": "Aug 6, 2026, 10:31 AM"}],
+            extract_user_info, detect_city,
+        )
+        persist_thread_record(self.conn, record, detect_city)
+        # Second sync of the same card: nothing new, marker still refreshed.
+        result = persist_thread_record(self.conn, record, detect_city)
+        self.assertEqual(result["messages_added"], 0)
+        row = self.conn.execute(
+            "SELECT fetched_sidebar_token, fetched_sidebar_kind, fetched_preview_norm, fetched_at "
+            "FROM threads WHERE id = ?", (record.thread_id,)
+        ).fetchone()
+        self.assertEqual(row["fetched_sidebar_token"], "Aug 6")
+        self.assertEqual(row["fetched_sidebar_kind"], "month_day")
+        self.assertEqual(row["fetched_preview_norm"], "hello")
+        self.assertIsNotNone(row["fetched_at"])
+        utime = self.conn.execute("SELECT fetched_sidebar_utime_ms FROM threads WHERE id = ?", (record.thread_id,)).fetchone()[0]
+        self.assertEqual(utime, 1786000000123)
+
+        # A detail-only refresh (no sidebar card) must not erase the marker.
+        detail = enrich_thread_record(
+            build_thread_record("page1", {"name": "Hung Bui", "text": "Hung Bui\nHello", "domIndex": None}),
+            [{"sender": "Customer", "text": "Hello", "timestamp": "Aug 6, 2026, 10:31 AM"}],
+            extract_user_info, detect_city,
+        )
+        persist_thread_record(self.conn, detail, detect_city)
+        row = self.conn.execute("SELECT fetched_sidebar_token FROM threads WHERE id = ?", (record.thread_id,)).fetchone()
+        self.assertEqual(row["fetched_sidebar_token"], "Aug 6")
 
     # Gate 3: code:test-validation-001:l1-to-l4 (dedup stability)
     def test_persist_thread_record_dedups_literal_newline_and_late_reaction(self):

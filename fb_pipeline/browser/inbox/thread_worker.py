@@ -8,11 +8,16 @@ docs/architect/inbox-fetch-pipeline.md §1.2.
 # code:inbox-parallel-fetch-001:thread-worker
 """
 import time
+import json
+import os
+import tempfile
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable
 
 from fb_pipeline.contracts.l1_inbox_tasks import ThreadResult, ThreadTask
 from fb_pipeline.session.l2_facebook_block_gate import FacebookBlockGate
+from fb_pipeline.contracts.l1_fetch_integrity import check_snapshot, compare_snapshots, compare_stored
 
 from .integrity_validator import validate_thread_integrity
 from .thread_detail_parser import (
@@ -31,6 +36,17 @@ class ThreadWorkerDeps:
     extract_user_info: Callable
     detect_city: Callable
     block_gate: FacebookBlockGate | None = None
+
+
+def save_integrity_report(report, observed, confirmation, directory=None):
+    """Keep failed observations for offline review; never overwrite a report."""
+    directory = Path(directory) if directory else Path(__file__).resolve().parents[3] / "logs" / "fetch-integrity"
+    directory.mkdir(parents=True, exist_ok=True)
+    descriptor, path = tempfile.mkstemp(prefix="conflict-", suffix=".json", dir=directory)
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump({**report, "contract_version": 1, "observed": observed,
+                   "confirmation": confirmation}, handle, ensure_ascii=False, indent=2)
+    return path
 
 
 def process_thread_task(page, conn, task: ThreadTask, deps: ThreadWorkerDeps, logger,
@@ -119,6 +135,48 @@ def process_thread_task(page, conn, task: ThreadTask, deps: ThreadWorkerDeps, lo
         )
 
     ad_ids = deps.extract_ad_id_labels(page) if callable(deps.extract_ad_id_labels) else extract_ad_id_labels(page)
+
+    # Extraction scrolls and awaits the UI. Re-check the same bound identity
+    # after all reads, before contact extraction or any database write.
+    final_id, final_verified = verify_thread_switch(
+        page, logger, name, fb_url, "", False, thread_record
+    )
+    issues = check_snapshot(messages_list)
+    confirmation = None
+    if not is_valid or not final_verified or final_id != fb_url:
+        issues.append({"field": "recipient", "reason": "extraction_integrity_or_identity_failed"})
+    if not issues:
+        # Read the current viewport again without scrolling/re-scanning history.
+        confirmation = extract_thread_messages(page)
+        issues.extend(compare_snapshots(messages_list, confirmation))
+        last_id, last_verified = verify_thread_switch(page, logger, name, fb_url, "", False, thread_record)
+        if not last_verified or last_id != fb_url:
+            issues.append({"field": "recipient", "reason": "identity_changed_during_crosscheck"})
+    if not issues:
+        source_ids = [message["source_id"] for message in messages_list]
+        placeholders = ",".join("?" for _ in source_ids)
+        rows = conn.execute(
+            "SELECT m.source_id, m.thread_id, m.sender, m.sender_confidence, m.message_at, m.time_precision "
+            "FROM messages m JOIN threads t ON t.id=m.thread_id "
+            f"WHERE t.page_id=? AND m.source_id IN ({placeholders})",
+            (record_page_id, *source_ids),
+        ).fetchall()
+        issues.extend(compare_stored(messages_list, [dict(row) for row in rows], thread_record.thread_id))
+    if issues:
+        details = {"code": "fetch_integrity_failed", "thread_id": thread_record.thread_id,
+                   "page_id": record_page_id, "recipient_id": fb_url, "issues": issues}
+        try:
+            details["report_path"] = save_integrity_report(details, messages_list, confirmation)
+        except OSError as exc:
+            details["report_write_error"] = str(exc)
+        report = json.dumps(details, ensure_ascii=False)
+        logger.error(report)
+        return ThreadResult(
+            ordinal=task.ordinal, thread_id=thread_record.thread_id,
+            status="error", error=report,
+            locate_method=locate_result.method,
+            elapsed_ms=int((time.monotonic() - start) * 1000),
+        )
 
     enriched_record = enrich_thread_record(
         thread_record,

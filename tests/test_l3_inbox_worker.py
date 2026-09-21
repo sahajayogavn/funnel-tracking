@@ -214,8 +214,8 @@ class TestProcessThreadTaskOutcomes(unittest.TestCase):
             prev_fb_url="", pre_click_fingerprint="",
         )
         js_messages = [
-            {"sender": "Customer", "text": "Xin chào", "timestamp": "Today"},
-            {"sender": "Page", "text": "Chào bạn", "timestamp": "Today"},
+            {"sender": "Customer", "text": "Xin chào", "timestamp": "Sep 10, 2026 9:00 AM", "day_context": "2026-09-10", "time_precision": "date_time", "source_id": "m1", "sender_confidence": "explicit", "sender_evidence": "Lan sent a message"},
+            {"sender": "Page", "text": "Chào bạn", "timestamp": "Sep 10, 2026 9:01 AM", "day_context": "2026-09-10", "time_precision": "date_time", "source_id": "m2", "sender_confidence": "explicit", "sender_evidence": "You sent"},
         ]
         with patch("fb_pipeline.browser.inbox.thread_worker.locate_thread_in_sidebar", return_value=locate_result), \
              patch("fb_pipeline.browser.inbox.thread_worker.verify_thread_switch", return_value=("fb_url_2", True)), \

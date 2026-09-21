@@ -231,9 +231,27 @@ def refresh_outdated_actions(page_id):
                     if not navigate_to_thread(session.page, page_id, item["target_name"], item["target_id"]):
                         raise RuntimeError("Targeted refresh could not open thread")
                     assert_recipient(session.page, item)
-                    from fb_pipeline.browser.inbox.thread_detail_parser import scroll_up_message_panel
-                    scroll_up_message_panel(session.page, logger, item["target_name"])
+                    # This is a tail refresh; read_live_messages goes to the
+                    # bottom. Scanning all history first is wasteful and does
+                    # not prove completeness of a virtualized conversation.
                     messages = read_live_messages(session.page, item)
+                    from fb_pipeline.contracts.l1_fetch_integrity import check_snapshot, compare_snapshots, compare_stored
+                    issues = check_snapshot(messages)
+                    if not issues:
+                        issues.extend(compare_snapshots(messages, read_live_messages(session.page, item)))
+                    if not issues:
+                        source_ids = [m["source_id"] for m in messages]
+                        placeholders = ",".join("?" for _ in source_ids)
+                        saved = conn.execute(
+                            "SELECT m.source_id, m.thread_id, m.sender, m.sender_confidence, m.message_at, m.time_precision "
+                            "FROM messages m JOIN threads t ON t.id=m.thread_id "
+                            f"WHERE t.page_id=? AND m.source_id IN ({placeholders})",
+                            (page_id, *source_ids),
+                        ).fetchall()
+                        issues.extend(compare_stored(messages, [dict(r) for r in saved], item["target_id"]))
+                    if issues:
+                        payload["fetch_request"] = "needs_review"
+                        raise RuntimeError("fetch_integrity_failed: " + json.dumps(issues, ensure_ascii=False))
                     record = ThreadRecord(page_id, item["target_id"], payload.get("recipient_name") or item["target_name"], "", [], None,
                                           selected_item_id=item["target_id"].split("_")[-1])
                     enriched = enrich_thread_record(record, messages,

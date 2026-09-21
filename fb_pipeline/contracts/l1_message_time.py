@@ -60,10 +60,14 @@ def resolve_message_at(label: str | None, anchor=None) -> tuple[str | None, bool
     us_match = _US_SHORT_DATETIME_RE.match(label)
     if us_match:
         month, day, year, hour, minute, ampm = us_match.groups()
+        if not 1 <= int(hour) <= 12 or not 0 <= int(minute) <= 59:
+            return None, True
         year = int(year) if len(year) == 4 else 2000 + int(year)
         hour = int(hour) % 12 + (12 if ampm.lower() == "pm" else 0)
         try:
             dt = datetime(year, int(month), int(day), hour, int(minute))
+            if dt > anchor_dt + timedelta(minutes=5):
+                return None, True
             return dt.strftime(ISO_FMT), False
         except ValueError:
             return None, False
@@ -75,9 +79,15 @@ def resolve_message_at(label: str | None, anchor=None) -> tuple[str | None, bool
     value = value.replace("T", " ")
     if kind in _PRECISE_KINDS and " " in value:
         dt = datetime.strptime(value[:19], ISO_FMT)
-        # A label can never describe a moment after it was scraped.
+        # Only relative labels may wrap. Never rewrite an explicit calendar
+        # date to yesterday merely because it is in the future.
         if dt > anchor_dt + timedelta(minutes=5):
-            dt -= timedelta(days=7) if kind == "day_time" else timedelta(days=1)
+            if kind == "day_time":
+                dt -= timedelta(days=7)
+            elif kind == "time_today":
+                dt -= timedelta(days=1)
+            else:
+                return None, True
         return dt.strftime(ISO_FMT), False
     if len(value) >= 10:
         try:

@@ -58,9 +58,9 @@ session) and **6. Điểm danh** (`attendance_check`, approve = attended, reject
 `tools/run_inbox_mas_loop.sh pipeline` now skips the MAS step when the fetch stored no new
 messages (`FUNNEL_MAS_ALWAYS=1` restores unconditional runs).
 
-Inbox fetch concurrency is capped at four browser tabs in total: one
-orchestrator and at most three worker tabs. `FUNNEL_FETCH_WORKERS` defaults to
-`4`; higher values are clamped to `4` by `tools/l5_fetch_fb_messages.py`.
+Inbox fetch concurrency is capped at three browser tabs in total: one
+orchestrator and at most two worker tabs. `FUNNEL_FETCH_WORKERS` defaults to
+`3`; higher values are clamped to `3` by `tools/l5_fetch_fb_messages.py`.
 
 ## ✅ Human-approved action executor (HITL)
 

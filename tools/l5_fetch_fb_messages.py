@@ -30,7 +30,7 @@ from fb_pipeline.browser.l3_inbox import (
     scrape_inbox_ui as shared_scrape_inbox,
 )
 from fb_pipeline.browser.inbox.thread_worker import ThreadWorkerDeps
-from fb_pipeline.inbox.l3_parallel_fetch import run_parallel_fetch
+from fb_pipeline.inbox.l3_parallel_fetch import MAX_TOTAL_TABS, run_parallel_fetch
 from fb_pipeline.inbox.l3_pipeline import (
     build_thread_record as shared_build_thread_record,
     enrich_thread_record as shared_enrich_thread_record,
@@ -219,6 +219,7 @@ def _to_shared_enriched_thread_record(thread_record):
         dom_index=thread_record.get("dom_index", 0),
         sidebar_time_text=thread_record.get("sidebar_time_text", ""),
         sidebar_time_kind=thread_record.get("sidebar_time_kind", ""),
+        sidebar_time_source=thread_record.get("sidebar_time_source", ""),
         sidebar_identity_key=thread_record.get("sidebar_identity_key", ""),
         selected_item_id=thread_record.get("selected_item_id", ""),
         fb_url=thread_record.get("fb_url", ""),
@@ -245,7 +246,7 @@ def persist_thread_record(conn: sqlite3.Connection, thread_record: dict) -> dict
 # code:tool-fbmessages-001:scrape-inbox
 
 def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn,
-                  skip_navigation: bool = False, force_refresh: bool = False,
+                  skip_navigation: bool = False, force_refresh: bool = False, refresh_older_than_days: int | None = None,
                   allow_early_exit: bool = True,
                   target_total_messages: int | None = None) -> dict:
     """Core scraping loop: scroll sidebar, click threads, extract messages."""
@@ -261,7 +262,7 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn,
         extract_user_info=extract_user_info,
         detect_city=None,
         skip_navigation=skip_navigation,
-        force_refresh=force_refresh,
+        force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days,
         allow_early_exit=allow_early_exit,
         target_total_messages=target_total_messages,
     )
@@ -277,14 +278,14 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn,
 
 # code:inbox-parallel-fetch-001:cli
 def _clamp_workers(workers: int, log=None) -> int:
-    """Clamp --workers to [1, 4]: one orchestrator plus at most three workers."""
+    """Clamp --workers to [1, 3]: one orchestrator plus at most two workers."""
     log = log or logger
     if workers < 1:
         log.warning(f"--workers {workers} is below the minimum; clamping to 1.")
         return 1
-    if workers > 4:
-        log.warning(f"--workers {workers} exceeds the maximum; clamping to 4.")
-        return 4
+    if workers > MAX_TOTAL_TABS:
+        log.warning(f"--workers {workers} exceeds the maximum; clamping to {MAX_TOTAL_TABS}.")
+        return MAX_TOTAL_TABS
     return workers
 
 
@@ -293,7 +294,7 @@ SCHEDULER_IDLE_WAIT_S = float(os.environ.get("FB_FETCH_WAIT_FOR_SCHEDULER_S", "9
 
 
 def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
-                   show_browser: bool = True, force_refresh: bool = False,
+                   show_browser: bool = True, force_refresh: bool = False, refresh_older_than_days: int | None = None,
                    max_threads: int = 50, use_cdp: bool = False, allow_early_exit: bool = True,
                    target_total_messages: int | None = None, workers: int = 1,
                    classify_city: bool = False, skip_qa: bool = False) -> dict:
@@ -313,7 +314,7 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
     )
     workers = _clamp_workers(workers)
     page_id = parse_page_id(page_input)
-    kwargs = dict(show_browser=show_browser, force_refresh=force_refresh, max_threads=max_threads,
+    kwargs = dict(show_browser=show_browser, force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days, max_threads=max_threads,
                   use_cdp=use_cdp, allow_early_exit=allow_early_exit,
                   target_total_messages=target_total_messages, workers=workers, skip_qa=skip_qa)
     if not use_cdp:
@@ -350,7 +351,7 @@ def _classify_after_fetch(result: dict, page_id: str) -> dict:
 
 
 def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = "7d",
-                         show_browser: bool = True, force_refresh: bool = False,
+                         show_browser: bool = True, force_refresh: bool = False, refresh_older_than_days: int | None = None,
                          max_threads: int = 50, use_cdp: bool = False, allow_early_exit: bool = True,
                          target_total_messages: int | None = None, workers: int = 1, skip_qa: bool = False) -> dict:
     page_id = parse_page_id(page_input)
@@ -398,7 +399,7 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
                     stats = _scrape_inbox(
                         session.page, page_id, time_range, max_threads, conn,
                         skip_navigation=True,
-                        force_refresh=force_refresh,
+                        force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days,
                         allow_early_exit=allow_early_exit,
                         target_total_messages=target_total_messages,
                     )
@@ -415,7 +416,7 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
                         workers=workers,
                         inbox_url=f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}",
                         skip_navigation=True,
-                        force_refresh=force_refresh,
+                        force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days,
                         allow_early_exit=allow_early_exit,
                         target_total_messages=target_total_messages,
                         memory_dir=memory_dir,
@@ -455,7 +456,9 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
                 conn.close()
                 session.close_page()
                 logger.info(f"CDP Direct: Saved to FrankenSQLite. Stats: {stats}")
-                return {"success": True, "method": "cdp_direct", "data": {"stats": stats}}
+                return {"success": not bool(stats.get("failed_threads")), "method": "cdp_direct",
+                        "error": "fetch_verification_failed" if stats.get("failed_threads") else None,
+                        "data": {"stats": stats}}
             except FacebookTemporaryBlockError as e:
                 logger.critical("FACEBOOK_FETCH_SAFETY_GATE: %s", e)
                 _notify_facebook_block(page_id, str(e))
@@ -537,7 +540,7 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
                 )
                 page = context.new_page()
 
-                stats = _scrape_inbox(page, page_id, time_range, max_threads, conn, force_refresh=force_refresh, allow_early_exit=allow_early_exit, target_total_messages=target_total_messages)
+                stats = _scrape_inbox(page, page_id, time_range, max_threads, conn, force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days, allow_early_exit=allow_early_exit, target_total_messages=target_total_messages)
 
                 stats["llm_city"] = {"skipped": "decoupled"}
 
@@ -546,7 +549,9 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
 
                 context.close()
                 browser.close()
-                return {"success": True, "method": "headless_fetch", "data": {"stats": stats}}
+                return {"success": not bool(stats.get("failed_threads")), "method": "headless_fetch",
+                        "error": "fetch_verification_failed" if stats.get("failed_threads") else None,
+                        "data": {"stats": stats}}
             except Exception as e:
                 import traceback
                 logger.error(f"Error while waiting for inbox or extracting messages: {e}\n{traceback.format_exc()}")
@@ -569,7 +574,10 @@ def main():
                                  "get_user_ad_ids", "resolve_ad_posts", "propagate_city",
                                  "classify_city_llm"],
                         help="Action to perform.")
-    parser.add_argument("--refresh", action="store_true", help="Force a fresh fetch, bypassing 1-hour cache.")
+    parser.add_argument("--refresh", action="store_true",
+                        help="Re-fetch every thread in range, ignoring the 'fetched' sidebar-token marker and the preview cache.")
+    parser.add_argument("--refresh-older-than", type=int, default=None, metavar="DAYS",
+                        help="Re-fetch threads whose 'fetched' marker is older than DAYS days even if their sidebar token is unchanged.")
     parser.add_argument("--userId", default=None, help="User ID (thread_id, phone, or email) for fetch_message_by_user.")
     parser.add_argument("--maxThreads", type=int, default=1000, help="Maximum number of threads to sync (default: 1000).")
     parser.add_argument("--targetMessages", type=int, default=None,
@@ -578,7 +586,7 @@ def main():
     parser.add_argument("--no-early-exit", action="store_true", help="Disable the targeted early-exit algorithm, allowing deep retroactive UI scrolls.")
     parser.add_argument("--workers", type=int, default=10,
                         help="Concurrent workers for classify_city_llm (default: 10). For --cdp fetches, this is "
-                             "the total number of tabs and is clamped to [1, 4] (1 orchestrator + at most 3 worker tabs).")
+                             "the total number of tabs and is clamped to [1, 3] (1 orchestrator + at most 2 worker tabs).")
     parser.add_argument("--skip-qa", action="store_true", help="Skip the QA check after fetching.")
     parser.add_argument("--classify-city", action="store_true",
                         help="After fetch_messages, run the LLM city/program pass on the threads this run "
@@ -599,7 +607,7 @@ def main():
         show_browser_flag = not args.headless
         workers = _clamp_workers(args.workers, logger)
         result = fetch_messages(args.pageId, args.credential, args.time_range,
-                                show_browser=show_browser_flag, force_refresh=args.refresh,
+                                show_browser=show_browser_flag, force_refresh=args.refresh, refresh_older_than_days=args.refresh_older_than,
                                 max_threads=args.maxThreads, use_cdp=args.cdp,
                                 allow_early_exit=not args.no_early_exit,
                                 target_total_messages=args.targetMessages,
@@ -631,6 +639,8 @@ def main():
     print(json.dumps(result, indent=2, ensure_ascii=False))
     
     if not result.get("success", False):
+        if result.get("error") == "fetch_verification_failed":
+            sys.exit(76)
         sys.exit(75 if result.get("error") == "facebook_temporarily_blocked" else 1)
 
 if __name__ == "__main__":

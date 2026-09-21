@@ -21,6 +21,12 @@ KIND_AD_SOURCE = "ad_source"
 
 ALL_KINDS = (KIND_MESSAGE, KIND_SYSTEM_BANNER, KIND_REACTION, KIND_ATTACHMENT, KIND_AD_SOURCE)
 
+# A sender value is usable as an actor only when the parser preserved a
+# Facebook-provided actor signal.  Old rows contain Page/Customer values that
+# were inferred from a bubble's CSS; those are display hints from a retired
+# parser, not evidence that a particular person sent the body.
+_VERIFIED_SENDER_CONFIDENCES = frozenset({"explicit", "high", "confirmed", "exact"})
+
 _REACTION_TAG_RE = re.compile(r':::REACTION_([A-Z]+):::')
 # This tag is a legacy parser delimiter, not evidence that the following text
 # belongs to the bubble sender.  Keep it as a separately represented quote.
@@ -59,6 +65,41 @@ class LegacyMessageAnnotations:
     body: str
     quoted_contents: tuple[str, ...] = ()
     reaction_types: tuple[str, ...] = ()
+
+
+def canonical_sender_for_actor(message: dict) -> str:
+    """Return a sender safe for gates, prompts, and reader-facing history.
+
+    A pre-source-aware Page/Customer value becomes unsafe when the old parser
+    also merged a quote/reaction UI fragment into that same body.  In that
+    shape one CSS-derived actor was applied to multiple events, so the gate
+    must not use it.  Do not downgrade every legacy row: that would erase the
+    readable history while providing no additional evidence.  Pure callers
+    from before the evidence contract may omit confidence entirely.
+    """
+    sender = str(message.get("sender") or "Unknown").strip() or "Unknown"
+    if sender not in {"Page", "Customer", "Auto_Page"}:
+        return sender
+    if "sender_confidence" not in message:
+        return sender
+    confidence = str(message.get("sender_confidence") or "unknown").strip().lower()
+    annotations = parse_legacy_message_annotations(message.get("content") or "")
+    if confidence not in _VERIFIED_SENDER_CONFIDENCES and (
+        annotations.quoted_contents or annotations.reaction_types
+    ):
+        return "Unknown"
+    return sender
+
+
+def has_unverified_sender_claim(message: dict) -> bool:
+    """Whether a row claims a known actor without admissible evidence."""
+    claimed = str(message.get("sender") or "").strip()
+    if claimed not in {"Page", "Customer", "Auto_Page"} or "sender_confidence" not in message:
+        return False
+    annotations = parse_legacy_message_annotations(message.get("content") or "")
+    return bool(annotations.quoted_contents or annotations.reaction_types) and (
+        canonical_sender_for_actor(message) == "Unknown"
+    )
 
 
 def parse_legacy_message_annotations(content: str) -> LegacyMessageAnnotations:

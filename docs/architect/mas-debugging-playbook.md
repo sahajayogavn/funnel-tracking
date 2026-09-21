@@ -1141,3 +1141,106 @@ lại từ đầu.
   `Unknown at 1:40 PM` lặp. Test UI cũ về `handleSort('lastMessageDate')`
   fail vì API sort đó đã bị thay trong worktree trước case này; không thuộc
   thay đổi history.
+
+### 2026-09-21 — seeker #4348 (Phố Châu): legacy quote/quick-reply bị gán cho Page
+
+- **Thread/case:** `/seekers/4348`, thread
+  `1548373332058326_285fee1acbea12c7` (Phố Châu). Điều tra read-only DB,
+  fetch log và `l5_mas_trace_debug.py report`; không gọi model, crawl lại hay
+  sửa dữ liệu production.
+- **Bằng chứng:** các row legacy #13177--13179, persisted ngày 16/09, ghi
+  Page cho một blob: lời Page “Chào Châu...” +
+  `[Quoted Reply/Link]: Hỏi chi tiết` ba lần. Lần parser nguồn-aware sau đó
+  ghi chính các body này ở #16181--#16188 với `sender=Unknown`,
+  `sender_confidence=unknown`; evidence chỉ là `data-message-id` hoặc
+  `aria-label=Message containing multiple sub messages`, không hề có actor.
+  Vì vậy không có bằng chứng để backfill “Hỏi chi tiết” là Page hay Customer.
+- **Nguyên nhân gốc:** parser trước commit `42cc0e2` gom mọi text container
+  trong một `.x1fqp7bg` bằng `texts.join('\n[Quoted Reply/Link]: ')`, rồi gọi
+  `detect_sender(raw["htmlStr"], raw["bg"])` một lần cho toàn blob
+  (`thread_detail_parser.py` bản cũ khoảng dòng 302--329). Heuristic
+  CSS/layout này gán Page cho toàn cluster, kể cả quick-reply/quote là một
+  event riêng. UI detail sau đó render nguyên `content` legacy dưới label Page
+  (`web/src/components/seeker-detail.tsx:178--186`), nên người vận hành thấy
+  sender sai. Đây là lỗi ingestion legacy, không phải MAS/LLM tự phân loại.
+- **Ảnh hưởng MAS:** deterministic gate hiện vẫn dùng row legacy có sender
+  Page/Customer và skip `already_answered`; nó không dùng các row Unknown để
+  suy actor. Không có draft/reply inbox MAS cho thread này. Tuy vậy mọi row
+  legacy gộp quote/reply kiểu này là evidence không an toàn cho agent và UI.
+- **Đề xuất sửa:** không suy diễn lại sender bằng text/màu/LLM. UI/API cần
+  tách hoặc ẩn sender claim của legacy blob chứa `[Quoted Reply/Link]` (render
+  body/quote thành evidence `Unknown`), và gate/MAS cần loại các legacy
+  annotation đó khỏi actor-bearing body. Thêm regression đúng blob Phố Châu:
+  Page greeting, quick-reply “Hỏi chi tiết”, customer registration và Page
+  class link không được gộp hay gán chung sender. Chỉ recrawl được DOM có
+  explicit actor/source evidence mới được nâng confidence cho từng event.
+
+#### 2026-09-21 — remediation, commit archaeology và regression UI
+
+- **Commit đã tạo đường lỗi:** `f3ecd921` (04/04,
+  `fix(fb_pipeline): resolve sender attribution errors and clean debug scripts`)
+  thêm `texts.join('\n[Quoted Reply/Link]: ')` và gọi `detect_sender()` một
+  lần cho blob. Chính message commit nói parser CSS nhận diện Page và “aggregated
+  fragmented quoted reply arrays”, tức comment/ý định lúc đó là *giữ* quote
+  cùng sender; đây là giả định sai. `1e3b56fd` tiếp tục tối ưu heuristic
+  gradient/layout CSS, không thay contract một-event/một-actor.
+- **Commit đã sửa một phần nhưng không migrate legacy:** `42cc0e28` (19/09,
+  `feat: comprehensive MAS time-aware care and inbox improvements`) thay DOM
+  parser sang tách body/quote/reaction và chỉ chấp nhận actor explicit; comment
+  tại `thread_detail_parser.py:816--823` nói màu/alignment không phải evidence.
+  `8aed3e41` (20/09) chỉ lọc re-fetch *không có timestamp*. Không commit nào
+  quarantine/render lại các row CSS-era đã persist, nên #13177 còn nguyên và
+  các #16181--#16188 `Unknown` nhưng có timestamp vẫn chui vào UI.
+- **Vá runtime (không sửa/xóa DB):**
+  `l1_message_kind.canonical_sender_for_actor()` chỉ hạ sender khi **cả ba**
+  điều kiện cùng đúng: claim Page/Customer/Auto_Page, confidence không đủ,
+  và body có delimiter quote/reaction legacy. `compute_conversation_state()`
+  biến claim đó thành `Unknown`; nếu nó nằm sau customer turn, trả
+  `uncertain_sender/needs_review`, không auto reply. `l5_seeker_tools` dùng
+  cùng canonical sender, nên prompt MAS không nhận một claim CSS-era như fact.
+  Không blanket-downgrade mọi row legacy: các row không có marker vẫn giữ
+  readable sender, vì chỉ thiếu confidence không chứng minh riêng row đó sai.
+- **Vá reader-facing history:** `web/src/lib/queries.ts` bỏ fragment sau
+  `[Quoted Reply/Link]` khỏi bubble legacy (không render “Trích dẫn từ
+  Unknown”, vì điều đó vẫn ám chỉ một quan hệ quote không có bằng chứng). Khi
+  cùng thread có turn Page/Customer, `displayableMessageHistory()` dùng chúng
+  làm timeline và không trộn snapshot `Unknown` re-fetch; raw `Unknown` rows
+  vẫn giữ DB cho audit/fetch diagnosis. Với #4348, UI còn ba turn 30/08:
+  Page greeting, customer registration, Page class details.
+- **Regression đã phát hiện trong lần vá đầu:** rule thử nghiệm ban đầu hạ
+  *mọi* sender confidence `unknown` thành Unknown. Nó làm cả Message History
+  trở nên sai/không đọc được. Đã gỡ trong cùng lượt và thay bằng predicate
+  structural ở trên; test nêu rõ không được re-label toàn bộ legacy rows.
+  Đây là lỗi implementation trong remediation, không phải fetch mới; không
+  được lặp lại rule blanket này.
+- **Kiểm chứng:** static UI regressions cho legacy split và mixed
+  actor-labelled/Unknown history: `2 passed`; `cd web && npm run build`: pass;
+  `git diff --check`: pass. Chạy broader Python suite hiện bị chặn **lúc
+  collection, trước test sender** bởi circular import có sẵn trong working
+  tree fetch: `l1_message_time → fb_pipeline.browser.__init__ → l3_inbox →
+  thread_worker → l1_fetch_integrity → l1_message_time`. Không sửa phần fetch
+  đó trong case này để tránh mở rộng scope; cần xử lý blocker riêng rồi chạy
+  lại suite conversation/parser/persistence đầy đủ.
+
+### 2026-09-21 — follow-up: đối chiếu identity/sender/time trước khi ghi
+
+- Điều tra commit trước sửa: `f3ecd92` đưa CSS/cluster aggregation vào sender;
+  `eea9563` giữ bypass first-thread không có ID; `42cc0e2` chuyển evidence
+  contract nhưng không đóng mọi verifier/shared-wrapper path. `6ce76fa` là
+  account-block gate, không phải chứng nhận tính đúng của history.
+- DB read-only hiện có 13 rows của #4348, 0 explicit sender, 6 source IDs,
+  13 canonical times. Không được suy rằng timestamp có giá trị thì sender đúng.
+  Trace có city-classification call #2956; không có inbox reply không đồng nghĩa
+  không có LLM nào từng đọc dữ liệu đó. Aggregate source-ID cross-thread collision
+  trong cùng Page bằng 0, nhưng legacy thiếu ID không chứng minh được đúng người.
+- Worker yêu cầu Page/PSID/heading, kiểm tra lại sau đọc; kiểm tra message ID,
+  actor evidence, day/clock, chronology và stored-source conflicts; sai lệch chặn
+  trước contact extraction/persist. Shared-wrapper sender không truyền xuống các
+  sibling. Explicit future dates không còn bị âm thầm lùi một ngày.
+- Báo lỗi có trường/source/thread và lưu observation JSON riêng để review;
+  không requeue conflict. Exit 76 dừng vòng fetch; targeted refresh chuyển
+  `needs_review` và không quét full history. Không sửa dữ liệu production.
+- Chi tiết commit, test plan, giới hạn và tiêu chí nghiệm thu live:
+  [fetch-integrity-audit-2026-09-21.md](../report/fetch-integrity-audit-2026-09-21.md).
+  Repeated DOM read chỉ kiểm tra stability; chưa phải hai nguồn độc lập hay
+  bảo đảm 100%. Heading/PSID thiếu thì dừng, không khôi phục fallback đoán.

@@ -130,7 +130,19 @@ async function getCrawledReactionEvents(threadId: string): Promise<CrawledReacti
  */
 function displayableMessageHistory(messages: MessageRow[]): MessageRow[] {
   const timestamped = messages.filter(message => parseRealDate(message.messageAt) > 0);
-  return timestamped.length > 0 ? timestamped : messages;
+  const chronological = timestamped.length > 0 ? timestamped : messages;
+
+  // A source-aware re-fetch may preserve an unattributed DOM snapshot as
+  // `Unknown`. It is valuable audit evidence, but it is not safe to mix into
+  // a reader-facing transcript when this thread already has actor-labelled
+  // turns: doing so presents duplicate/ambiguous bodies as ordinary messages.
+  // Keep an all-Unknown legacy thread readable; only prefer the attributable
+  // timeline when one actually exists. The raw rows remain in the database
+  // for the deterministic gate and fetch investigation.
+  const actorLabelled = chronological.filter(message =>
+    message.sender === 'Page' || message.sender === 'Customer' || message.sender === 'Auto_Page'
+  );
+  return actorLabelled.length > 0 ? actorLabelled : chronological;
 }
 
 export type ActionQueueItem = {
@@ -170,8 +182,33 @@ export async function getSeekerActionQueueItems(targetId?: string | null, target
 // Sender ownership is decided at ingestion and carries a confidence value in
 // the structured history contract.  Reclassifying a bubble by its prose here
 // makes the dashboard disagree with the data MAS actually received.
-function normalizeMessageSender(_content: string | null, originalSender: string | null): string | null {
+function normalizeMessageSender(
+  _content: string | null,
+  originalSender: string | null,
+  _senderConfidence?: string | null,
+): string | null {
+  // Sender evidence is adjudicated by the ingestion contract and retained
+  // verbatim for normal legacy rows. The only unsafe legacy shape is handled
+  // below: a CSS-era parser concatenated a quote/reply into another bubble.
   return originalSender;
+}
+
+/**
+ * Remove only the unattributed fragment from the reader-facing body.  A
+ * legacy delimiter proves neither a quote sender nor a relationship to the
+ * surrounding bubble, so displaying it as a "quote from Unknown" is still a
+ * misleading visual claim. This is presentation-only: it never edits the
+ * database and never guesses whether the fragment came from Page or seeker.
+ */
+function separateLegacyQuotedPresentation(message: MessageRow): MessageRow {
+  if (message.quotedText || !message.content?.includes('[Quoted Reply/Link]:')) return message;
+  const parts = message.content.replace(/\\n/g, '\n').split(/(?:^|\n)\s*\[Quoted Reply\/Link\]:\s*/);
+  const body = (parts.shift() || '').trim();
+  if (!parts.some(part => part.trim())) return message;
+  return {
+    ...message,
+    content: body,
+  };
 }
 
 // ── Seekers (unified from users + comment_users) ──
@@ -480,9 +517,9 @@ export async function getMessagesByThread(threadId: string): Promise<MessageRow[
     FROM messages m WHERE thread_id = ? ORDER BY seq ASC, id ASC
   `, [threadId]);
 
-  return attachCrawledReactions(threadId, rows.map(r => ({
+  return attachCrawledReactions(threadId, rows.map(r => separateLegacyQuotedPresentation({
     ...r,
-    sender: normalizeMessageSender(r.content, r.sender)
+    sender: normalizeMessageSender(r.content, r.sender, r.senderConfidence)
   })));
 }
 
@@ -640,9 +677,9 @@ export async function getSeekerById(seekerId: string): Promise<SeekerDetail | nu
     ORDER BY seq ASC, id ASC
   `, [uRow.threadId]);
   
-  messages = messages.map(r => ({
+  messages = messages.map(r => separateLegacyQuotedPresentation({
     ...r,
-    sender: normalizeMessageSender(r.content, r.sender)
+    sender: normalizeMessageSender(r.content, r.sender, r.senderConfidence)
   }));
   messages = await attachCrawledReactions(uRow.threadId || '', messages);
   messages = await attachMasProvenance(uRow.threadId || '', messages);

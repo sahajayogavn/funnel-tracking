@@ -63,6 +63,10 @@ class ThreadRecord:
     sidebar_time_text: str = ""
     sidebar_timestamp_ms: float | None = None
     sidebar_time_kind: str = ""
+    # "utime" when the extractor read the token from the card's
+    # <abbr data-utime> (trustworthy), "scan" when it fell back to a forward
+    # text scan that may pick a date out of the preview.
+    sidebar_time_source: str = ""
     sidebar_identity_key: str = ""
     selected_item_id: str = ""
     fb_url: str = ""

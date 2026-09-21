@@ -30,6 +30,23 @@ class _Page:
         return _Body(self.text)
 
 
+class _MultiBody:
+    """Mimics the extra browser-tooling body injected into a CDP page."""
+
+    def __init__(self, first_text, injected_text):
+        self.first = _Body(first_text)
+        self.injected_text = injected_text
+
+    def inner_text(self, timeout):
+        raise RuntimeError("strict mode violation: locator('body') resolved to 2 elements")
+
+
+class _MultiBodyPage:
+    def locator(self, selector):
+        assert selector == "body"
+        return _MultiBody("Inbox\\nAlice\\nHello", "Log in to Facebook Password")
+
+
 class TestFacebookBlockGate(unittest.TestCase):
     def test_recognizes_meta_going_too_fast_warning(self):
         page = _Page("You’re Temporarily Blocked. It looks like you were misusing this feature by going too fast.")
@@ -37,6 +54,10 @@ class TestFacebookBlockGate(unittest.TestCase):
 
     def test_normal_inbox_does_not_trip(self):
         self.assertEqual(detect_facebook_temporary_block(_Page("Inbox\nAlice\nHello")), "")
+
+    def test_uses_first_body_when_tooling_injects_a_second_body(self):
+        """Injected login text must not turn a rendered Inbox into a false block."""
+        self.assertEqual(detect_facebook_fetch_safety_issue(_MultiBodyPage()), ("", ""))
 
     def test_detects_login_checkpoint_access_and_meta_error_screens(self):
         cases = {

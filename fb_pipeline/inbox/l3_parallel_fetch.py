@@ -42,6 +42,11 @@ _LEGACY_STATS_KEYS = (
     "sidebar_scrolls", "sidebar_wait_ms",
 )
 
+# Browser-tab budget: one Stage-1 orchestrator plus no more than two Stage-2
+# worker tabs. Keep this enforcement here as well as in the CLI so internal
+# callers cannot bypass the operational cap.
+MAX_TOTAL_TABS = 3
+
 
 def _is_target_closed(exc: Exception) -> bool:
     return isinstance(exc, TargetClosedError) or exc.__class__.__name__ == "TargetClosedError"
@@ -109,6 +114,8 @@ def _recover_tab(session, inbox_url: str, log) -> bool:
 
 def _requeue_failed(task: ThreadTask, result: ThreadResult, retry_q, worker_name: str, log) -> bool:
     """Hand a failed task to another consumer once. Returns True when re-queued."""
+    if '"code": "fetch_integrity_failed"' in (result.error or ""):
+        return False  # Report evidence conflicts; never automatically re-scan history.
     if retry_q is None or result.status not in _FAILED_STATUSES:
         return False
     if task.attempt >= MAX_TASK_ATTEMPTS:
@@ -603,7 +610,7 @@ def _aggregate_stats(stats: dict, results: list, tasks_dispatched: int, workers:
 
 def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, conn, logger,
                         record_fetch, deps: ThreadWorkerDeps, *, workers: int, inbox_url: str,
-                        skip_navigation: bool = False, force_refresh: bool = False,
+                        skip_navigation: bool = False, force_refresh: bool = False, refresh_older_than_days: int | None = None,
                         allow_early_exit: bool = True, target_total_messages: Optional[int] = None,
                         memory_dir=None, session_factory: Optional[Callable] = None,
                         worker_loop: Optional[Callable] = None,
@@ -616,7 +623,7 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
 
     # code:inbox-parallel-fetch-001:orchestrator
     """
-    workers = max(1, workers)
+    workers = min(MAX_TOTAL_TABS, max(1, workers))
     task_q: "queue.Queue" = queue.Queue()
     result_q: "queue.Queue" = queue.Queue()
     retry_q: "queue.Queue" = queue.Queue()
@@ -690,7 +697,7 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
     try:
         discovery = discover_threads(
             page, page_id, time_range, max_threads, conn, logger, record_fetch,
-            skip_navigation=skip_navigation, force_refresh=force_refresh,
+            skip_navigation=skip_navigation, force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days,
             allow_early_exit=allow_early_exit, target_total_messages=target_total_messages,
             on_task=_dispatch,
         )

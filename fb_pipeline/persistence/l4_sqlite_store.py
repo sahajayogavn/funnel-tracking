@@ -207,6 +207,18 @@ def setup_database(conn: sqlite3.Connection, logger=None):
     # conversation timestamps.
     _ensure_column(cursor, "threads", "inbox_sort_index", "inbox_sort_index INTEGER")
     _ensure_column(cursor, "threads", "last_message_at", "last_message_at DATETIME")
+    # code:inbox-sync-skip-001:schema
+    # The "fetched" marker: the sidebar time token exactly as Meta rendered it
+    # when the thread was last synced (a clock such as "8:56 PM" for today, a
+    # weekday within the week, "Aug 6" / "10/3/25" further back), plus the
+    # normalized preview.  Stage 1 compares the live card against these to
+    # skip threads without opening them.  `fetched_at` anchors relative tokens
+    # ("Tue", "Yesterday") to the day they were observed.
+    _ensure_column(cursor, "threads", "fetched_sidebar_token", "fetched_sidebar_token TEXT")
+    _ensure_column(cursor, "threads", "fetched_sidebar_kind", "fetched_sidebar_kind TEXT")
+    _ensure_column(cursor, "threads", "fetched_sidebar_utime_ms", "fetched_sidebar_utime_ms INTEGER")
+    _ensure_column(cursor, "threads", "fetched_preview_norm", "fetched_preview_norm TEXT")
+    _ensure_column(cursor, "threads", "fetched_at", "fetched_at DATETIME")
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

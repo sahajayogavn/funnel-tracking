@@ -1,5 +1,6 @@
 import re
 import time
+from datetime import datetime
 from typing import Callable
 
 from fb_pipeline.contracts.l1_inbox_tasks import ThreadTask, ThreadResult
@@ -67,8 +68,24 @@ _extract_visible_threads = extract_visible_threads
 _parse_sidebar_time_token = parse_sidebar_time_token
 _validate_quick_fetch_cache = validate_quick_fetch_cache
 
+def _parse_day(parsed_at, utime_ms=None):
+    """Calendar day of a sidebar card: exact epoch when present, else the
+    ``parse_sidebar_time_token`` result (``None`` if unknown)."""
+    if utime_ms:
+        try:
+            return datetime.fromtimestamp(float(utime_ms) / 1000).date()
+        except (ValueError, OverflowError, OSError):
+            pass
+    if not parsed_at:
+        return None
+    try:
+        return datetime.strptime(str(parsed_at)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
 def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn, logger,
-                     record_fetch, *, skip_navigation: bool = False, force_refresh: bool = False,
+                     record_fetch, *, skip_navigation: bool = False, force_refresh: bool = False, refresh_older_than_days: int | None = None,
                      allow_early_exit: bool = True, target_total_messages: int | None = None,
                      on_task: Callable[[ThreadTask], None]) -> dict:
     """Stage 1: discover conversation threads top-down in the sidebar and
@@ -87,7 +104,8 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
 
     # code:inbox-parallel-fetch-001:discover
     """
-    from fb_pipeline.inbox.l3_pipeline import build_thread_record, canonical_thread_id
+    from fb_pipeline.inbox.l3_pipeline import build_thread_record, canonical_thread_id, normalize_preview_text
+    from fb_pipeline.inbox.l3_sync_decision import FETCH, SKIP, decide_by_fetched_marker, is_out_of_order
 
     inbox_url = f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}"
 
@@ -153,12 +171,16 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
     thread_counter = 0
     consecutive_clean_threads = 0
     consecutive_old_threads = 0
+    prev_sidebar_day = None
     stats = {
         "new_threads": 0, "new_messages": 0, "skipped_threads": 0, "threads_seen": 0,
         "threads_processed": 0, "threads_skipped_duplicate": 0, "threads_skipped_cutoff": 0,
         "processed_thread_ids": [],
         "threads_skipped_click_verify": 0,
         "threads_psid_resolved": 0,
+        "threads_time_out_of_order": 0,
+        "skip_reasons": {},
+        "fetch_reasons": {},
         "sidebar_scrolls": 0,
         "sidebar_wait_ms": initial_snapshot.get("elapsed_ms", 0),
     }
@@ -259,62 +281,119 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
                     (thread_record.dom_index, thread_record.thread_id),
                 )
 
-            is_match = False
-            force_resync = False
-
-            if row:
-                # code:inbox-thread-identity-001:preview-match
-                # Compare the sidebar preview with the last few persisted rows,
-                # not only the newest one: system banners such as
-                # "<name> replied to an ad." are sometimes extracted on a later
-                # crawl and land at the end of the thread although they belong
-                # to its start, which made the newest row never match.
-                cursor.execute(
-                    "SELECT content, sender FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 3",
-                    (thread_record.thread_id,)
+            # code:inbox-sync-skip-001:stage1-decision
+            # Decide whether this already-known thread must be opened again.
+            # Primary signal: the sidebar time token compared with the token
+            # stored when the thread was last synced (``fetched_sidebar_*``).
+            # Fallback (marker missing / token untrustworthy): the legacy
+            # preview-vs-last-3-messages match.  ``--refresh`` bypasses both.
+            skip_reason = None
+            fetch_reason = "new_thread" if row is None else "force_refresh"
+            parsed_day = _parse_day(parsed_time.get("parsed_at"), vt.get("sidebarTimestampMs"))
+            out_of_order = is_out_of_order(prev_sidebar_day, parsed_day)
+            if out_of_order:
+                stats["threads_time_out_of_order"] += 1
+                logger.warning(
+                    f"sidebar_time_out_of_order thread='{name}' token='{vt.get('sidebarTimeText', '')}' "
+                    f"prev_day={prev_sidebar_day} day={parsed_day}; not trusting token for skip"
                 )
-                tail_rows = cursor.fetchall()
+            else:
+                prev_sidebar_day = parsed_day or prev_sidebar_day
+            ui_norm = normalize_preview_text(thread_record.preview_text or "")
 
-                def _normalize_msg(s):
-                    if not s: return ""
-                    s = re.sub(r'^---\s*\[AD SOURCE\]:.*?---\s*', '', s, flags=re.DOTALL)
-                    s = re.sub(r'^(you|bạn):\s*', '', s, flags=re.IGNORECASE)
-                    return ''.join(c.lower() for c in s if c.isalnum())
-
-                ui_norm = _normalize_msg(thread_record.preview_text or "")
-                msg_row = None
-                for candidate in tail_rows:
-                    db_norm = _normalize_msg(candidate[0])
-                    min_len = min(len(db_norm), len(ui_norm))
-                    if (min_len > 0 and db_norm[:min_len] == ui_norm[:min_len]) or (min_len == 0 and db_norm == ui_norm):
-                        is_match = True
-                        msg_row = candidate
-                        break
-
-                if is_match:
-                    preview_lower = (thread_record.preview_text or "").strip().lower()
-                    if preview_lower.startswith("you:") or preview_lower.startswith("bạn:"):
-                        if msg_row and msg_row[1] not in ("Page", "Auto_Page"):
-                            force_resync = True
-
-                    if not force_resync:
-                        stats["skipped_threads"] += 1
-                        if not force_refresh:
-                            collected_threads.append({
-                                "record": thread_record,
-                                "is_new": False,
-                                "skip_process": True,
-                                "vt": vt,
-                                "name": name
-                            })
-                            if allow_early_exit:
-                                consecutive_clean_threads += 1
-                                if consecutive_clean_threads >= 2:
-                                    reached_date_limit = True
-                                    break
-                            continue
+            if row and not force_refresh:
+                cursor.execute(
+                    "SELECT fetched_sidebar_token, fetched_preview_norm, fetched_at, fetched_sidebar_utime_ms "
+                    "FROM threads WHERE id = ?",
+                    (thread_record.thread_id,),
+                )
+                marker = cursor.fetchone() or (None, None, None, None)
+                decision = decide_by_fetched_marker(
+                    token_now=vt.get("sidebarTimeText", ""),
+                    source_now=vt.get("sidebarTimeSource", ""),
+                    preview_norm_now=ui_norm,
+                    fetched_token=marker[0],
+                    fetched_preview_norm=marker[1],
+                    fetched_at=marker[2],
+                    utime_now_ms=vt.get("sidebarTimestampMs"),
+                    fetched_utime_ms=marker[3],
+                    out_of_order=out_of_order,
+                    refresh_older_than_days=refresh_older_than_days,
+                )
+                if decision.action == SKIP:
+                    skip_reason = f"token:{decision.reason}"
+                elif decision.action == FETCH:
+                    fetch_reason = decision.reason
                 else:
-                    consecutive_clean_threads = 0
+                    # code:inbox-thread-identity-001:preview-match
+                    # Compare the sidebar preview with the last few persisted rows,
+                    # not only the newest one: system banners such as
+                    # "<name> replied to an ad." are sometimes extracted on a later
+                    # crawl and land at the end of the thread although they belong
+                    # to its start, which made the newest row never match.
+                    cursor.execute(
+                        "SELECT content, sender FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 3",
+                        (thread_record.thread_id,)
+                    )
+                    tail_rows = cursor.fetchall()
+                    msg_row = None
+                    for candidate in tail_rows:
+                        db_norm = normalize_preview_text(candidate[0])
+                        min_len = min(len(db_norm), len(ui_norm))
+                        if (min_len > 0 and db_norm[:min_len] == ui_norm[:min_len]) or (min_len == 0 and db_norm == ui_norm):
+                            msg_row = candidate
+                            break
+                    if msg_row is None:
+                        fetch_reason = f"preview_mismatch:{decision.reason}"
+                    else:
+                        skip_reason = f"preview:{decision.reason}"
+                        # The sidebar shows our own reply but the matching stored
+                        # row is positively a customer turn: the reply was never
+                        # persisted.  ``sender='Unknown'`` (thousands of legacy
+                        # rows) must not trigger this: it re-fetched ~90 % of
+                        # already-synced threads on every run.
+                        preview_lower = (thread_record.preview_text or "").strip().lower()
+                        if (preview_lower.startswith("you:") or preview_lower.startswith("bạn:")) \
+                                and msg_row[1] == "Customer":
+                            skip_reason = None
+                            fetch_reason = "page_reply_missing"
+
+            token_log = f"token_now='{vt.get('sidebarTimeText', '')}' token_db='{marker[0] if row and not force_refresh else ''}'"
+            if skip_reason:
+                stats["skipped_threads"] += 1
+                stats["skip_reasons"][skip_reason] = stats["skip_reasons"].get(skip_reason, 0) + 1
+                logger.info(f"Stage1 '{name}' decision=skip reason={skip_reason} {token_log}")
+                # Refresh the marker so a token that merely changed shape
+                # ("Tue" -> "Sep 15") is stored in its current form.
+                utime_ms = vt.get("sidebarTimestampMs")
+                cursor.execute(
+                    """UPDATE threads SET fetched_sidebar_token = ?, fetched_sidebar_kind = ?, fetched_sidebar_utime_ms = ?,
+                       fetched_preview_norm = ?, fetched_at = datetime('now', 'localtime') WHERE id = ?""",
+                    (vt.get("sidebarTimeText", ""), parsed_time.get("kind", "unknown"),
+                     int(utime_ms) if utime_ms else None, ui_norm, thread_record.thread_id),
+                )
+                collected_threads.append({
+                    "record": thread_record,
+                    "is_new": False,
+                    "skip_process": True,
+                    "vt": vt,
+                    "name": name
+                })
+                if allow_early_exit:
+                    consecutive_clean_threads += 1
+                    if consecutive_clean_threads >= 2:
+                        reached_date_limit = True
+                        break
+                continue
+
+            consecutive_clean_threads = 0
+            if row is not None and force_refresh:
+                # ``--refresh`` re-opens known threads; keep counting them as
+                # cache hits so ``record_fetch`` still reports every thread
+                # seen in range (new + already known).
+                stats["skipped_threads"] += 1
+            stats["fetch_reasons"][fetch_reason] = stats["fetch_reasons"].get(fetch_reason, 0) + 1
+            logger.info(f"Stage1 '{name}' decision=fetch reason={fetch_reason} {token_log}")
 
             collected_threads.append({
                 "record": thread_record,
@@ -373,7 +452,11 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
 
     # END STAGE 1
     conn.commit()
-    logger.info(f"Stage 1 Complete. Listed {len(collected_threads)} threads in range.")
+    logger.info(
+        f"Stage 1 Complete. Listed {len(collected_threads)} threads in range. "
+        f"skipped={stats['skipped_threads']} skip_reasons={stats['skip_reasons']} "
+        f"fetch_reasons={stats['fetch_reasons']} time_out_of_order={stats['threads_time_out_of_order']}"
+    )
 
     return {
         "early_exit": False,
@@ -383,13 +466,13 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
 
 def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, logger,
                  record_fetch, extract_ad_id_labels_arg, extract_user_info, detect_city,
-                 skip_navigation: bool = False, force_refresh: bool = False,
+                 skip_navigation: bool = False, force_refresh: bool = False, refresh_older_than_days: int | None = None,
                  allow_early_exit: bool = True,
                  target_total_messages: int | None = None) -> dict:
     tasks: list[ThreadTask] = []
     discovery = discover_threads(
         page, page_id, time_range, max_threads, conn, logger, record_fetch,
-        skip_navigation=skip_navigation, force_refresh=force_refresh,
+        skip_navigation=skip_navigation, force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days,
         allow_early_exit=allow_early_exit, target_total_messages=target_total_messages,
         on_task=tasks.append,
     )
@@ -436,6 +519,12 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
             logger.info(f"Syncing thread '{name}' (#{i+1}/{len(tasks)})...")
 
             result = process_thread_task(page, conn, task, deps, logger, is_first_thread=(i == 0))
+
+            if result.status in {"error", "click_verify_failed", "locate_failed"}:
+                stats.setdefault("failed_threads", []).append({
+                    "thread_id": result.thread_id, "thread_name": name,
+                    "status": result.status, "error": result.error,
+                })
 
             if result.status == "click_verify_failed":
                 stats["threads_skipped_click_verify"] += 1

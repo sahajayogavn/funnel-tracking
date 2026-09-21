@@ -53,157 +53,43 @@ def _normalise_day_context(value: str | None) -> str | None:
 
 def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fingerprint: str,
                          is_first_thread: bool, thread_record) -> tuple[str, bool]:
-    # Initialize with hovercard fallback immediately so early returns don't lose it
-    fb_url = getattr(thread_record, "fb_url", "") if hasattr(thread_record, "fb_url") else ""
-    target_item_id = getattr(thread_record, "selected_item_id", "")
-    # Retrospective [Apr 2026]: Missing fb_url for the first thread
-    # Provide an immediate fallback from target_item_id (DOM a[href]) if hovercard failed, so fb_url is never empty
-    if not fb_url and target_item_id:
-        fb_url = target_item_id
-        
-    url_changed = False
-    name_matched = False
+    """Reject unbound/mismatched navigation, including the first thread.
 
-    for _poll in range(20):
-        try:
-            current_qs = parse_qs(urlparse(page.url).query)
-            candidate = current_qs.get('selected_item_id', [''])[0]
-            
-            header_text = page.evaluate('''() => {
-                let main = document.querySelector('div[role="main"]');
-                if (!main) main = document.body;
-                let h2s = Array.from(main.querySelectorAll('h2[dir="auto"], h1, h3, div[role="heading"]'));
-                for(let h of h2s) {
-                    if (h.innerText && h.innerText.length > 0) return h.innerText.trim();
-                }
-                let main_text = main.innerText || "";
-                return main_text.substring(0, 500);
-            }''')
-
-            clean_name = name.lower().strip()
-            clean_header = header_text.lower().strip()
-            if clean_name and clean_name in clean_header:
-                name_matched = True
-            elif clean_header and clean_header in clean_name:
-                name_matched = True
-
-            if candidate and target_item_id and candidate == target_item_id:
-                fb_url = candidate
-                url_changed = True
-            elif candidate and candidate != prev_fb_url:
-                fb_url = candidate
-                url_changed = True
-
-            if is_first_thread:
-                # Retrospective [Apr 2026]: Fix for 21s Silent Hang & Missing Profile ID
-                # Facebook UI anomaly 1: First thread forces 'Inbox' as h1, breaking name_matched string match.
-                # Facebook UI anomaly 2: React Router delays appending `&selected_item_id` by 100-500ms after physical clicks.
-                # Fix: We bypass the `name_matched` loop to prevent 20-sec blind polling, but we wait up to 1.5 seconds (_poll >= 3) 
-                # so React Router can populate the ID. If candidate appears early, or 1.5s passes (for Guest users), we return safely.
-                if candidate:
-                    logger.info(f"thread_switch_verified method=is_first_thread_with_id thread='{name}'")
-                    # Retrospective [Apr 2026]: Ensure fb_url is not lost when candidate == prev_fb_url and target_item_id is absent
-                    if not fb_url:
-                        fb_url = candidate
-                    return fb_url, True
-                elif _poll >= 3:
-                    logger.info(f"thread_switch_verified method=is_first_thread_no_id thread='{name}'")
-                    if not fb_url:
-                        # Retrospective [Apr 2026]: Anti-Fragile Last Resort fb_url extraction
-                        # If ReactRouter hasn't updated the URL, and the sidebar stripped hrefs for the active thread, 
-                        # we forcefully extract the ID from the chat panel's header avatars or buttons.
-                        fallback_id = page.evaluate(r'''() => {
-                            let links = Array.from(document.querySelectorAll('a[href]'));
-                            for (let a of links) {
-                                let h = a.getAttribute('href') || '';
-                                let m1 = h.match(/selected_item_id=(\d+)/);
-                                if (m1) return m1[1];
-                                let m2 = h.match(/\/messages\/t\/(\d+)/);
-                                if (m2) return m2[1];
-                            }
-                            return "";
-                        }''')
-                        if fallback_id:
-                            fb_url = fallback_id
-                            logger.info(f"thread_switch_verified fallback_dom_extraction SUCCESS fb_url='{fb_url}'")
-                    return fb_url, True
-
-            if url_changed and name_matched:
-                logger.info(f"thread_switch_verified method=selected_item_id_and_name_match thread='{name}'")
-                return fb_url, True
-
-        except Exception:
-            pass
-        page.wait_for_timeout(500)
-
-    if not url_changed:
-        try:
-            current_qs = parse_qs(urlparse(page.url).query)
-            # Only overwrite if Facebook gave us a valid selected_item_id
-            candidate = current_qs.get('selected_item_id', [''])[0]
-            if candidate:
-                fb_url = candidate
-        except Exception:
-            pass
-
-    panel_refreshed = False
-    
-    def normalize_name(s):
-        return re.sub(r'[^\w]', '', s).lower()
-    
-    for _poll in range(20):
-        header_text = page.evaluate('''() => {
-            let main = document.querySelector('div[role="main"]');
-            if (!main) main = document.body;
-            let h2s = Array.from(main.querySelectorAll('h2[dir="auto"], h1, h3, div[role="heading"], span[dir="auto"]'));
-            for(let h of h2s) {
-                if (h.innerText && h.innerText.length > 0) return h.innerText.trim();
-            }
-            return (main.innerText || "").substring(0, 500);
-        }''')
-        clean_name = normalize_name(name)
-        clean_header = normalize_name(header_text)
-        if clean_name and (clean_name in clean_header or clean_header in clean_name):
-            name_matched = True
-        else:
-            if _poll == 19:
-                logger.error(f"[DEBUG] verify_thread_switch FAIL. raw_name='{name}' raw_header='{header_text}' clean_name='{clean_name}' clean_header='{clean_header}'")
-
-        post_click_fingerprint = page.evaluate('''() => {
-            let r = document.querySelector(
-                'div[aria-label*="Message list container"], ' +
-                'div[role="region"][aria-label*="message"]'
-            );
-            if (!r) return "";
-            return (r.innerText || "").substring(0, 200);
-        }''')
-        if post_click_fingerprint != pre_click_fingerprint:
-            panel_refreshed = True
-            logger.info(f"thread_switch_verified method=panel_fingerprint thread='{name}'")
-            return fb_url, True
-        page.wait_for_timeout(500)
-
-    if not panel_refreshed and is_first_thread:
-        logger.info(f"thread_switch_verified method=first_thread_already_loaded thread='{name}'")
-        return fb_url, True
-
-    # Retrospective [2026-09-16]: after a direct-URL navigation the panel h1 is
-    # the generic "Inbox" and the sidebar click refreshes nothing, but the URL
-    # carries exactly the PSID we asked for. That is the strongest identity
-    # signal available and must not be vetoed by the missing name match.
-    if url_changed and target_item_id and fb_url == target_item_id:
-        logger.info(f"thread_switch_verified method=selected_item_id_exact thread='{name}'")
-        return fb_url, True
-
-    if not panel_refreshed and not url_changed and not name_matched:
-        logger.warning(f"thread_switch_failed thread='{name}' reason=no_url_change_no_panel_refresh_no_name_match")
+    URL identity and a matching rendered heading must coexist in one poll.
+    A name, changed text, hovercard link or arbitrary sidebar link alone does
+    not bind a conversation to a Page-scoped recipient ID (PSID).
+    """
+    target = str(getattr(thread_record, "selected_item_id", "") or "").strip()
+    page_id = str(getattr(thread_record, "page_id", "") or "").strip()
+    if not target.isdigit() or not page_id.isdigit():
+        logger.warning("thread_switch_failed reason=missing_numeric_page_or_recipient_id")
         return "", False
-        
-    if name_matched:
-        logger.info(f"thread_switch_verified method=name_matched_fallback thread='{name}'")
-        return fb_url, True
-
-    logger.warning(f"thread_switch_failed thread='{name}' reason=name_not_matched_in_center_panel")
+    for _ in range(20):
+        try:
+            snapshot = page.evaluate('''() => ({
+                url: location.href,
+                headings: Array.from(document.querySelectorAll(
+                    'div[role="main"] h2[dir="auto"], div[role="main"] h1, '
+                    + 'div[role="main"] h3, div[role="main"] [role="heading"]'
+                )).filter(el => el.getClientRects().length).map(el => el.innerText.trim())
+            })''')
+            parsed_url = urlparse(snapshot["url"])
+            qs = parse_qs(parsed_url.query)
+            identity_matches = (parsed_url.hostname == "business.facebook.com"
+                                and qs.get("selected_item_id") == [target]
+                                and qs.get("asset_id") == [page_id])
+            expected_name = " ".join(name.casefold().split())
+            heading_matches = expected_name and any(
+                " ".join(str(value).casefold().split()) == expected_name
+                for value in snapshot.get("headings", [])
+            )
+            if identity_matches and heading_matches:
+                logger.info("thread_switch_verified method=exact_page_recipient_and_heading")
+                return target, True
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+    logger.warning("thread_switch_failed reason=identity_or_rendered_heading_unverified")
     return "", False
 
 
@@ -523,20 +409,29 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
             };
         }
 
-        function explicitSender(node, stopAt) {
-            let evidence = evidenceText(node, stopAt);
+        function explicitSender(node, stopAt, bodySegments = []) {
+            // An actor label on a shared wrapper cannot identify every child
+            // message. Stop before that boundary, just as sourceIdForBody does.
+            let labels = [];
+            for (let current = node; current; current = current.parentElement) {
+                if (bodySegments.filter(segment => current.contains(segment.node)).length > 1) break;
+                let label = current.getAttribute && current.getAttribute('aria-label');
+                if (label) labels.push('aria-label=' + label);
+                if (current === stopAt) break;
+            }
+            let evidence = labels.join(' | ');
             // Only a first-party self label is strong enough to assert Page.
             // Bubble alignment/colour remains available as a candidate in
             // Python, but must not be persisted as an actor fact.
-            if (/(?:^|[=\s|])(you sent|you replied|bạn đã gửi|bạn đã trả lời)\b/i.test(evidence)) {
-                return {sender: 'Page', evidence};
-            }
+            let pageMatch = /(?:^|[=\s|])(you sent|you replied|bạn đã gửi|bạn đã trả lời)\b/i.test(evidence);
             // Customer is asserted only by a platform sender label such as
             // "Lan sent a message".  This deliberately does not inspect the
             // message body, colour, alignment, or a guessed profile name.
             let customerMatch = evidence.match(
                 /(?:^|[=\s|])((?!(?:you|bạn)\b)[^|=\n]{1,160}?)\s+(?:sent\s+(?:a\s+)?message|replied(?:\s+to)?|đã\s+gửi(?:\s+(?:một\s+)?tin\s+nhắn)?|đã\s+trả\s+lời)\b/i
             );
+            if (pageMatch && customerMatch) return {sender: null, evidence};
+            if (pageMatch) return {sender: 'Page', evidence};
             if (customerMatch) return {sender: 'Customer', evidence};
             return {sender: null, evidence: evidence || null};
         }
@@ -751,7 +646,7 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
                 // not concatenate it with a quote or a sibling bubble: doing
                 // so makes an attribution claim the DOM did not establish.
                 for (let segment of bodySegments) {
-                    let senderInfo = explicitSender(segment.node, el);
+                    let senderInfo = explicitSender(segment.node, el, bodySegments);
                     let segmentIndex = bodySegments.indexOf(segment);
                     results.push({
                         htmlStr, bg, text: segment.text, body: segment.text,

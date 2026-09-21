@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
 from fb_pipeline.contracts.l1_message_kind import (
+    canonical_sender_for_actor,
+    has_unverified_sender_claim,
     parse_legacy_message_annotations,
     strip_non_sender_annotations,
 )
@@ -122,9 +124,17 @@ def compute_conversation_state(messages: list[dict], now: datetime | None = None
     now = now or datetime.now()
     now_iso = now.strftime(ISO_FMT)
 
+    # Never let a CSS-era Page/Customer claim decide who currently holds the
+    # turn.  Keep every other field so an operator can inspect the evidence,
+    # but make an unverified actor indistinguishable from Unknown to the gate.
+    actor_messages = [
+        {**message, "sender": canonical_sender_for_actor(message)}
+        for message in messages
+    ]
+
     last_customer_idx = None
-    for idx in range(len(messages) - 1, -1, -1):
-        if messages[idx].get("sender") == "Customer":
+    for idx in range(len(actor_messages) - 1, -1, -1):
+        if actor_messages[idx].get("sender") == "Customer":
             last_customer_idx = idx
             break
 
@@ -134,12 +144,12 @@ def compute_conversation_state(messages: list[dict], now: datetime | None = None
         # Keep it out of automatic drafting and make the uncertainty explicit
         # for review/re-crawl instead of silently reporting no conversation.
         unknown_messages = [
-            message for message in messages
+            (idx, message) for idx, message in enumerate(actor_messages)
             if (message.get("sender") in (None, "", "Unknown")
                 and strip_non_sender_annotations(message.get("content") or ""))
         ]
         if unknown_messages:
-            latest_unknown = unknown_messages[-1]
+            latest_unknown_idx, latest_unknown = unknown_messages[-1]
             return ConversationState(
                 state=STATE_UNCERTAIN_SENDER,
                 action=ACTION_NEEDS_REVIEW,
@@ -148,14 +158,17 @@ def compute_conversation_state(messages: list[dict], now: datetime | None = None
                 last_customer_text=strip_non_sender_annotations(latest_unknown.get("content") or ""),
                 last_customer_seq=latest_unknown.get("seq"),
                 now=now_iso,
-                extra={"sender_confidence": latest_unknown.get("sender_confidence") or "unknown"},
+                extra={
+                    "sender_confidence": latest_unknown.get("sender_confidence") or "unknown",
+                    "stored_sender_claim": messages[latest_unknown_idx].get("sender"),
+                },
             )
         return ConversationState(
             state=STATE_NO_CUSTOMER_MESSAGE, action=ACTION_SKIP,
             reason="no_customer_message", now=now_iso,
         )
 
-    last_customer = messages[last_customer_idx]
+    last_customer = actor_messages[last_customer_idx]
     last_customer_at = _message_time(last_customer)
     # Reply snippets and reaction UI markers are not statements by this
     # sender.  They must not create a question, city, phone, or closer signal.
@@ -163,10 +176,35 @@ def compute_conversation_state(messages: list[dict], now: datetime | None = None
     age_hours = hours_between(now_iso, last_customer_at)
 
     # Human (not Auto_Page) reply after the last customer turn?
-    human_after = [m for m in messages[last_customer_idx + 1:] if m.get("sender") == "Page"]
+    unresolved_after_customer = [
+        m for m in actor_messages[last_customer_idx + 1:]
+        if m.get("sender") == "Unknown" and strip_non_sender_annotations(m.get("content") or "")
+    ]
+    if unresolved_after_customer:
+        unresolved = unresolved_after_customer[-1]
+        return ConversationState(
+            state=STATE_UNCERTAIN_SENDER,
+            action=ACTION_NEEDS_REVIEW,
+            reason="unresolved_sender_after_last_customer_turn",
+            age_hours=age_hours,
+            last_customer_at=last_customer_at,
+            last_customer_text=last_customer_text,
+            last_customer_seq=last_customer.get("seq"),
+            now=now_iso,
+            extra={
+                "unresolved_seq": unresolved.get("seq"),
+                "sender_confidence": unresolved.get("sender_confidence") or "unknown",
+                "unverified_sender_claim": any(
+                    has_unverified_sender_claim(m)
+                    for m in messages[last_customer_idx + 1:]
+                ),
+            },
+        )
+
+    human_after = [m for m in actor_messages[last_customer_idx + 1:] if m.get("sender") == "Page"]
     # Human reply immediately before the last customer turn (closer context).
     human_before_at = None
-    for m in reversed(messages[:last_customer_idx]):
+    for m in reversed(actor_messages[:last_customer_idx]):
         if m.get("sender") == "Page":
             human_before_at = _message_time(m)
             break
@@ -178,7 +216,7 @@ def compute_conversation_state(messages: list[dict], now: datetime | None = None
     # A registration is "awaiting confirm" when the phone appeared in the
     # customer's most recent turns and no human has replied since.
     recent_customer_texts = []
-    for m in reversed(messages[: last_customer_idx + 1]):
+    for m in reversed(actor_messages[: last_customer_idx + 1]):
         if m.get("sender") == "Customer":
             recent_customer_texts.append(strip_non_sender_annotations(m.get("content") or ""))
             if len(recent_customer_texts) >= 3:
@@ -268,10 +306,16 @@ def format_conversation_lines(messages: list[dict], reaction_events: list[dict] 
                 ) if item
             )
             stamp = f"{stamp}; {time_evidence}"
-        sender = str(m.get("sender") or "Unknown")
+        sender = canonical_sender_for_actor(m)
+        stored_sender = str(m.get("sender") or "Unknown")
         sender_confidence = str(m.get("sender_confidence") or "").strip()
         sender_label = sender
-        if sender_confidence and sender_confidence not in {"high", "confirmed", "exact"}:
+        if sender == "Unknown" and has_unverified_sender_claim(m):
+            sender_label = (
+                f"Unknown (unverified stored sender claim: {stored_sender}; "
+                f"confidence: {sender_confidence or 'unknown'})"
+            )
+        elif sender_confidence and sender_confidence not in {"explicit", "high", "confirmed", "exact"}:
             sender_label = f"{sender} (sender confidence: {sender_confidence})"
         if annotations.body:
             lines.append(f"[{stamp} | {sender_label}] {annotations.body}")
@@ -292,7 +336,7 @@ def format_conversation_lines(messages: list[dict], reaction_events: list[dict] 
             lines.append(
                 f"[{stamp} | Reply/quote metadata] {quote} "
                 f"(quoted sender: {quoted_sender}; reply target: {target_id}; "
-                f"NOT a statement from {sender}; do not use as sender evidence)"
+                f"NOT a statement from {sender_label}; do not use as sender evidence)"
             )
 
         reactions = m.get("reactions") or []
