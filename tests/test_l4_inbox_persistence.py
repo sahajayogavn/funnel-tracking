@@ -249,11 +249,10 @@ class TestMasSchemaMigrations(unittest.TestCase):
             (row["thread_id"], row["sender"], row["content"], row["message_timestamp"], row["seq"]),
             ("legacy-thread", "Customer", "Dạ", "Sep 10, 2026, 9:00 AM", 0),
         )
-        reaction_columns = {
-            row["name"]
-            for row in self.conn.execute("PRAGMA table_info(crawled_message_reactions)").fetchall()
-        }
-        self.assertTrue({"actor", "emoji", "target_type", "target_message_id", "source_id"}.issubset(reaction_columns))
+        self.assertIn("reaction_annotation_json", columns)
+        self.assertIsNone(self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='crawled_message_reactions'"
+        ).fetchone())
 
     def test_log_mas_decision_persists_payload_json(self):
         setup_database(self.conn)

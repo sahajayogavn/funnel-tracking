@@ -6,6 +6,7 @@ import { sortFacebookMessages } from '@/lib/funnel-filters';
 import { SevenStarProgress } from './seven-star-progress';
 import { SeekerJourneyTimeline } from './seeker-journey-timeline';
 import { MessengerMessageList } from './messenger-message-list';
+import { PendingMessageHistory } from './pending-message-history';
 
 const PAGE_ID = '1548373332058326';
 
@@ -34,7 +35,7 @@ function fbPostUrl(postUrl: string) {
 }
 
 export function SeekerDetailView({ detail }: Props) {
-  const { seeker, messages, comments, adSource, reactionEvents } = detail;
+  const { seeker, messages, comments, adSource } = detail;
   const chronologicalMessages = sortFacebookMessages(
     messages.filter(message => !message.content?.includes('[AD SOURCE]'))
   );
@@ -160,7 +161,7 @@ export function SeekerDetailView({ detail }: Props) {
       </section>
 
       {/* ── DM Messages Timeline ── */}
-      {messages.length > 0 && (
+      {(messages.length > 0 || seeker.source === 'dm') && (
         <div className="card" style={{ padding: '20px' }}>
           <div style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
             💬 Message History
@@ -171,11 +172,13 @@ export function SeekerDetailView({ detail }: Props) {
               </a>
             )}
           </div>
+          {messages.length === 0 && <p>Chưa có tin nhắn đã xác minh.</p>}
+          <PendingMessageHistory history={detail.pendingHistory} />
           <MessengerMessageList
             maxHeight={600}
             messages={chronologicalMessages.map(message => ({
               id: message.id,
-              sender: message.sender === 'Auto_Page' ? '@Auto_Page' : (message.sender === 'Page' ? 'Page' : (message.sender === 'Customer' ? seeker.name : (message.sender || 'Unknown'))),
+              sender: message.sender === 'Auto_Page' ? 'Page (automated message)' : (message.sender === 'Page' ? 'Page' : (message.sender === 'Customer' ? seeker.name : (message.sender || 'Unknown'))),
               content: message.content,
               timestamp: message.messageTimestamp,
               eventAt: message.messageAt,
@@ -189,22 +192,6 @@ export function SeekerDetailView({ detail }: Props) {
         </div>
       )}
 
-      {reactionEvents.length > 0 && (
-        <section className="card" aria-label="Reaction evidence" style={{ padding: '16px 20px' }}>
-          <div style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '8px' }}>
-            Reaction evidence
-          </div>
-          <div style={{ display: 'grid', gap: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
-            {reactionEvents.map((event) => (
-              <div key={event.id}>
-                <strong style={{ color: 'var(--text-primary)' }}>{event.emoji || '•'}</strong>{' '}
-                actor: {event.actor || 'unknown'}; scope: {event.targetScope || event.targetType || 'unknown'};
-                target: {event.targetMessageId || 'unknown'}; observed: {event.observedAt || 'unknown'}
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
 
       {/* ── Comments Section ── */}
       {comments.length > 0 && (
@@ -245,7 +232,7 @@ export function SeekerDetailView({ detail }: Props) {
       )}
 
       {/* Empty state */}
-      {messages.length === 0 && comments.length === 0 && (
+      {messages.length === 0 && comments.length === 0 && seeker.source !== 'dm' && (
         <div className="card" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
           No interaction history recorded yet.
         </div>

@@ -11,6 +11,7 @@ to ensure consistent FrankenSQLite access.
 import os
 import sys
 import logging
+import json
 
 logger = logging.getLogger("mas.seeker_tools")
 
@@ -69,11 +70,8 @@ def get_thread_messages(thread_id: str, limit: int = 150) -> dict:
         limit: DB query limit (default 150). Will dynamically cap around 3500 chars.
 
     Returns:
-        dict: ``messages`` contains only message bodies and their source
-        evidence.  ``reaction_events`` is a separate, complete audit stream
-        of crawled reactions.  In particular, a thread-level or unknown-target
-        reaction is never assigned to the nearest message merely to fit a
-        legacy message-shaped payload.
+        dict: ``messages`` contains bodies, source evidence, and a compact
+        reaction annotation attached only to the message Facebook targeted.
 
         Older read-only snapshots can predate the evidence migration.  Missing
         columns/tables are represented as unknown/empty evidence rather than
@@ -103,6 +101,7 @@ def get_thread_messages(thread_id: str, limit: int = 150) -> dict:
             ("quoted_text", "NULL"),
             ("sender_evidence", "NULL"),
             ("quote_evidence", "NULL"),
+            ("reaction_annotation_json", "'[]'"),
             ("seq", "0"),
             ("id", "0"),
         )
@@ -118,8 +117,6 @@ def get_thread_messages(thread_id: str, limit: int = 150) -> dict:
             f"ORDER BY {order_column} DESC LIMIT ?",
             (thread_id, limit),
         ).fetchall()
-
-        reaction_events = _get_crawled_reaction_events(conn, thread_id)
 
         messages = []
         total_chars = 0
@@ -151,6 +148,7 @@ def get_thread_messages(thread_id: str, limit: int = 150) -> dict:
                 "quoted_text": r["quoted_text"],
                 "sender_evidence": r["sender_evidence"],
                 "quote_evidence": r["quote_evidence"],
+                "reactions": _decode_reaction_annotation(r["reaction_annotation_json"]),
             })
             total_chars += char_cost
 
@@ -159,7 +157,6 @@ def get_thread_messages(thread_id: str, limit: int = 150) -> dict:
         return {
             "status": "success",
             "messages": messages,
-            "reaction_events": reaction_events,
             "count": len(messages),
         }
     except Exception as e:
@@ -174,7 +171,7 @@ def _table_columns(conn, table_name: str) -> set[str]:
     """Return a table's columns without assuming an evidence migration ran."""
     # Table names are module constants, not user input.  PRAGMA cannot bind a
     # table identifier; keep the allow-list here so this helper remains safe.
-    if table_name not in {"messages", "crawled_message_reactions"}:
+    if table_name != "messages":
         raise ValueError(f"Unsupported table: {table_name}")
     return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})")}
 
@@ -186,70 +183,13 @@ def _column_or_default(table_alias: str, columns: set[str], column: str, fallbac
     return f"{fallback} AS {column}"
 
 
-def _get_crawled_reaction_events(conn, thread_id: str) -> list[dict]:
-    """Read every crawled reaction as an independent evidence event.
-
-    This intentionally does not join reactions to ``messages``.  A matching
-    target id tells an auditor what Facebook claimed as the target; it is not a
-    licence to attach thread/unknown-target reactions to some bubble in the
-    model's conversation text.
-    """
-    reaction_columns = _table_columns(conn, "crawled_message_reactions")
-    # A malformed/pre-migration table without thread identity cannot be scoped
-    # safely.  Returning no events is preferable to leaking another thread's
-    # observation or attaching it to the current thread by guesswork.
-    if not reaction_columns or "thread_id" not in reaction_columns:
+def _decode_reaction_annotation(value) -> list[dict]:
+    """Return only the stable annotation schema from a DB value."""
+    try:
+        items = json.loads(value or "[]")
+    except (TypeError, ValueError):
         return []
-
-    reaction_fields = (
-        ("id", "NULL"),
-        ("reaction_key", "NULL"),
-        ("source_id", "NULL"),
-        ("actor", "'unknown'"),
-        ("actor_role", "'unknown'"),
-        ("emoji", "'unknown'"),
-        ("target_type", "'unknown'"),
-        ("target_message_id", "NULL"),
-        ("target_scope", "'unknown'"),
-        ("observed_at", "NULL"),
-        ("occurred_at", "NULL"),
-        ("raw_label", "NULL"),
-        ("evidence", "NULL"),
-        ("parse_confidence", "'unknown'"),
-    )
-    reaction_select = ", ".join(
-        _column_or_default("r", reaction_columns, field, fallback)
-        for field, fallback in reaction_fields
-    )
-    order_column = "r.id" if "id" in reaction_columns else "r.rowid"
-    rows = conn.execute(
-        f"SELECT {reaction_select} FROM crawled_message_reactions r "
-        f"WHERE r.thread_id = ? ORDER BY {order_column} ASC",
-        (thread_id,),
-    ).fetchall()
-    events = []
-    for reaction in rows:
-        target_id = reaction["target_message_id"]
-        events.append({
-            "reaction_id": reaction["id"],
-            "reaction_key": reaction["reaction_key"],
-            "source_id": reaction["source_id"],
-            "actor": reaction["actor"],
-            "actor_role": reaction["actor_role"],
-            "emoji": reaction["emoji"],
-            "target_type": reaction["target_type"],
-            "target_message_id": target_id,
-            # Kept as an explicit compatibility alias; it is copied from the
-            # target field, never looked up from the enclosing message.
-            "target_id": target_id,
-            "target_scope": reaction["target_scope"],
-            "observed_at": reaction["observed_at"],
-            "occurred_at": reaction["occurred_at"],
-            "raw_label": reaction["raw_label"],
-            "evidence": reaction["evidence"],
-            "parse_confidence": reaction["parse_confidence"],
-        })
-    return events
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 
 def find_unreplied_threads(page_id: str, limit: int = 10) -> dict:

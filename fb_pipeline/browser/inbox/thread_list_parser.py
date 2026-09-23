@@ -28,6 +28,11 @@ INVALID_THREAD_NAMES = frozenset({
 
 
 # code:bug-inbox-thread-name-001:reject-navigation-label
+def is_ignored_inbox_name(name: str) -> bool:
+    """Operator-approved exclusion; do not broaden to real names containing it."""
+    return " ".join((name or "").casefold().split()) == "messenger user"
+
+
 def is_conversation_name(name: str) -> bool:
     """Return whether *name* can be a Facebook conversation identity."""
     normalized = " ".join((name or "").casefold().split())
@@ -191,6 +196,14 @@ def parse_sidebar_time_token(token: str, now: datetime | None = None) -> dict:
 
     now = now or datetime.now()
     lower = token.lower()
+    # Exact source epoch converted to the application's local timezone.
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', token):
+        try:
+            parsed = datetime.strptime(token, '%Y-%m-%d %H:%M:%S')
+            return {'kind': 'absolute_time', 'token': token, 'days_ago': (now - parsed).days,
+                    'parsed_at': parsed.isoformat(sep=' ', timespec='seconds')}
+        except ValueError:
+            return {'kind': 'unknown', 'token': token, 'days_ago': None, 'parsed_at': None}
 
     # Meta's sidebar renders the calendar label and clock separately in the
     # DOM. `extract_visible_threads` joins them (for example, "Today 8:56 PM").

@@ -250,11 +250,8 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                 "thread_name": thread_name,
                 "seeker": seeker,
                 "messages": recent_messages,
-                "conversation_text": format_conversation_lines(
-                    recent_messages, msg_result.get("reaction_events") or [],
-                ),
+                "conversation_text": format_conversation_lines(recent_messages),
                 "full_messages_json": msg_result["messages"],
-                "reaction_events": msg_result.get("reaction_events") or [],
                 "latest_timestamp": msg_result["messages"][-1].get("timestamp"),
                 "conversation_state": state.to_dict(),
                 "late": state.late,
@@ -279,8 +276,6 @@ def run_inbox_cycle(page_id: str, dry_run: bool = True,
                     "trigger": "scheduler", "page_id": page_id,
                     "subject_id": thread_id, "now_context": now_context,
                 }
-                if payload.get("reaction_events"):
-                    pipeline_kwargs["reaction_events"] = payload["reaction_events"]
                 delivery_snapshot = conversation_snapshot(payload["messages"])
                 llm_output = run_adk_pipeline(
                     payload["messages"], payload["seeker"], **pipeline_kwargs,

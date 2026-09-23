@@ -86,7 +86,15 @@ def attach_to_authorized_session(playwright, page_id: str, inbox_url: str,
             else:
                 selected_existing_tab, created_tab = True, False
 
-        if created_tab or inbox_url not in (page.url or ""):
+        # code:inbox-order-invariant-001:no-selected-conversation
+        # A reused tab may still have a conversation open
+        # (``selected_item_id=<psid>``).  Meta keeps the selected conversation
+        # pinned inside the sidebar list regardless of its recency, so Stage 1
+        # would record it at a rank it does not hold (seen 2026-09-21: a
+        # "Sep 6" card at rank 8 among "Tue" cards, then absent at QA time).
+        # Always read the sidebar from the bare inbox URL.
+        current_url = page.url or ""
+        if created_tab or inbox_url not in current_url or "selected_item_id=" in current_url:
             # Meta frequently delays DOMContentLoaded long after the inbox shell is
             # usable. Commit-level navigation lets the caller's DOM readiness check
             # decide when scraping can safely begin.

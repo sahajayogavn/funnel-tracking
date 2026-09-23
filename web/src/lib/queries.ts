@@ -1,9 +1,10 @@
 // code:web-db-002:data-queries
 // Server-side query functions that read from FrankenSQLite
 import { query, queryOne } from './db';
-import type { CrawledReactionEvent, Seeker, SeekerDetail, Post, CommentRow, MessageRow, ThreadRow, TouchPoint } from './types';
+import type { Seeker, SeekerDetail, Post, CommentRow, MessageRow, ThreadRow, TouchPoint } from './types';
 import { parseRealDate } from './funnel-filters';
 import { normalizeJourneyStage } from './journey-engine';
+import { pendingHistoryFromObservation } from './pending-history';
 
 // ── FB URL normalization ──
 // All FB URLs like facebook.com/SahajaVietnam?__cft__[0]=... are the same page.
@@ -41,47 +42,19 @@ async function messageEvidenceSelect(): Promise<string> {
     select('source_id', 'sourceId'), select('sender_confidence', 'senderConfidence'),
     select('time_precision', 'timePrecision'), select('reply_to_message_id', 'replyToMessageId'),
     select('quoted_sender', 'quotedSender'), select('quoted_text', 'quotedText'),
+    select('reaction_annotation_json', 'reactionAnnotationJson'),
   ])).join(',\n           ');
 }
 
-async function attachCrawledReactions(threadId: string, messages: MessageRow[]): Promise<MessageRow[]> {
-  if (!messages.length || !await tableExists('crawled_message_reactions')) return messages;
-  const reactionColumn = async (column: string, alias: string, fallback = 'NULL') =>
-    await tableHasColumn('crawled_message_reactions', column)
-      ? `${column} AS ${alias}`
-      : `${fallback} AS ${alias}`;
-  const columns = await Promise.all([
-    reactionColumn('actor', 'actor'), reactionColumn('actor_role', 'actorRole'), reactionColumn('emoji', 'emoji'),
-    reactionColumn('target_type', 'targetType'), reactionColumn('target_scope', 'targetScope'), reactionColumn('target_message_id', 'targetMessageId'),
-  ]);
-  const reactions = await query<{
-    actor: string | null; actorRole: string | null; emoji: string | null;
-    targetType: string | null; targetScope: string | null; targetMessageId: string | null;
-  }>(`
-    SELECT ${columns.join(',\n           ')}
-    FROM crawled_message_reactions
-    WHERE thread_id = ?
-  `, [threadId]);
-  const byTarget = new Map<string, MessageRow['reactions']>();
-  for (const reaction of reactions) {
-    // An unbound/thread reaction is real evidence, but must not be displayed
-    // on an arbitrary bubble. It remains queryable in its dedicated table.
-    if (!reaction.targetMessageId) continue;
-    const current = byTarget.get(reaction.targetMessageId) || [];
-    current.push({
-      actor: reaction.actor,
-      actorRole: reaction.actorRole,
-      emoji: reaction.emoji,
-      targetType: reaction.targetType,
-      targetScope: reaction.targetScope,
-      targetId: reaction.targetMessageId,
-    });
-    byTarget.set(reaction.targetMessageId, current);
-  }
-  return messages.map(message => ({
-    ...message,
-    reactions: message.sourceId ? (byTarget.get(message.sourceId) || []) : [],
-  }));
+function attachMessageReactionAnnotations(messages: MessageRow[]): MessageRow[] {
+  return messages.map(message => {
+    try {
+      const parsed = JSON.parse(message.reactionAnnotationJson || '[]');
+      return { ...message, reactions: Array.isArray(parsed) ? parsed.filter(item => item && typeof item === 'object') : [] };
+    } catch {
+      return { ...message, reactions: [] };
+    }
+  });
 }
 
 async function attachMasProvenance(threadId: string, messages: MessageRow[]): Promise<MessageRow[]> {
@@ -100,23 +73,6 @@ async function attachMasProvenance(threadId: string, messages: MessageRow[]): Pr
   }));
 }
 
-async function getCrawledReactionEvents(threadId: string): Promise<CrawledReactionEvent[]> {
-  if (!threadId || !await tableExists('crawled_message_reactions')) return [];
-  const select = async (column: string, alias: string, fallback = 'NULL') =>
-    await tableHasColumn('crawled_message_reactions', column)
-      ? `${column} AS ${alias}` : `${fallback} AS ${alias}`;
-  const columns = await Promise.all([
-    select('id', 'id', '0'), select('actor', 'actor'), select('actor_role', 'actorRole'), select('emoji', 'emoji'),
-    select('target_type', 'targetType'), select('target_scope', 'targetScope'), select('target_message_id', 'targetMessageId'),
-    select('observed_at', 'observedAt'), select('evidence', 'evidence'), select('parse_confidence', 'parseConfidence'),
-  ]);
-  return query<CrawledReactionEvent>(`
-    SELECT ${columns.join(', ')}
-    FROM crawled_message_reactions
-    WHERE thread_id = ?
-    ORDER BY id ASC
-  `, [threadId]);
-}
 
 /**
  * A re-fetch can occasionally return a partial Messenger DOM snapshot with no
@@ -452,6 +408,69 @@ export async function getAllSeekers(): Promise<Seeker[]> {
   return result;
 }
 
+/**
+ * Returns only the small, mutable classification payload needed by the
+ * Seekers progress indicator.  Keeping this separate from getAllSeekers()
+ * lets the client poll classification work without re-running the complete
+ * dashboard query or refreshing the Server Component tree.
+ */
+export interface SeekerClassificationProgress {
+  threadId: string;
+  city: string;
+  programCode: string | null;
+  classificationStatus: NonNullable<Seeker['classificationStatus']>;
+}
+
+export async function getSeekerClassificationProgress(threadIds: string[]): Promise<SeekerClassificationProgress[]> {
+  const uniqueThreadIds = [...new Set(threadIds.filter(Boolean))];
+  if (!uniqueThreadIds.length) return [];
+
+  const hasProgramCode = await tableHasColumn('users', 'program_code');
+  const programCodeSelect = hasProgramCode ? 'MAX(u.program_code) AS programCode' : 'NULL AS programCode';
+  const hasClassificationVerifiedAt = await tableHasColumn('users', 'classification_verified_at');
+  const classificationStatusSelect = hasClassificationVerifiedAt
+    ? `CASE
+         WHEN MAX(u.classification_verified_at) IS NULL
+           OR MAX(u.last_interaction) > MAX(u.classification_verified_at) THEN 'pending'
+         WHEN COALESCE(
+           MAX(CASE WHEN u.city != 'Unknown' AND u.city IS NOT NULL THEN u.city END),
+           MAX(CASE WHEN ap.city != 'Unknown' AND ap.city IS NOT NULL THEN ap.city END),
+           MAX(u.city),
+           'Unknown'
+         ) = 'Unknown' THEN 'unknown'
+         ELSE 'done'
+       END AS classificationStatus`
+    : `CASE
+         WHEN COALESCE(
+           MAX(CASE WHEN u.city != 'Unknown' AND u.city IS NOT NULL THEN u.city END),
+           MAX(CASE WHEN ap.city != 'Unknown' AND ap.city IS NOT NULL THEN ap.city END),
+           MAX(u.city),
+           'Unknown'
+         ) = 'Unknown' THEN 'unknown'
+         ELSE 'done'
+       END AS classificationStatus`;
+  const placeholders = uniqueThreadIds.map(() => '?').join(', ');
+
+  return query<SeekerClassificationProgress>(`
+    SELECT
+      t.id AS threadId,
+      COALESCE(
+        MAX(CASE WHEN u.city != 'Unknown' AND u.city IS NOT NULL THEN u.city END),
+        MAX(CASE WHEN ap.city != 'Unknown' AND ap.city IS NOT NULL THEN ap.city END),
+        MAX(u.city),
+        'Unknown'
+      ) AS city,
+      ${programCodeSelect},
+      ${classificationStatusSelect}
+    FROM threads t
+    LEFT JOIN users u ON u.thread_id = t.id
+    LEFT JOIN user_ad_ids uai ON uai.thread_id = t.id
+    LEFT JOIN ad_posts ap ON ap.ad_id = uai.ad_id
+    WHERE t.id IN (${placeholders})
+    GROUP BY t.id
+  `, uniqueThreadIds);
+}
+
 // ── Activity Histogram (interactions per day, last 365 days) ──
 
 export async function getSeekerActivity(seekerName: string): Promise<{ date: string; count: number }[]> {
@@ -517,7 +536,7 @@ export async function getMessagesByThread(threadId: string): Promise<MessageRow[
     FROM messages m WHERE thread_id = ? ORDER BY seq ASC, id ASC
   `, [threadId]);
 
-  return attachCrawledReactions(threadId, rows.map(r => separateLegacyQuotedPresentation({
+  return attachMessageReactionAnnotations(rows.map(r => separateLegacyQuotedPresentation({
     ...r,
     sender: normalizeMessageSender(r.content, r.sender, r.senderConfidence)
   })));
@@ -624,7 +643,6 @@ export async function getSeekerById(seekerId: string): Promise<SeekerDetail | nu
     return {
       seeker: cuRow,
       messages: [],
-      reactionEvents: [],
       comments,
       adSource: null,
       messageCount: 0,
@@ -681,10 +699,20 @@ export async function getSeekerById(seekerId: string): Promise<SeekerDetail | nu
     ...r,
     sender: normalizeMessageSender(r.content, r.sender, r.senderConfidence)
   }));
-  messages = await attachCrawledReactions(uRow.threadId || '', messages);
+  messages = attachMessageReactionAnnotations(messages);
   messages = await attachMasProvenance(uRow.threadId || '', messages);
   messages = displayableMessageHistory(messages);
-  const reactionEvents = await getCrawledReactionEvents(uRow.threadId || '');
+  let pendingHistory: SeekerDetail['pendingHistory'] = null;
+  if (await tableExists('inbox_fetch_observations')) {
+    const observation = await queryOne<{ payload: string; observedAt: string }>(`
+      SELECT payload_json AS payload, observed_at AS observedAt
+      FROM inbox_fetch_observations WHERE thread_id = ?
+      ORDER BY observed_at DESC, observation_id DESC LIMIT 1
+    `, [uRow.threadId]);
+    if (observation) pendingHistory = pendingHistoryFromObservation(
+      observation.payload, observation.observedAt, messages,
+    );
+  }
 
   // Check for ad source
   const adMsg = messages.find(m => m.content?.includes('[AD SOURCE]'));
@@ -741,8 +769,8 @@ export async function getSeekerById(seekerId: string): Promise<SeekerDetail | nu
 
   return {
     seeker: uRow,
+    pendingHistory,
     messages,
-    reactionEvents,
     comments,
     adSource,
     messageCount: messages.length,
@@ -1098,6 +1126,28 @@ export async function getGraphData(filter?: { city?: string; startDate?: string;
     // Fallback: link to city if no post match
     if (!linkedToPost) {
       links.push({ source: targetCityId, target: userNodeId });
+    }
+  }
+
+  // Exact source links from Inbox system banners also establish network
+  // interactions. A post id is never inserted into the advertising-id table.
+  if (await tableExists('inbox_system_events')) {
+    const events = await query<{ thread_id: string; target_type: string; target_id: string; target_url: string | null }>(`
+      SELECT DISTINCT thread_id, target_type, target_id, target_url
+      FROM inbox_system_events WHERE target_id IS NOT NULL
+    `);
+    for (const event of events) {
+      const user = dmUsers.find(u => u.thread_id === event.thread_id && (!targetCity || u.city === targetCity));
+      if (!user) continue;
+      const targetId = `${event.target_type === 'ad' ? 'ad' : 'post'}-${event.target_id}`;
+      const post = postNameCache.find(p => p.id === event.target_id);
+      addNode({ id: targetId, name: post?.post_name || `${event.target_type === 'ad' ? 'Ad' : 'Post'} ${event.target_id}`,
+        type: event.target_type === 'ad' ? 'ad' : 'post', val: 8, color: '#f59e0b',
+        fbUrl: event.target_url ?? undefined });
+      const userNodeId = `dm-user-${user.thread_name}`;
+      if (!links.some(link => link.source === targetId && link.target === userNodeId)) {
+        links.push({ source: targetId, target: userNodeId });
+      }
     }
   }
 

@@ -1,5 +1,9 @@
 # Fetch integrity — 21/09/2026
 
+Follow-up: the first implementation below rejected cold-start tasks without a
+cached PSID. See [empty-DB regression and fix](fetch-cold-start-fix-2026-09-21.md)
+for the corrected discovery path, live probe, and durable unresolved observations.
+
 Scope: seeker 4348 (Phố Châu), thread `1548373332058326_285fee1acbea12c7`,
 then investigation of sender, recipient identity and event time across ingestion.
 No production message rows were rewritten, no full Facebook recrawl was run,

@@ -34,6 +34,10 @@ def test_parser_keeps_body_separate_from_quote_and_normalizes_complete_day_conte
     messages = extract_thread_messages(page)
 
     assert messages == [{
+        "kind": "message",
+        "source_links": [],
+        "time_evidence": None,
+        "observed_at": messages[0]["observed_at"],
         "sender": "Customer",
         "text": "Dạ",
         "body": "Dạ",
@@ -148,3 +152,11 @@ def test_parser_preserves_reaction_as_structured_evidence_without_emoji_text():
     assert message["reactions"][0]["target_id"] == "mid.page.42"
     assert message["reactions"][0]["target_type"] == "message"
     assert message["reactions"][0]["target_message_id"] == "mid.page.42"
+
+
+def test_parser_looks_for_hover_tooltip_before_leaving_reactor_unknown():
+    page = _RawPage([])
+    extract_thread_messages(page)
+    assert "hoverReactionLabel" in page.script
+    assert "[role=\"tooltip\"]" in page.script
+    assert "reactionActors" in page.script

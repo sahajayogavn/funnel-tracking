@@ -126,8 +126,7 @@ def _load_thread(thread_id: str) -> Optional[dict]:
         "delivery_snapshot": conversation_snapshot(msg_result["messages"]),
         "seeker": seeker,
         "messages": messages,
-        "reaction_events": msg_result.get("reaction_events") or [],
-        "conversation_text": format_conversation_lines(messages, msg_result.get("reaction_events") or []),
+        "conversation_text": format_conversation_lines(messages),
         "conversation_state": state.to_dict(),
         "late": state.late,
         "latest_customer_timestamp": next(
@@ -191,7 +190,6 @@ def recommend_replies(threads: list[dict], page_id: str, regenerate: bool = Fals
             t["messages"], t["seeker"], trigger="manual_recommendation",
             page_id=page_id, subject_id=t["thread_id"], feedback=instruction or None,
             conversation_state=t.get("conversation_state"),
-            reaction_events=t.get("reaction_events") or [],
         )
         # An escalation note is for the human operator, never outward-facing
         # copy.  `run_adk_pipeline` exposes it separately from reply_text, but
@@ -427,7 +425,6 @@ def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, ci
             t["messages"], seeker, care_purpose=route, care_brief=care_brief,
             feedback=instruction, page_id=page_id, trigger="operator_care_command",
             subject_id=t["thread_id"], now_context=format_now_context(datetime.now()),
-            reaction_events=t.get("reaction_events") or [],
         )
         if llm.get("no_send_reason"):
             skipped.append(skipped_result(t, "care_not_appropriate_now", llm["no_send_reason"], care_brief))
@@ -458,10 +455,10 @@ def recommend_care(threads: list[dict], page_id: str, knowledge_context: str, ci
 
 # code:tool-mas-recommend-001:llm-preflight
 def _check_llm_reachable(timeout: float = 8.0) -> Optional[str]:
-    """Native Gemini is verified by the ADK call itself.
+    """Provider reachability is verified by the ADK call itself.
 
-    There is deliberately no alternate endpoint preflight: this deployment
-    must not route MAS recommendations through a stale OpenAI-compatible URL.
+    There is deliberately no alternate endpoint preflight; configured
+    credentials are loaded from the project `.env` before a call.
     """
     return None
 
@@ -471,10 +468,12 @@ def _run(thread_ids: list[str], rec_type: str = "all", page_id: str = DEFAULT_PA
          city: Optional[str] = None, regenerate: bool = False, instruction: str = "",
          program_code: Optional[str] = None, command_id: Optional[str] = None,
          care_purpose: Optional[str] = None, event_id: Optional[str] = None) -> dict:
-    # All MAS paths use the shared Gemini-only configuration.
+    # All MAS paths use the shared provider configuration.
     config = setup_llm_env() or {}
-    if config.get("provider") != "google" or not os.environ.get("GOOGLE_API_KEY"):
+    if config.get("provider") == "google" and not os.environ.get("GOOGLE_API_KEY"):
         return {"status": "error", "error": "Gemini credentials missing (GOOGLE_API_KEY)"}
+    if config.get("provider") == "openai-compatible" and not os.environ.get("OPENAI_API_KEY"):
+        return {"status": "error", "error": "OpenAI-compatible credentials missing (OPENAI_API_KEY)"}
     reachability_error = _check_llm_reachable()
     if reachability_error:
         return {"status": "error", "error": reachability_error}

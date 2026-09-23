@@ -1,7 +1,7 @@
 // code:web-component-002:seekers-table
 'use client';
 
-import { useState, useEffect, useCallback, useRef, useTransition } from 'react';
+import { useState, useEffect, useCallback, useDeferredValue, useMemo, useRef, useTransition } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { formatRelativeElapsed, getStageNumber, type Seeker } from '@/lib/types';
 import { isDateInRange, parseRealDate } from '@/lib/funnel-filters';
@@ -11,6 +11,7 @@ import { SevenStarProgress } from './seven-star-progress';
 import { SeekerSidebar } from './seeker-sidebar';
 import { MasProgress, type MasJob, type MasRunType } from './mas-progress';
 import { PROGRAMS } from '@/lib/programs';
+import { DEFAULT_PAGE_SIZE, useInfiniteSlice } from '@/lib/use-infinite-slice';
 
 type SortField = keyof Seeker | 'lastMessageDate' | 'lastMessageTimestampText';
 
@@ -36,6 +37,7 @@ function getCityStyle(city: string) {
 
 
 const PAGE_ID = '1548373332058326';
+const ACTIVITY_BATCH_SIZE = 100;
 
 function seekerDetailUrl(seeker: Seeker) {
   return seeker.source === 'dm'
@@ -73,63 +75,43 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const journeyStage = searchParams.get('journeyStage') || '';
-  const seekers = initialSeekers;
-  const [isRefreshing, startRefresh] = useTransition();
+  const [classificationUpdates, setClassificationUpdates] = useState<Record<string, Pick<Seeker, 'city' | 'programCode' | 'classificationStatus'>>>({});
+  const [isCheckingClassification, setIsCheckingClassification] = useState(false);
+  const classificationRequestInFlight = useRef(false);
+  const initialClassificationByThread = useMemo(() => new Map(
+    initialSeekers
+      .filter((seeker): seeker is Seeker & { threadId: string } => Boolean(seeker.threadId))
+      .map(seeker => [seeker.threadId, {
+        city: seeker.city,
+        programCode: seeker.programCode,
+        classificationStatus: seeker.classificationStatus,
+      }]),
+  ), [initialSeekers]);
+  const seekers = useMemo(() => initialSeekers.map(seeker => {
+    const update = seeker.threadId ? classificationUpdates[seeker.threadId] : undefined;
+    return update ? { ...seeker, ...update } : seeker;
+  }), [initialSeekers, classificationUpdates]);
+  const [, startRefresh] = useTransition();
   const pendingClassifications = seekers.filter(
     seeker => seeker.classificationStatus === 'pending',
   ).length;
 
-  useEffect(() => {
-    if (!pendingClassifications) return;
-    const refreshProgress = () => startRefresh(() => router.refresh());
-    const interval = setInterval(() => {
-      refreshProgress();
-    }, 2500);
-    return () => clearInterval(interval);
-  }, [pendingClassifications, router, startRefresh]);
   const [sortField, setSortField] = useState<SortField>('lastMessageDate');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [search, setSearch] = useState('');
-  const [activityData, setActivityData] = useState<Record<string, { date: string; count: number }[]>>({});
-
-  // ── Right Sidebar state ──
-  const [selectedSeeker, setSelectedSeeker] = useState<Seeker | null>(null);
-  const [selectedSeekerKeys, setSelectedSeekerKeys] = useState<Set<string>>(new Set());
-  const selectionAnchorRef = useRef<number | null>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [sidebarData, setSidebarData] = useState<any>(null);
-  const [sidebarLoading, setSidebarLoading] = useState(false);
-
-  // Fetch activity for visible seekers
-  useEffect(() => {
-    const fetchActivity = async () => {
-      const newData: Record<string, { date: string; count: number }[]> = {};
-      for (const s of seekers.slice(0, 20)) {
-        try {
-          const res = await fetch(`/api/seekers?action=activity&name=${encodeURIComponent(s.name)}`);
-          const json = await res.json();
-          newData[s.name] = json.activity || [];
-        } catch {
-          newData[s.name] = [];
-        }
-      }
-      setActivityData(newData);
-    };
-    fetchActivity();
-  }, [seekers]);
+  // code:web-page-002:seekers-lazy-load-001:deferred-search
+  // The input stays bound to `search` (instant typing); the expensive
+  // filter/sort runs against the deferred value at lower priority.
+  const deferredSearch = useDeferredValue(search);
 
   // ── Filter State (City & Date Range) ──
   const [filterState, setFilterState] = useState<FilterState>({ city: 'all', programCode: 'all', dateRange: 'all' });
-  const [batchModalOpen, setBatchModalOpen] = useState(false);
-  const [batchRunning, setBatchRunning] = useState(false);
-  const [batchResult, setBatchResult] = useState<string | null>(null);
-  const [batchJob, setBatchJob] = useState<MasJob | null>(null);
-  const [replyInstruction, setReplyInstruction] = useState('Soạn tin nhắn phản hồi phù hợp với câu hỏi mới nhất của seeker; trả lời rõ ràng, thân thiện và không hỏi lại thông tin đã có.');
-  const [reminderInstruction, setReminderInstruction] = useState('Soạn tin nhắc lịch học phù hợp cho seeker đã chọn. Chỉ đề xuất khi có lịch đã được xác thực và seeker còn phù hợp để nhận tin.');
-  const [warmupInstruction, setWarmupInstruction] = useState('Soạn một tin nhắn warm-up chủ động, nhẹ nhàng và phù hợp với hành trình của seeker. Không đề xuất gửi nếu seeker đã từ chối nhận tin.');
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
 
-  // Sort & filter
-  const sorted = [...seekers]
+  // code:web-page-002:seekers-lazy-load-001:memo-sorted
+  // Sort & filter — memoized so unrelated re-renders (sidebar, selection,
+  // modal typing, activity arrival) do not re-run it over every seeker.
+  const sorted = useMemo(() => [...seekers]
     .filter(s => {
       // City filter
       if (filterState.city !== 'all') {
@@ -145,8 +127,8 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
         if (targetStageNum !== seekerStageNum && s.leadStage !== journeyStage) return false;
       }
       // Search
-      if (!search) return true;
-      const q = search.toLowerCase();
+      if (!deferredSearch) return true;
+      const q = deferredSearch.toLowerCase();
       return s.name?.toLowerCase().includes(q) ||
         s.realName?.toLowerCase().includes(q) ||
         s.city?.toLowerCase().includes(q) ||
@@ -198,7 +180,143 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
       const bVal = b[sortField as keyof Seeker] ?? '';
       const cmp = String(aVal).localeCompare(String(bVal));
       return sortDir === 'asc' ? cmp : -cmp;
-    });
+    }), [seekers, filterState, deferredSearch, journeyStage, sortField, sortDir]);
+
+  // code:web-page-002:seekers-lazy-load-001:visible-window
+  // Only the first `visibleCount` rows of `sorted` are rendered; a sentinel row
+  // grows the window by DEFAULT_PAGE_SIZE. Any filter/search/sort change resets
+  // the window to the first page and scrolls the list back to the top.
+  const lazyResetKey = JSON.stringify([filterState, deferredSearch, journeyStage, sortField, sortDir]);
+  const { visibleCount, hasMore, loadMore, sentinelRef } = useInfiniteSlice({
+    total: sorted.length,
+    resetKey: lazyResetKey,
+    rootRef: tableScrollRef,
+    pageSize: DEFAULT_PAGE_SIZE,
+    rootMargin: '400px 0px',
+  });
+  const visibleSeekers = useMemo(() => sorted.slice(0, visibleCount), [sorted, visibleCount]);
+
+  // code:web-page-002:seekers-lazy-load-001:visible-classification-polling
+  // Poll classification progress only for pending DM seekers currently rendered.
+  // The ids live in a ref (keyed by a stable string) so load-more or a
+  // classification update does not recreate the callback, restart the 2.5s
+  // interval or fire an extra immediate poll.
+  const visiblePendingThreadKey = useMemo(() => visibleSeekers
+    .filter(seeker => seeker.source === 'dm' && seeker.threadId && seeker.classificationStatus === 'pending')
+    .map(seeker => seeker.threadId as string)
+    .join(','), [visibleSeekers]);
+  const visiblePendingThreadKeyRef = useRef(visiblePendingThreadKey);
+  useEffect(() => {
+    visiblePendingThreadKeyRef.current = visiblePendingThreadKey;
+  }, [visiblePendingThreadKey]);
+  const hasVisiblePendingClassifications = visiblePendingThreadKey !== '';
+
+  const refreshClassificationProgress = useCallback(async () => {
+    if (classificationRequestInFlight.current) return;
+    const pendingThreadIds = visiblePendingThreadKeyRef.current.split(',').filter(Boolean);
+    if (!pendingThreadIds.length) return;
+
+    classificationRequestInFlight.current = true;
+    setIsCheckingClassification(true);
+    try {
+      const params = new URLSearchParams({
+        action: 'classification-progress',
+        threadIds: pendingThreadIds.join(','),
+      });
+      const response = await fetch(`/api/seekers?${params.toString()}`, { cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok || !Array.isArray(data.classifications)) return;
+      setClassificationUpdates(previous => {
+        let next = previous;
+        for (const classification of data.classifications) {
+          const update = {
+            city: classification.city,
+            programCode: classification.programCode,
+            classificationStatus: classification.classificationStatus,
+          };
+          const existing = previous[classification.threadId] ?? initialClassificationByThread.get(classification.threadId);
+          if (
+            existing?.city === update.city
+            && existing?.programCode === update.programCode
+            && existing?.classificationStatus === update.classificationStatus
+          ) continue;
+          if (next === previous) next = { ...previous };
+          next[classification.threadId] = update;
+        }
+        return next;
+      });
+    } catch {
+      // A transient polling failure must not disrupt the table or its current state.
+    } finally {
+      classificationRequestInFlight.current = false;
+      setIsCheckingClassification(false);
+    }
+  }, [initialClassificationByThread]);
+
+  useEffect(() => {
+    if (!hasVisiblePendingClassifications) return;
+    void refreshClassificationProgress();
+    const interval = window.setInterval(() => { void refreshClassificationProgress(); }, 2500);
+    return () => clearInterval(interval);
+  }, [hasVisiblePendingClassifications, refreshClassificationProgress]);
+  const [activityData, setActivityData] = useState<Record<string, { date: string; count: number }[]>>({});
+
+  // ── Right Sidebar state ──
+  const [selectedSeeker, setSelectedSeeker] = useState<Seeker | null>(null);
+  const [selectedSeekerKeys, setSelectedSeekerKeys] = useState<Set<string>>(new Set());
+  const selectionAnchorRef = useRef<number | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [sidebarData, setSidebarData] = useState<any>(null);
+  const [sidebarLoading, setSidebarLoading] = useState(false);
+
+  // code:web-page-002:seekers-lazy-load-001:visible-activity-batch
+  // Fetch activity histograms only for rendered rows that have not been
+  // requested yet, in parallel batches of ACTIVITY_BATCH_SIZE names.
+  const activityRequestedRef = useRef<{ source: Seeker[]; names: Set<string> }>({ source: initialSeekers, names: new Set() });
+  const visibleActivityNamesKey = useMemo(
+    () => Array.from(new Set(visibleSeekers.map(seeker => seeker.name).filter(Boolean))).join('\n'),
+    [visibleSeekers],
+  );
+  useEffect(() => {
+    // A server refresh delivers new rows; allow their activity to be re-fetched.
+    if (activityRequestedRef.current.source !== initialSeekers) {
+      activityRequestedRef.current = { source: initialSeekers, names: new Set() };
+    }
+    const requested = activityRequestedRef.current.names;
+    const missing = visibleActivityNamesKey
+      ? visibleActivityNamesKey.split('\n').filter(name => !requested.has(name))
+      : [];
+    if (!missing.length) return;
+    missing.forEach(name => requested.add(name));
+    const chunks: string[][] = [];
+    for (let i = 0; i < missing.length; i += ACTIVITY_BATCH_SIZE) chunks.push(missing.slice(i, i + ACTIVITY_BATCH_SIZE));
+    void Promise.all(chunks.map(async names => {
+      const params = new URLSearchParams({ action: 'activity-batch', names: JSON.stringify(names) });
+      try {
+        const res = await fetch(`/api/seekers?${params.toString()}`);
+        // A non-OK status (e.g. 500) is transient: retry later like a network error.
+        if (!res.ok) throw new Error(`activity-batch HTTP ${res.status}`);
+        const json = await res.json();
+        const activity = (json.activity && typeof json.activity === 'object') ? json.activity : {};
+        setActivityData(previous => {
+          const next = { ...previous };
+          for (const name of names) next[name] = Array.isArray(activity[name]) ? activity[name] : [];
+          return next;
+        });
+      } catch {
+        // Let a later render retry these names instead of caching a transient failure.
+        names.forEach(name => requested.delete(name));
+      }
+    }));
+  }, [visibleActivityNamesKey, initialSeekers]);
+
+  const [batchModalOpen, setBatchModalOpen] = useState(false);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchResult, setBatchResult] = useState<string | null>(null);
+  const [batchJob, setBatchJob] = useState<MasJob | null>(null);
+  const [replyInstruction, setReplyInstruction] = useState('Soạn tin nhắn phản hồi phù hợp với câu hỏi mới nhất của seeker; trả lời rõ ràng, thân thiện và không hỏi lại thông tin đã có.');
+  const [reminderInstruction, setReminderInstruction] = useState('Soạn tin nhắc lịch học phù hợp cho seeker đã chọn. Chỉ đề xuất khi có lịch đã được xác thực và seeker còn phù hợp để nhận tin.');
+  const [warmupInstruction, setWarmupInstruction] = useState('Soạn một tin nhắn warm-up chủ động, nhẹ nhàng và phù hợp với hành trình của seeker. Không đề xuất gửi nếu seeker đã từ chối nhận tin.');
 
   const selectedDmThreadIds = sorted
     .filter(seeker => selectedSeekerKeys.has(seekerSelectionKey(seeker)) && seeker.source === 'dm' && seeker.threadId)
@@ -368,7 +486,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
             <strong>LLM đang cập nhật City / Program</strong>
             <span>
               {pendingClassifications} seeker đang được suy luận
-              {isRefreshing ? ' · đang lấy tiến trình mới…' : ' · tự cập nhật mỗi 2,5 giây'}
+              {isCheckingClassification ? ' · đang kiểm tra tiến trình…' : ' · tự cập nhật mỗi 2,5 giây'}
             </span>
           </div>
           <div
@@ -384,10 +502,10 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
           <button
             type="button"
             className="seeker-classification-refresh"
-            onClick={() => startRefresh(() => router.refresh())}
-            disabled={isRefreshing}
+            onClick={() => { void refreshClassificationProgress(); }}
+            disabled={isCheckingClassification}
           >
-            {isRefreshing ? 'Đang cập nhật…' : 'Cập nhật ngay'}
+            {isCheckingClassification ? 'Đang cập nhật…' : 'Cập nhật ngay'}
           </button>
         </div>
       )}
@@ -411,7 +529,7 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
           </div>
 
           {/* Table */}
-          <div className="card seekers-table-scroll" tabIndex={0} role="region" aria-label="Danh sách seekers, cuộn ngang để xem thêm cột" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
+          <div ref={tableScrollRef} className="card seekers-table-scroll" tabIndex={0} role="region" aria-label="Danh sách seekers, cuộn ngang để xem thêm cột" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
             <table className="data-table">
               <thead>
                 <tr>
@@ -426,7 +544,8 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                 </tr>
               </thead>
               <tbody>
-                {sorted.map((seeker, idx) => {
+                {/* code:web-page-002:seekers-lazy-load-001:render-slice — idx stays an index into `sorted` (slice starts at 0) */}
+                {visibleSeekers.map((seeker, idx) => {
                   const cityStyle = getCityStyle(seeker.city);
                   const isSelected = selectedSeekerKeys.has(seekerSelectionKey(seeker));
                   const profileUrl = facebookProfileUrl(seeker.fbProfileUrl);
@@ -551,11 +670,36 @@ export function SeekersTable({ initialSeekers }: SeekersTableProps) {
                     </tr>
                   );
                 })}
+                {hasMore && (
+                  // code:web-page-002:seekers-lazy-load-001:sentinel
+                  <tr ref={sentinelRef} className="seekers-lazy-sentinel" aria-hidden="true">
+                    <td colSpan={6} style={{ padding: 0, height: '1px', border: 'none' }} />
+                  </tr>
+                )}
                 {sorted.length === 0 && (
                   <tr><td colSpan={6} style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>No seekers found</td></tr>
                 )}
               </tbody>
           </table>
+          {sorted.length > 0 && (
+            <div
+              className="seekers-lazy-footer"
+              role="status"
+              aria-live="polite"
+              style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', padding: '12px 8px', color: 'var(--text-muted)', fontSize: '12px' }}
+            >
+              <span>Đang hiển thị {visibleCount} / {sorted.length}</span>
+              {hasMore && (
+                <button
+                  type="button"
+                  onClick={loadMore}
+                  style={{ padding: '6px 12px', borderRadius: '7px', background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)', fontSize: '12px', cursor: 'pointer' }}
+                >
+                  Tải thêm
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

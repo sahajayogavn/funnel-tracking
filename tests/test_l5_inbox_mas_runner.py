@@ -98,7 +98,7 @@ class TestRunAdkPipeline:
         assert result["thread_messages"] == state["thread_messages"]
         assert result["knowledge_context"] == ""
 
-    def test_run_adk_pipeline_injects_separate_reaction_events_as_metadata(self):
+    def test_run_adk_pipeline_injects_message_reaction_annotation(self):
         from tools import l5_inbox_mas_pipeline as runner_mod
 
         session_service = DummySessionService()
@@ -106,14 +106,15 @@ class TestRunAdkPipeline:
              patch("google.adk.runners.Runner", side_effect=lambda **kw: DummyRunner(**kw)), \
              patch("google.genai.types", DummyTypes):
             runner_mod.run_adk_pipeline(
-                [{"sender": "Customer", "content": "Xin chào"}],
+                [{"sender": "Page", "content": "Cảm ơn bạn", "reactions": [
+                    {"actor": "Seeker", "emoji": "👍", "count": 2},
+                ]}],
                 {"name": "Lan"},
-                reaction_events=[{"emoji": "👍", "actor": "Lan", "target_type": "thread"}],
             )
 
         text = session_service.calls[0]["state"]["thread_messages"]
-        assert "[Reaction event metadata] emoji: 👍; actor: Lan; target: thread/unknown" in text
-        assert "not a message body" in text
+        assert "[?? | Reaction on preceding message] Seeker: thả 👍 ×2" in text
+        assert "annotation, not a message body" in text
 
     def test_run_adk_care_pipeline_injects_shared_care_session_state(self):
         from tools import l5_inbox_mas_pipeline as mod

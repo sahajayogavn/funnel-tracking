@@ -11,6 +11,9 @@ import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
+# Reader-facing label for an Inbox-automation turn (stored sender ``Auto_Page``).
+AUTOMATED_PAGE_LABEL = "Page (automated message)"
+
 from fb_pipeline.contracts.l1_message_kind import (
     canonical_sender_for_actor,
     has_unverified_sender_claim,
@@ -278,14 +281,13 @@ def format_now_context(now: datetime | None = None) -> str:
     return f"Bây giờ là {weekdays[now.weekday()]} {now.strftime('%d/%m/%Y %H:%M')} (giờ Việt Nam, Asia/Ho_Chi_Minh)"
 
 
-def format_conversation_lines(messages: list[dict], reaction_events: list[dict] | None = None) -> str:
+def format_conversation_lines(messages: list[dict]) -> str:
     """Render source-aware message, reply, and reaction records for prompts.
 
     Legacy parser delimiters are rendered as *unattributed metadata* rather
-    than appended to the current sender's body.  Structured fields from the
-    notation contract (``quoted_*``, ``reply_to_message_id``, ``reactions``)
-    take precedence whenever available.  Unknown remains explicit; this
-    formatter never infers a reply/reaction actor or target.
+    than appended to the current sender's body. Reactions are annotations on
+    the target message; a line such as ``Seeker: thả Like ×2`` is not a spoken
+    turn and must never affect who holds the conversation turn.
     """
     lines = []
     for m in messages:
@@ -309,7 +311,11 @@ def format_conversation_lines(messages: list[dict], reaction_events: list[dict] 
         sender = canonical_sender_for_actor(m)
         stored_sender = str(m.get("sender") or "Unknown")
         sender_confidence = str(m.get("sender_confidence") or "").strip()
-        sender_label = sender
+        # code:inbox-fetch-source-001:automated-page-turn
+        # Tell the model *who* answered and *why the canned text is there*:
+        # an automation the Page configured for a post/ad or keyword, not a
+        # person.  ``Auto_Page`` stays the stored value; only the label changes.
+        sender_label = AUTOMATED_PAGE_LABEL if sender == "Auto_Page" else sender
         if sender == "Unknown" and has_unverified_sender_claim(m):
             sender_label = (
                 f"Unknown (unverified stored sender claim: {stored_sender}; "
@@ -345,13 +351,10 @@ def format_conversation_lines(messages: list[dict], reaction_events: list[dict] 
                 continue
             emoji = reaction.get("emoji") or reaction.get("type") or "unknown"
             actor = reaction.get("actor") or "Unknown"
-            target_type = reaction.get("target_type") or "unknown"
-            target_id = reaction.get("target_id") or "unknown"
-            observed_at = reaction.get("observed_at") or "unknown"
+            count = reaction.get("count") or 1
             lines.append(
-                f"[{stamp} | Reaction metadata] emoji: {emoji}; actor: {actor}; "
-                f"target: {target_type}/{target_id}; observed_at: {observed_at} "
-                "(not a message body)"
+                f"[{stamp} | Reaction on preceding message] {actor}: thả {emoji} ×{count} "
+                "(annotation, not a message body)"
             )
         # Legacy markers record only an emoji.  Keep the observation visible,
         # but explicitly refuse to assign actor/target/scope from bubble order.
@@ -366,21 +369,6 @@ def format_conversation_lines(messages: list[dict], reaction_events: list[dict] 
                 f"[{stamp} | Reaction metadata] emoji: {reaction_type}; actor: Unknown; "
                 "target: unknown/unknown (legacy marker; not a message body)"
             )
-    # Thread-level and unknown-target reactions do not belong to any message
-    # row. Keep them separately labelled so they cannot become sender prose.
-    for reaction in reaction_events or []:
-        if not isinstance(reaction, dict):
-            continue
-        emoji = reaction.get("emoji") or "unknown"
-        actor = reaction.get("actor") or "Unknown"
-        target_type = reaction.get("target_type") or reaction.get("target_scope") or "unknown"
-        target_id = reaction.get("target_message_id") or reaction.get("target_id") or "unknown"
-        observed_at = reaction.get("observed_at") or "unknown"
-        lines.append(
-            f"[Reaction event metadata] emoji: {emoji}; actor: {actor}; "
-            f"target: {target_type}/{target_id}; observed_at: {observed_at} "
-            "(separate crawler evidence; not a message body)"
-        )
     return "\n".join(lines)
 
 

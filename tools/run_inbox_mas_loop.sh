@@ -127,7 +127,7 @@ while true; do
     if (( fetch_status != 0 )); then
       echo "[$(date '+%Y-%m-%d %H:%M:%S')] Inbox fetch failed with status $fetch_status"
       if (( fetch_status == 76 )); then
-        echo "Fetch verification failed: stopping for evidence review; no automatic full rescan."
+        echo "Fetch QA found a message-history or sender mismatch: stopping for evidence review."
         exit 76
       fi
       if (( fetch_status == 75 )); then

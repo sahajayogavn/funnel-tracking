@@ -41,8 +41,8 @@ class ThreadTask:
 class ThreadResult:
     ordinal: int
     thread_id: str                # final id (after PSID recompute), "" if failed
-    status: Literal["persisted", "no_messages", "click_verify_failed",
-                    "locate_failed", "facebook_temporarily_blocked", "error"]
+    status: Literal["persisted", "needs_review", "no_messages", "click_verify_failed",
+                    "locate_failed", "facebook_temporarily_blocked", "error", "skipped"]
     messages_added: int = 0
     locate_method: str = ""       # "direct_url" | "sidebar_identity" | ...
     elapsed_ms: int = 0
@@ -51,6 +51,7 @@ class ThreadResult:
     thread_name: str = ""         # for the assignment review log
     attempt: int = 1              # which attempt of the task produced this result
     requeued: bool = False        # True when this failure was handed to another worker
+    history_complete: bool = True  # A persisted partial history is not a complete fetch.
 
     def to_log_dict(self) -> dict:
         return {
@@ -65,6 +66,7 @@ class ThreadResult:
             "error": self.error,
             "attempt": self.attempt,
             "requeued": self.requeued,
+            "history_complete": self.history_complete,
         }
 
 

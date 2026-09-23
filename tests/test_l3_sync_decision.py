@@ -357,3 +357,57 @@ def test_extractor_without_abbr_falls_back_to_scan_and_flags_it(dom_page):
     t = extract_visible_threads(dom_page)[0]
     # Forward scan picks the date inside the preview -> exactly why it is flagged.
     assert (t["sidebarTimeText"], t["sidebarTimeSource"], t["sidebarTimestampMs"]) == ("Sep 14", "scan", None)
+
+
+def test_incomplete_history_forces_fetch_before_any_marker_skip():
+    from fb_pipeline.inbox.l3_sync_decision import decide_by_fetched_marker, FETCH
+    decision = decide_by_fetched_marker(token_now='Today', source_now='', preview_norm_now='hello',
+                                       fetched_token='Today', fetched_preview_norm='hello',
+                                       fetched_at='2026-09-21 09:00:00', history_complete=False)
+    assert decision.action == FETCH
+    assert decision.reason == 'incomplete_history'
+
+
+# code:test-validation-001:stage1-previous-run-complete
+def test_previous_fetch_incomplete_detects_threads_synced_after_last_completed_run():
+    from fb_pipeline.inbox.l3_sync_decision import previous_fetch_incomplete
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE fetch_log (id INTEGER PRIMARY KEY, page_id TEXT, fetched_at TEXT, threads_found INT, messages_found INT)")
+    conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, page_id TEXT, fetched_at TEXT)")
+    page_id = "123"
+    # No completed fetch recorded yet: never trust early exit.
+    assert previous_fetch_incomplete(page_id, conn) is True
+    conn.execute("INSERT INTO fetch_log (page_id, fetched_at, threads_found) VALUES (?, ?, 5)", (page_id, "2026-09-21T16:37:14.564381"))
+    conn.execute("INSERT INTO threads VALUES ('123_a', ?, '2026-09-21 16:30:00.000000')", (page_id,))
+    assert previous_fetch_incomplete(page_id, conn) is False
+    # A thread marked after the last completion marker proves an aborted run.
+    conn.execute("INSERT INTO threads VALUES ('123_b', ?, '2026-09-21 21:19:00.708813')", (page_id,))
+    assert previous_fetch_incomplete(page_id, conn) is True
+    # (W7) Fetch QA logs an incomplete run with threads_found NULL; that row
+    # is not a completion marker and must not re-enable early exit.
+    conn.execute("INSERT INTO fetch_log (page_id, fetched_at, threads_found, messages_found) VALUES (?, ?, NULL, NULL)",
+                 (page_id, "2026-09-21T21:20:00.000000"))
+    assert previous_fetch_incomplete(page_id, conn) is True
+    # Another page's markers do not matter.
+    conn.execute("UPDATE threads SET page_id='999' WHERE id='123_b'")
+    assert previous_fetch_incomplete(page_id, conn) is False
+
+
+# code:test-validation-001:stage1-incomplete-history-budget
+def test_incomplete_history_is_reopened_on_change_or_once_per_day_only():
+    now = datetime(2026, 9, 21, 22, 0, 0)
+    common = dict(token_now="Tue", source_now="utime", preview_norm_now="x", fetched_token="Tue",
+                  fetched_preview_norm="x", utime_now_ms=1000, now=now, history_complete=False)
+    # unchanged card, looked at 2 hours ago -> do not open again yet
+    d = decide_by_fetched_marker(fetched_at=now - timedelta(hours=2), fetched_utime_ms=1000, **common)
+    assert (d.action, d.reason) == (SKIP, "incomplete_history_unchanged")
+    # unchanged card, but a day has passed -> retry once
+    d = decide_by_fetched_marker(fetched_at=now - timedelta(hours=25), fetched_utime_ms=1000, **common)
+    assert (d.action, d.reason) == (FETCH, "incomplete_history")
+    # card changed -> open regardless of age
+    d = decide_by_fetched_marker(fetched_at=now - timedelta(hours=2), fetched_utime_ms=999, **common)
+    assert (d.action, d.reason) == (FETCH, "incomplete_history")
+    # no marker at all -> open
+    d = decide_by_fetched_marker(fetched_at=None, fetched_utime_ms=None, **common)
+    assert (d.action, d.reason) == (FETCH, "incomplete_history")

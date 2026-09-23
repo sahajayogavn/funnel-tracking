@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import { returnToPath } from "@/lib/return-to";
 import styles from "./page.module.css";
 
 const LOCAL_SESSION_KEY = "sahaja_session";
@@ -11,8 +12,7 @@ export default function LoginPage() {
 
   function continueToApp() {
     const next = new URLSearchParams(window.location.search).get("next");
-    const destination = new URL(next || "/", window.location.origin);
-    window.location.replace(destination.origin === window.location.origin && destination.pathname !== "/login" ? destination.href : "/");
+    window.location.replace(returnToPath(next));
   }
 
   useEffect(() => {

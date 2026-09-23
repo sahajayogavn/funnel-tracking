@@ -79,6 +79,8 @@ def format_inbox_proposal(thread_id: str, seeker_name: str, messages: list[dict]
     for message in (messages or [])[-8:]:
         timestamp = message.get("timestamp") or message.get("message_at") or "Không rõ thời gian"
         sender = message.get("sender") or "Unknown"
+        if sender == "Auto_Page":
+            sender = "Page (automated message)"
         conversation.append(
             f"  [{timestamp} | {sender}]\n{_indent(_compact_message_content(message), 4)}"
         )
@@ -121,6 +123,8 @@ def format_escalation_proposal(thread_id: str, seeker_name: str, messages: list[
     for message in (messages or [])[-8:]:
         timestamp = message.get("timestamp") or message.get("message_at") or "Không rõ thời gian"
         sender = message.get("sender") or "Unknown"
+        if sender == "Auto_Page":
+            sender = "Page (automated message)"
         conversation.append(
             f"  [{timestamp} | {sender}]\n{_indent(_compact_message_content(message), 4)}"
         )

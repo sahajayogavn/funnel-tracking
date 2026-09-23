@@ -1102,6 +1102,15 @@ body {
   margin-bottom: 12px;
 }
 
+/* A distinct, gently lifted reading surface for the chat transcript. */
+.seeker-sidebar-section--recent {
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(129, 140, 248, 0.24);
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
 .seeker-sidebar-section-title {
   margin-bottom: 8px;
   color: var(--text-muted);

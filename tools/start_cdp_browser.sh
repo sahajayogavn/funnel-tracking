@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Starts/stops the Edge profile the inbox/MAS pipeline attaches to over CDP
+# Starts/stops the Chrome profile the inbox/MAS pipeline attaches to over CDP
 # (fb_pipeline/session/l2_bootstrap.py connect_over_cdp at :9222), positioned
 # off-screen so the window never pops up over the operator's desktop.
 #
@@ -9,7 +9,7 @@ set -u
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PROJECT_ROOT="$(dirname -- "$SCRIPT_DIR")"
 
-EDGE_BIN="/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 USER_DATA_DIR="${CDP_USER_DATA_DIR:-$PROJECT_ROOT/data/chrome-profiles}"
 PROFILE_DIRECTORY="${CDP_PROFILE_DIRECTORY:-Profile 4}"
 REMOTE_DEBUGGING_PORT="${CDP_PORT:-9222}"
@@ -34,8 +34,8 @@ is_up() {
 }
 
 cmd_start() {
-  if [[ ! -x "$EDGE_BIN" ]]; then
-    echo "Microsoft Edge not found at: $EDGE_BIN" >&2
+  if [[ ! -x "$CHROME_BIN" ]]; then
+    echo "Google Chrome not found at: $CHROME_BIN" >&2
     exit 1
   fi
 
@@ -50,7 +50,7 @@ cmd_start() {
       extra_args+=(--window-position="$WINDOW_POSITION" --window-size="$WINDOW_SIZE")
       ;;
     headless)
-      # Some macOS GPU drivers repeatedly crash in Edge's headless compositor,
+      # Some macOS GPU drivers repeatedly crash in Chrome's headless compositor,
       # leaving CDP unavailable even though the parent process was launched.
       # Inbox scraping uses DOM/CDP only, so software compositing is sufficient.
       extra_args+=(--headless=new --disable-gpu --window-size="$WINDOW_SIZE")
@@ -63,7 +63,7 @@ cmd_start() {
 
   mkdir -p "$(dirname -- "$LOG_FILE")"
 
-  nohup "$EDGE_BIN" \
+  nohup "$CHROME_BIN" \
     --user-data-dir="$USER_DATA_DIR" \
     --profile-directory="$PROFILE_DIRECTORY" \
     --remote-debugging-port="$REMOTE_DEBUGGING_PORT" \
@@ -92,12 +92,12 @@ cmd_stop() {
     rm -f "$PID_FILE"
   fi
 
-  # Fallback: the pidfile only holds the top-level process, and Edge/Chromium
+  # Fallback: the pidfile only holds the top-level process, and Chrome/Chromium
   # re-exec into helper processes that don't share it. Match on this
   # profile's --user-data-dir so we only ever kill the CDP-launched instance,
-  # never an unrelated Edge window the operator has open.
+  # never an unrelated Chrome window the operator has open.
   local matches
-  matches="$(pgrep -f "Microsoft Edge.*--user-data-dir=$USER_DATA_DIR" || true)"
+  matches="$(pgrep -f "Google Chrome.*--user-data-dir=$USER_DATA_DIR" || true)"
   if [[ -n "$matches" ]]; then
     echo "$matches" | xargs kill 2>/dev/null
     stopped=true

@@ -191,6 +191,19 @@ def migrate_schema_v2(conn: sqlite3.Connection):
 
 def setup_database(conn: sqlite3.Connection, logger=None):
     cursor = conn.cursor()
+    cursor.execute('CREATE TABLE IF NOT EXISTS inbox_system_events (\n    event_id TEXT PRIMARY KEY,\n    page_id TEXT NOT NULL,\n    thread_id TEXT NOT NULL,\n    event_type TEXT NOT NULL,\n    target_type TEXT,\n    target_id TEXT,\n    target_url TEXT,\n    observed_at TEXT NOT NULL,\n    payload_json TEXT NOT NULL\n)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_inbox_system_events_thread ON inbox_system_events(thread_id)')
+    # Verified recipient, unresolved message evidence. Never consumed as
+    # canonical messages by MAS/UI; retain for offline review without recrawl.
+    cursor.execute('''CREATE TABLE IF NOT EXISTS inbox_fetch_observations (
+        observation_id TEXT PRIMARY KEY,
+        page_id TEXT NOT NULL,
+        recipient_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        thread_name TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+    )''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS threads (
             id TEXT PRIMARY KEY,
@@ -219,6 +232,7 @@ def setup_database(conn: sqlite3.Connection, logger=None):
     _ensure_column(cursor, "threads", "fetched_sidebar_utime_ms", "fetched_sidebar_utime_ms INTEGER")
     _ensure_column(cursor, "threads", "fetched_preview_norm", "fetched_preview_norm TEXT")
     _ensure_column(cursor, "threads", "fetched_at", "fetched_at DATETIME")
+    _ensure_column(cursor, "threads", "fetch_history_complete", "fetch_history_complete INTEGER NOT NULL DEFAULT 1")
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -305,6 +319,10 @@ def setup_database(conn: sqlite3.Connection, logger=None):
     _ensure_column(cursor, "messages", "quoted_text", "quoted_text TEXT")
     _ensure_column(cursor, "messages", "sender_evidence", "sender_evidence TEXT")
     _ensure_column(cursor, "messages", "quote_evidence", "quote_evidence TEXT")
+    # A reaction belongs to the Facebook message it targets.  Store its compact
+    # annotation on that message, rather than as an independent pseudo-turn.
+    # The value is a JSON array so multiple actors/emoji can be represented.
+    _ensure_column(cursor, "messages", "reaction_annotation_json", "reaction_annotation_json TEXT NOT NULL DEFAULT '[]'")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread_kind_seq ON messages(thread_id, kind, seq)")
     # Facebook ids are only unique within an Inbox thread for the purposes of
     # this store.  A partial index permits legacy NULL ids while making an
@@ -314,37 +332,10 @@ def setup_database(conn: sqlite3.Connection, logger=None):
         ON messages(thread_id, source_id)
         WHERE source_id IS NOT NULL AND source_id != ''
     ''')
-    # Crawled reactions are evidence events, not outbound agent action logs in
-    # `reactions`.  Keep actor/target/scope as observed; unknown is a value,
-    # never an invitation to infer it from the enclosing message sender.
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS crawled_message_reactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            thread_id TEXT NOT NULL,
-            reaction_key TEXT NOT NULL,
-            source_id TEXT,
-            actor TEXT NOT NULL DEFAULT 'unknown',
-            actor_role TEXT NOT NULL DEFAULT 'unknown',
-            emoji TEXT NOT NULL,
-            target_type TEXT NOT NULL DEFAULT 'unknown',
-            target_message_id TEXT,
-            target_scope TEXT NOT NULL DEFAULT 'unknown',
-            observed_at TEXT,
-            occurred_at TEXT,
-            raw_label TEXT,
-            evidence TEXT,
-            parse_confidence TEXT DEFAULT 'unknown',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(thread_id, reaction_key)
-        )
-    ''')
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_crawled_message_reactions_target
-        ON crawled_message_reactions(thread_id, target_type, target_message_id)
-    ''')
-    _ensure_column(cursor, "crawled_message_reactions", "actor_role", "actor_role TEXT DEFAULT 'unknown'")
-    _ensure_column(cursor, "crawled_message_reactions", "target_scope", "target_scope TEXT DEFAULT 'unknown'")
-    _ensure_column(cursor, "crawled_message_reactions", "evidence", "evidence TEXT")
+    # Superseded by messages.reaction_annotation_json.  This is intentionally
+    # destructive: the old table represented reactions as detached events and
+    # must not survive to feed either the UI or MAS.
+    cursor.execute("DROP TABLE IF EXISTS crawled_message_reactions")
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS fetch_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

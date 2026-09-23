@@ -1,9 +1,8 @@
 """Orchestrator + worker pool for the inbox parallel-fetch pipeline.
 
 Implements docs/architect/inbox-fetch-pipeline.md sections 3, 6, 7 and 8.
-``--workers 1`` stays on the legacy sequential ``scrape_inbox`` path (see
-``tools/l5_fetch_fb_messages.py``); this module is only exercised for
-``--workers >= 2``.
+Worker 0 owns the discovery tab and also fetches details. With one worker
+(the CLI default), no background tab or Playwright session is created.
 
 # code:inbox-parallel-fetch-001:orchestrator
 """
@@ -17,6 +16,7 @@ import queue
 import threading
 import time
 from typing import Callable, Optional
+from types import SimpleNamespace
 
 from playwright.sync_api import sync_playwright
 
@@ -24,6 +24,7 @@ from fb_pipeline.browser.inbox.scroll_helpers import reset_sidebar_to_top
 from fb_pipeline.browser.inbox.thread_worker import ThreadWorkerDeps, process_thread_task
 from fb_pipeline.browser.l3_inbox import discover_threads
 from fb_pipeline.contracts.l1_inbox_tasks import ThreadResult, ThreadTask
+from fb_pipeline.inbox.l3_fetch_checkpoint import FetchCheckpoint
 from fb_pipeline.contracts.l1_session import WORKER_TAB_ROLE_PREFIX
 from fb_pipeline.persistence.db import connect as connect_database
 from fb_pipeline.session.l2_facebook_block_gate import FacebookTemporaryBlockError
@@ -129,6 +130,19 @@ def _requeue_failed(task: ThreadTask, result: ThreadResult, retry_q, worker_name
     return True
 
 
+def _is_quality_reject(result: ThreadResult) -> bool:
+    """Whether the per-thread evidence gate rejected this fetch.
+
+    These reports mean this conversation cannot be trusted.  They are not a
+    browser-wide failure: later conversations remain independently bound and
+    must still be discovered.  The rejected task is recorded and makes the
+    final run incomplete, but it must not stop sidebar pagination.
+    """
+    report = result.error or ""
+    return ('"code": "fetch_integrity_failed"' in report
+            or '"code": "fetch_evidence_needs_review"' in report)
+
+
 def _accepts_kwarg(fn, name: str) -> bool:
     try:
         params = inspect.signature(fn).parameters
@@ -137,12 +151,13 @@ def _accepts_kwarg(fn, name: str) -> bool:
     return name in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
-def _next_retry(retry_q, worker_name: str):
+def _next_retry(retry_q, worker_name: str, allow_own: bool = False):
     """Non-blocking pull from ``retry_q`` skipping tasks this consumer failed itself.
 
     A task we failed is put back for someone else and the drain stops (so a
-    lone consumer never spins on its own rejects); the orchestrator's final
-    pass ignores ``failed_by`` and takes everything.
+    consumer never spins on its own rejects while peers are alive).  The last
+    worker standing passes ``allow_own=True`` and takes everything: the
+    orchestrator tab never fetches, so nobody else would.
     """
     if retry_q is None:
         return None
@@ -150,7 +165,7 @@ def _next_retry(retry_q, worker_name: str):
         task = retry_q.get_nowait()
     except queue.Empty:
         return None
-    if task.failed_by == worker_name:
+    if task.failed_by == worker_name and not allow_own:
         retry_q.put(task)
         return None
     return task
@@ -177,6 +192,9 @@ class _PrefixedLogger:
     def error(self, msg):
         self._emit("error", msg)
 
+    def critical(self, msg):
+        self._emit("critical", msg)
+
     def debug(self, msg):
         self._emit("debug", msg)
 
@@ -201,16 +219,14 @@ class MessageCounter:
 
 
 def _call_process_thread_task(page, conn, task: ThreadTask, deps: ThreadWorkerDeps, logger,
-                               is_first_thread: bool, page_id: str) -> ThreadResult:
-    """Call Phase 2's ``process_thread_task``, tolerating its pre-Phase-2 signature.
-
-    Phase 2 adds a ``page_id`` kwarg; until it lands we fall back without it.
-    """
-    try:
-        return process_thread_task(page, conn, task, deps, logger,
-                                    is_first_thread=is_first_thread, page_id=page_id)
-    except TypeError:
-        return process_thread_task(page, conn, task, deps, logger, is_first_thread=is_first_thread)
+                               is_first_thread: bool, page_id: str,
+                               discovery_viewport: bool = False) -> ThreadResult:
+    kwargs = {"is_first_thread": is_first_thread}
+    if _accepts_kwarg(process_thread_task, "page_id"):
+        kwargs["page_id"] = page_id
+    if discovery_viewport and _accepts_kwarg(process_thread_task, "discovery_viewport"):
+        kwargs["discovery_viewport"] = discovery_viewport
+    return process_thread_task(page, conn, task, deps, logger, **kwargs)
 
 
 def _resolve_psid_hint(conn, page_id: str, thread_name: str) -> str:
@@ -254,11 +270,17 @@ def worker_main(worker_index: int, page_id: str, inbox_url: str, task_q: "queue.
                  memory_dir, logger, session_factory: Optional[Callable] = None,
                  connection_factory: Optional[Callable] = None,
                  counter: Optional[MessageCounter] = None,
-                 retry_q: Optional["queue.Queue"] = None) -> None:
+                 retry_q: Optional["queue.Queue"] = None,
+                 others_alive: Optional[Callable[[], bool]] = None,
+                 discovery_done: Optional[threading.Event] = None) -> None:
     """Own ``playwright``/CDP/tab/conn for this thread; pull tasks FIFO until a
     ``None`` sentinel; re-attach up to twice on ``TargetClosedError``; hand
     locate failures to ``retry_q`` and drain other workers' retries before
-    exiting; reload the tab after 3 consecutive failures, retire after 6.
+    exiting (including our own once ``others_alive()`` is False); reload the
+    tab after 3 consecutive failures, retire after 6. Production passes
+    discovery_done and a shared task/retry queue: exit only after discovery
+    completes and queued plus in-flight work reaches zero. Sentinels are
+    supported for legacy injected worker loops.
 
     # code:inbox-parallel-fetch-001:worker-main
     """
@@ -296,15 +318,32 @@ def worker_main(worker_index: int, page_id: str, inbox_url: str, task_q: "queue.
 
         try:
             while True:
+                if stop_event.is_set():
+                    break
                 from_shared_queue = False
                 if pending_retries:
                     task = pending_retries.popleft()
                 elif draining_retries:
-                    task = _next_retry(retry_q, worker_name)
+                    # Without a liveness probe assume peers exist (never spin
+                    # on our own rejects); with one, the last worker standing
+                    # takes its own retries since the orchestrator never will.
+                    task = _next_retry(retry_q, worker_name,
+                                       allow_own=(not others_alive()) if others_alive else False)
                     if task is None:
                         break
                 else:
-                    task = task_q.get()
+                    if discovery_done is None:
+                        task = task_q.get()
+                    else:
+                        try:
+                            task = task_q.get(timeout=0.1)
+                        except queue.Empty:
+                            # unfinished_tasks includes active tasks that may still enqueue retries.
+                            with task_q.all_tasks_done:
+                                done = task_q.unfinished_tasks == 0
+                            if discovery_done.is_set() and done:
+                                break
+                            continue
                     from_shared_queue = True
                 try:
                     if task is None:
@@ -313,7 +352,13 @@ def worker_main(worker_index: int, page_id: str, inbox_url: str, task_q: "queue.
                         draining_retries = True
                         continue
                     if stop_event.is_set():
-                        continue
+                        # Stop raced with get(): put the task back before acknowledging it.
+                        task_q.put(task)
+                        break
+
+                    if discovery_done is not None and task.failed_by == worker_name and session is not None:
+                        if _recover_tab(session, inbox_url, log):
+                            is_first_task = True
 
                     log.debug(json.dumps({
                         "id": "logs:inbox-parallel-fetch-001:task",
@@ -371,7 +416,14 @@ def worker_main(worker_index: int, page_id: str, inbox_url: str, task_q: "queue.
                     result.thread_name = task.record.thread_name
                     result.attempt = task.attempt
                     result.elapsed_ms = int((time.monotonic() - t0) * 1000)
-                    _requeue_failed(task, result, retry_q, worker_name, log)
+                    quality_reject = _is_quality_reject(result)
+                    if quality_reject:
+                        log.error(
+                            "fetch quality reject; preserving failed thread and continuing queue. "
+                            f"thread='{task.record.thread_name}' inbox=#{task.ordinal + 1}"
+                        )
+                    else:
+                        _requeue_failed(task, result, retry_q, worker_name, log)
                     result_q.put(result)
                     log.info(
                         f"Finished thread '{task.record.thread_name}' (inbox #{task.ordinal + 1}) "
@@ -498,6 +550,8 @@ def _write_assignment_log(stats: dict, page_id: str, logger, log_dir: str = "./l
                 "workers": stats.get("workers"),
                 "tasks_dispatched": stats.get("tasks_dispatched"),
                 "tasks_abandoned": stats.get("tasks_abandoned"),
+                "fetch_complete": stats.get("fetch_complete"),
+                "unfinished_tasks": stats.get("unfinished_tasks", []),
                 "tasks_requeued": stats.get("tasks_requeued"),
                 "tasks_recovered_by_retry": stats.get("tasks_recovered_by_retry"),
                 "failed_threads": stats.get("failed_threads"),
@@ -524,6 +578,22 @@ def _drain_all(result_q: "queue.Queue") -> list:
         except queue.Empty:
             break
     return drained
+
+
+def _wait_for_worker_drain(worker_threads, logger):
+    """A timed join is a heartbeat, never evidence that work is complete.
+
+    Workers own Playwright connections; do not kill their daemon threads or
+    consume their queues while they are still writing. A stuck worker remains
+    visibly running instead of falsely stamping the fetch as successful.
+    """
+    while any(th.is_alive() for th in worker_threads):
+        for th in worker_threads:
+            if th.is_alive():
+                th.join(timeout=1)
+        if any(th.is_alive() for th in worker_threads):
+            # Debug avoids flooding the normal log on large inboxes.
+            logger.debug('Stage 2 still running; waiting for worker queue/retry drain.')
 
 
 def _final_results(results: list) -> list:
@@ -557,8 +627,12 @@ def _aggregate_stats(stats: dict, results: list, tasks_dispatched: int, workers:
     stats["failed_threads"] = [
         {"inbox_index": r.ordinal + 1, "thread_name": r.thread_name, "worker": r.worker,
          "status": r.status, "attempts": r.attempt, "error": r.error}
-        for r in final if r.status in _FAILED_STATUSES
+        for r in final if r.status not in {"persisted", "skipped"}
     ]
+    stats["threads_needs_review"] = sum(r.status == "needs_review" for r in final)
+    stats["tasks_skipped_by_policy"] = sum(r.status == "skipped" for r in final)
+    stats["threads_partial_history"] = sum(r.status == "persisted" and not r.history_complete for r in final)
+    stats["seekers_saved"] = sum(r.status in {"persisted", "needs_review"} for r in final)
 
     locate_methods: dict = {}
     for r in final:
@@ -595,6 +669,7 @@ def _aggregate_stats(stats: dict, results: list, tasks_dispatched: int, workers:
             "status": r.status,
             "locate_method": r.locate_method,
             "messages_added": r.messages_added,
+            "history_complete": r.history_complete,
             "elapsed_ms": r.elapsed_ms,
             "error": r.error,
             "attempt": r.attempt,
@@ -608,55 +683,154 @@ def _aggregate_stats(stats: dict, results: list, tasks_dispatched: int, workers:
     return stats
 
 
-def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, conn, logger,
+def _run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, conn, logger,
                         record_fetch, deps: ThreadWorkerDeps, *, workers: int, inbox_url: str,
                         skip_navigation: bool = False, force_refresh: bool = False, refresh_older_than_days: int | None = None,
                         allow_early_exit: bool = True, target_total_messages: Optional[int] = None,
                         memory_dir=None, session_factory: Optional[Callable] = None,
                         worker_loop: Optional[Callable] = None,
-                        assignment_log_dir: Optional[str] = "./logs/parallel-fetch") -> dict:
-    """Stage 1 (orchestrator, own tab) dispatches ``ThreadTask``s to ``workers - 1``
-    background worker threads as they are discovered; after Stage 1 the
-    orchestrator drains the same queue itself ("worker 0"); results are
-    aggregated into the same stats keys ``scrape_inbox`` would have produced,
-    plus the new parallel-fetch keys.
-
-    # code:inbox-parallel-fetch-001:orchestrator
+                        assignment_log_dir: Optional[str] = "./logs/parallel-fetch",
+                        checkpoint=None) -> dict:
+    """Worker 0 discovers and fetches on the caller's tab. Known-ID tasks
+    can be shared with up to two background tabs. Worker 0 also drains the
+    durable backlog after discovery, including tasks left by retired peers.
     """
     workers = min(MAX_TOTAL_TABS, max(1, workers))
     task_q: "queue.Queue" = queue.Queue()
-    result_q: "queue.Queue" = queue.Queue()
+    class ResultQueue(queue.Queue):
+        def put(self, result, *args, **kwargs):
+            checkpoint.add_result(result)
+            return super().put(result, *args, **kwargs)
+
+    result_q = ResultQueue()
     retry_q: "queue.Queue" = queue.Queue()
     stop_event = threading.Event()
+    discovery_done = threading.Event()
     counter = MessageCounter(target=target_total_messages)
 
-    tasks_dispatched = 0
+    original_identity_callback = deps.on_identity
+    def save_identity(task):
+        checkpoint.add_task(task)
+        if original_identity_callback:
+            original_identity_callback(task)
+    deps = dataclasses.replace(deps, on_identity=save_identity)
+    worker0_log = _PrefixedLogger(logger, "[worker:0]")
+    worker0_health = _WorkerHealth()
+    worker0_retired = False
+    worker0_first = True
+    worker0_session = SimpleNamespace(page=page, tab_role=None)
 
-    def _dispatch(task: ThreadTask) -> None:
-        nonlocal tasks_dispatched
+    def _process_here(task, *, in_discovery=False):
+        nonlocal worker0_first, worker0_retired
+        started = time.monotonic()
+        try:
+            result = _call_process_thread_task(page, conn, task, deps, worker0_log,
+                                              worker0_first, page_id, in_discovery)
+            worker0_first = False
+        except FacebookTemporaryBlockError as exc:
+            stop_event.set()
+            result = ThreadResult(task.ordinal, "", "facebook_temporarily_blocked", error=str(exc))
+        except Exception as exc:
+            conn.rollback()
+            result = ThreadResult(task.ordinal, "", "error", error=str(exc))
+        conn.commit()
+        result.worker = "worker:0"
+        result.thread_name = task.record.thread_name
+        result.attempt = task.attempt
+        result.elapsed_ms = int((time.monotonic() - started) * 1000)
+        if _is_quality_reject(result):
+            worker0_log.error(
+                "fetch quality reject; preserving failed thread and continuing discovery. "
+                f"thread='{task.record.thread_name}' inbox=#{task.ordinal + 1}"
+            )
+        else:
+            _requeue_failed(task, result, retry_q, "worker:0", worker0_log)
+        result_q.put(result)
+        worker0_log.info(f"Finished thread '{task.record.thread_name}' status={result.status} via={result.locate_method}")
+        if counter.add(result.messages_added):
+            stop_event.set()
+        # Reloading mid-discovery would destroy the sidebar cursor. Retry
+        # failures after discovery; apply the circuit breaker in that drain.
+        if not in_discovery:
+            action = worker0_health.record(result.status)
+            if action == "recover":
+                _recover_tab(worker0_session, inbox_url, worker0_log)
+                worker0_first = True
+            elif action == "retire":
+                worker0_retired = True
+                worker0_log.error("Worker 0 retired; remaining tasks preserved in checkpoint.")
+
+    tasks_dispatched = 0
+    dispatched_tasks = []
+
+    known_tasks = list(checkpoint.tasks.values())
+    known_ids = {t['record']['thread_id'] for t in known_tasks}
+    known_sidebar_keys = {t['record'].get('sidebar_identity_key') for t in known_tasks} - {None, ''}
+    for task in checkpoint.pending():
+        task_q.put(task)
+        dispatched_tasks.append(task)
+        tasks_dispatched += 1
+    resumed_results = [ThreadResult(**r) for ordinal, r in checkpoint.results.items()
+                       if ordinal not in {t.ordinal for t in dispatched_tasks}]
+    # Apply current operator exclusions to failed results from older checkpoints.
+    from fb_pipeline.browser.inbox.thread_list_parser import is_ignored_inbox_name
+    for index, result in enumerate(resumed_results):
+        saved_task = checkpoint.tasks.get(result.ordinal, {})
+        saved_name = result.thread_name or saved_task.get("record", {}).get("thread_name", "")
+        if result.status != "persisted" and is_ignored_inbox_name(saved_name):
+            result = dataclasses.replace(result, status="skipped", error="", requeued=False,
+                                         locate_method="operator_excluded_messenger_user")
+            checkpoint.add_result(result)
+            resumed_results[index] = result
+    next_ordinal = max(checkpoint.tasks, default=-1) + 1
+
+    def _dispatch(task: ThreadTask) -> bool | None:
+        nonlocal tasks_dispatched, next_ordinal
         if deps.block_gate and deps.block_gate.tripped:
             stop_event.set()
             raise FacebookTemporaryBlockError(deps.block_gate.message)
-        if stop_event.is_set():
+        if task.record.thread_id in known_ids or task.record.sidebar_identity_key in known_sidebar_keys:
             return
-        dispatch_task = task
+        ordinal = task.ordinal if task.ordinal not in checkpoint.tasks else next_ordinal
+        dispatch_task = dataclasses.replace(task, ordinal=ordinal)
+        next_ordinal = max(next_ordinal, ordinal + 1)
         if not dispatch_task.psid_hint:
             hint = _resolve_psid_hint(conn, page_id, dispatch_task.record.thread_name)
             if hint:
                 dispatch_task = dataclasses.replace(dispatch_task, psid_hint=hint)
-        task_q.put(dispatch_task)
+        checkpoint.add_task(dispatch_task)
+        dispatched_tasks.append(dispatch_task)
         tasks_dispatched += 1
+        # Release discovery's DB transaction before any worker writes.
+        conn.commit()
+        can_fetch_here = not (stop_event.is_set() or orchestrator_dead.is_set() or _page_is_closed(page))
+        has_id = bool(dispatch_task.record.selected_item_id or dispatch_task.psid_hint)
+        if can_fetch_here and (workers == 1 or not has_id or tasks_dispatched % workers == 1
+                               or not any(th.is_alive() for th in worker_threads)):
+            _process_here(dispatch_task, in_discovery=True)
+        else:
+            task_q.put(dispatch_task)
         logger.info(
-            f"[dispatch] queued thread '{dispatch_task.record.thread_name}' (inbox #{dispatch_task.ordinal + 1}, "
+            f"[dispatch] scheduled thread '{dispatch_task.record.thread_name}' (inbox #{dispatch_task.ordinal + 1}, "
             f"hint={'psid' if (dispatch_task.psid_hint or dispatch_task.record.selected_item_id) else 'none'}) "
             f"queue_size={task_q.qsize()}"
         )
+        return not stop_event.is_set()
 
     loop_fn = worker_loop or worker_main
     loop_kwargs = {"session_factory": session_factory, "counter": counter}
+    coordinated = workers == 1 or "discovery_done" in inspect.signature(loop_fn).parameters
+    if coordinated:
+        retry_q = task_q
+        loop_kwargs["discovery_done"] = discovery_done
     if _accepts_kwarg(loop_fn, "retry_q"):
         loop_kwargs["retry_q"] = retry_q
     worker_threads = []
+    if _accepts_kwarg(loop_fn, "others_alive"):
+        def _others_alive(_me=threading.current_thread) -> bool:
+            me = _me()
+            return any(th.is_alive() for th in worker_threads if th is not me)
+        loop_kwargs["others_alive"] = _others_alive
     orchestrator_dead = threading.Event()
 
     def _on_orchestrator_close(_p):
@@ -665,7 +839,7 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
         # shared inbox tab mid-run. The orchestrator kept dequeuing with a dead
         # page and failed 503 threads in one second. Flag it so Stage 2 leaves
         # the remaining queue to the worker tabs instead.
-        logger.error("Orchestrator tab received 'close' event; orchestrator stops taking Stage 2 tasks.")
+        logger.error("Orchestrator tab received 'close' event; Stage 1 discovery will stop.")
         orchestrator_dead.set()
 
     try:
@@ -679,6 +853,11 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
     # while workers begin their per-thread UPSERTs can make the entire pool
     # wait on its transaction ID.  Establish a clean boundary before any
     # background writer is started.
+    if target_total_messages is not None:
+        counter.total = conn.execute(
+            "SELECT COUNT(*) FROM messages m JOIN threads t ON t.id = m.thread_id WHERE t.page_id = ?",
+            (page_id,),
+        ).fetchone()[0]
     conn.commit()
 
     for i in range(1, workers):
@@ -687,7 +866,7 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
             args=(i, page_id, inbox_url, task_q, result_q, stop_event, deps, memory_dir, logger),
             kwargs=loop_kwargs,
             name=f"inbox-worker-{i}",
-            daemon=True,
+            daemon=False,
         )
         worker_threads.append(th)
         th.start()
@@ -695,13 +874,18 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
     stage1_start = time.monotonic()
     interrupted: Optional[BaseException] = None
     try:
-        discovery = discover_threads(
-            page, page_id, time_range, max_threads, conn, logger, record_fetch,
-            skip_navigation=skip_navigation, force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days,
-            allow_early_exit=allow_early_exit, target_total_messages=target_total_messages,
-            on_task=_dispatch,
-        )
-    except (KeyboardInterrupt, FacebookTemporaryBlockError) as exc:
+        if checkpoint.discovery is not None:
+            discovery = checkpoint.discovery
+        else:
+            discovery = discover_threads(
+                page, page_id, time_range, max_threads, conn, logger, record_fetch,
+                skip_navigation=skip_navigation, force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days,
+                allow_early_exit=allow_early_exit and not known_tasks, target_total_messages=target_total_messages,
+                on_task=_dispatch,
+            )
+            if not discovery.get('interrupted'):
+                checkpoint.append({'kind': 'discovery', 'value': discovery})
+    except BaseException as exc:
         interrupted = exc
         stop_event.set()
         discovery = {
@@ -711,122 +895,84 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
         }
     stage1_ms = int((time.monotonic() - stage1_start) * 1000)
 
-    for _ in range(workers - 1):
-        task_q.put(None)
+    discovery_done.set()
+    if not coordinated:
+        for _ in range(workers - 1):
+            task_q.put(None)
 
-    if discovery["early_exit"] or interrupted is not None:
-        for th in worker_threads:
-            th.join(timeout=120)
-            if th.is_alive():
-                logger.warning(f"Worker thread {th.name} did not exit within timeout.")
+    if (discovery["early_exit"] and not checkpoint.tasks) or interrupted is not None:
+        _wait_for_worker_drain(worker_threads, logger)
         stats = dict(discovery["stats"])
-        all_results = _drain_all(result_q)
-        _aggregate_stats(stats, all_results, tasks_dispatched, workers, stage1_ms, 0)
+        all_results = resumed_results + _drain_all(result_q)
+        _aggregate_stats(stats, all_results, len(checkpoint.tasks), workers, stage1_ms, 0)
+        completed = {r.ordinal for r in _final_results(all_results)}
+        stats['unfinished_tasks'] = [dataclasses.asdict(t) for t in dispatched_tasks if t.ordinal not in completed]
+        _checkpoint_stats(stats, checkpoint)
+        stats['fetch_complete'] = not (interrupted or stats['tasks_abandoned'] or stats['failed_threads'] or stats['threads_partial_history'])
+        if assignment_log_dir:
+            _write_assignment_log(stats, page_id, logger, log_dir=assignment_log_dir)
         if interrupted is not None:
             logger.warning(f"Parallel fetch interrupted; returning partial stats: {stats}")
             raise interrupted
         return stats
 
-    stats = discovery["stats"]
-    existing_message_count = discovery["existing_message_count"]
-    if target_total_messages is not None and counter.add(existing_message_count):
+    stats = dict(discovery["stats"])
+    if target_total_messages is not None and counter.add(0):
         stop_event.set()
 
     stage2_start = time.monotonic()
+    logger.info(f"Discovery finished; worker 0 draining queue_size={task_q.qsize()} with {len(worker_threads)} peer(s).")
     try:
-        logger.info("Resetting sidebar scroll to top for Stage 2 (orchestrator worker)...")
-        reset_sidebar_to_top(page, logger)
-        page.wait_for_timeout(1500)
-    except Exception as exc:
-        logger.warning(f"Failed to run Stage 2 sidebar reset for orchestrator worker: {exc}")
-
-    is_first_thread = True
-    olog = _PrefixedLogger(logger, "[orchestrator]")
-    ohealth = _WorkerHealth()
-    orchestrator_retired = False
-
-    def _orchestrator_alive() -> bool:
-        return not (orchestrator_dead.is_set() or orchestrator_retired or _page_is_closed(page))
-
-    def _orchestrator_process(task: ThreadTask) -> None:
-        nonlocal is_first_thread, orchestrator_retired
-        if stop_event.is_set():
-            return
-        olog.info(
-            f"Picked thread '{task.record.thread_name}' (inbox #{task.ordinal + 1}, "
-            f"attempt {task.attempt}, hint={'psid' if (task.psid_hint or task.record.selected_item_id) else 'none'})"
-        )
-        t0 = time.monotonic()
-        try:
-            result = _call_process_thread_task(page, conn, task, deps, olog, is_first_thread, page_id)
-            is_first_thread = False
-        except FacebookTemporaryBlockError as exc:
-            stop_event.set()
-            result = ThreadResult(ordinal=task.ordinal, thread_id="", status="facebook_temporarily_blocked", error=str(exc))
-        except Exception as exc:
-            result = ThreadResult(ordinal=task.ordinal, thread_id="", status="error", error=str(exc))
-        result.worker = "orchestrator"
-        result.thread_name = task.record.thread_name
-        result.attempt = task.attempt
-        result.elapsed_ms = int((time.monotonic() - t0) * 1000)
-        # Only hand off while worker tabs are still alive to take it.
-        if any(th.is_alive() for th in worker_threads):
-            _requeue_failed(task, result, retry_q, "orchestrator", olog)
-        result_q.put(result)
-        olog.info(
-            f"Finished thread '{task.record.thread_name}' (inbox #{task.ordinal + 1}) "
-            f"status={result.status} via={result.locate_method or '-'} "
-            f"messages_added={result.messages_added} in {result.elapsed_ms}ms"
-            f"{' requeued=1' if result.requeued else ''}"
-        )
-        if counter.add(result.messages_added):
-            stop_event.set()
-        action = ohealth.record(result.status)
-        if action == "recover":
-            olog.warning(f"{ohealth.streak} consecutive failures; reloading orchestrator tab.")
-            if _recover_tab(type("_S", (), {"page": page, "tab_role": None})(), inbox_url, olog):
-                is_first_thread = True
-        elif action == "retire":
-            olog.error(f"{ohealth.streak} consecutive failures after recovery; orchestrator stops taking tasks.")
-            orchestrator_retired = True
-
-    # Pass 1: the shared Stage 1 queue (FIFO, sentinels come after every real task).
-    while _orchestrator_alive():
-        try:
-            task = task_q.get_nowait()
-        except queue.Empty:
-            break
-        if task is None:
-            # Not ours: put it back for a real worker and stop, since sentinels
-            # are only enqueued after every real task in FIFO order.
-            task_q.put(None)
-            break
-        _orchestrator_process(task)
-    if not _orchestrator_alive() and not orchestrator_retired:
-        logger.warning("Orchestrator page is closed; leaving remaining Stage 2 tasks to worker tabs.")
-
-    # Pass 2: retries handed off by failing consumers. Keep polling while any
-    # worker is still running (it may still fail and re-queue); the
-    # orchestrator is the last resort so it ignores ``failed_by``.
-    # code:inbox-parallel-fetch-001:requeue
-    while _orchestrator_alive():
-        try:
-            task = retry_q.get(timeout=1.0)
-        except queue.Empty:
-            if any(th.is_alive() for th in worker_threads):
+        while not (stop_event.is_set() or worker0_retired or orchestrator_dead.is_set() or _page_is_closed(page)):
+            try:
+                task = task_q.get(timeout=0.1)
+            except queue.Empty:
+                if not any(th.is_alive() for th in worker_threads):
+                    # Legacy injected loops may use a separate retry queue.
+                    task = _next_retry(retry_q, "worker:0", allow_own=True) if retry_q is not task_q else None
+                    if task is None:
+                        break
+                    _process_here(task)
                 continue
-            break
-        _orchestrator_process(task)
-
-    for th in worker_threads:
-        th.join(timeout=120)
-        if th.is_alive():
-            logger.warning(f"Worker thread {th.name} did not exit within timeout.")
+            if task is None:
+                task_q.task_done()
+                task_q.put(None)  # Leave legacy sentinel for its background owner.
+                if any(th.is_alive() for th in worker_threads):
+                    time.sleep(0.01)
+                    continue
+                break
+            try:
+                if stop_event.is_set():
+                    task_q.put(task)
+                    break
+                _process_here(task)
+            finally:
+                task_q.task_done()
+        _wait_for_worker_drain(worker_threads, logger)
+    except KeyboardInterrupt as exc:
+        interrupted = exc
+        stop_event.set()
+        _wait_for_worker_drain(worker_threads, logger)
 
     stage2_ms = int((time.monotonic() - stage2_start) * 1000)
 
-    all_results = _drain_all(result_q)
-    _aggregate_stats(stats, all_results, tasks_dispatched, workers, stage1_ms, stage2_ms)
+    stranded = [] if coordinated else _drain_all(retry_q)
+    for task in stranded:
+        logger.warning(
+            f"Thread '{task.record.thread_name}' (inbox #{task.ordinal + 1}) was re-queued by "
+            f"{task.failed_by} but no worker tab remained to retry it."
+        )
+
+    all_results = resumed_results + _drain_all(result_q)
+    _aggregate_stats(stats, all_results, len(checkpoint.tasks), workers, stage1_ms, stage2_ms)
+    stats["tasks_stranded"] = len(stranded)
+    completed = {r.ordinal for r in _final_results(all_results)}
+    stats['unfinished_tasks'] = [dataclasses.asdict(t) for t in dispatched_tasks if t.ordinal not in completed]
+    # A thread with quarantined bubbles is tracked by ``fetch_history_complete``
+    # and Stage 1's daily retry budget; it does not make the *run* incomplete
+    # (that would suppress the success marker and disable early exit forever).
+    stats["fetch_complete"] = not (interrupted or discovery.get("interrupted") or stats["tasks_abandoned"] or stranded or stats["failed_threads"])
+    _checkpoint_stats(stats, checkpoint)
     _log_stage2_summary(stats, logger)
 
     if deps.block_gate and deps.block_gate.tripped:
@@ -834,11 +980,43 @@ def run_parallel_fetch(page, page_id: str, time_range: str, max_threads: int, co
 
     if assignment_log_dir:
         _write_assignment_log(stats, page_id, logger, log_dir=assignment_log_dir)
-    record_fetch(page_id, stats["new_threads"] + stats["skipped_threads"], stats["new_messages"], conn)
+    if stats["fetch_complete"]:
+        record_fetch(page_id, stats["new_threads"] + stats["skipped_threads"], stats["new_messages"], conn)
+    else:
+        logger.error('Fetch incomplete: unfinished/failed/review tasks remain; success marker not written. Refresh can retry incomplete threads.')
 
     if interrupted is not None:
         raise interrupted
     return stats
+
+
+def _checkpoint_stats(stats, checkpoint):
+    pending = list(checkpoint.pending())
+    stats['checkpoint_path'] = str(checkpoint.path.resolve())
+    stats['durable_pending'] = len(pending)
+    stats['terminal_results'] = len(checkpoint.tasks) - len(pending)
+    stats['resumable'] = bool(pending) or checkpoint.discovery is None
+    stats['discovery_complete'] = checkpoint.discovery is not None
+    stats['unfinished_tasks'] = [dataclasses.asdict(t) for t in pending]
+    if stats['tasks_dispatched'] != stats['terminal_results'] + stats['durable_pending']:
+        raise RuntimeError('Fetch checkpoint accounting mismatch')
+
+
+def run_parallel_fetch(page, page_id, time_range, max_threads, conn, logger,
+                       record_fetch, deps, *, resume_run=None, **kwargs):
+    metadata = dict(page_id=page_id, time_range=time_range, max_threads=max_threads,
+                    force_refresh=kwargs.get('force_refresh', False),
+                    refresh_older_than_days=kwargs.get('refresh_older_than_days'),
+                    allow_early_exit=kwargs.get('allow_early_exit', True),
+                    target_total_messages=kwargs.get('target_total_messages'))
+    directory = kwargs.get('assignment_log_dir') or './logs/parallel-fetch'
+    checkpoint = FetchCheckpoint(directory, metadata, resume=resume_run)
+    logger.info(f'Fetch checkpoint: {checkpoint.path.resolve()} (resume with --resume PATH)')
+    try:
+        return _run_parallel_fetch(page, page_id, time_range, max_threads, conn, logger,
+                                   record_fetch, deps, checkpoint=checkpoint, **kwargs)
+    finally:
+        checkpoint.close()
 
 
 __all__ = [

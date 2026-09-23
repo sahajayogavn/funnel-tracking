@@ -391,7 +391,6 @@ export default function ActionQueues({ initialItems }: { initialItems: ActionQue
         setSidebarData({
           seeker: seekerFromQueueItem(item),
           messages: [],
-          reactionEvents: [],
           comments: [],
           adSource: null,
           messageCount: 0,

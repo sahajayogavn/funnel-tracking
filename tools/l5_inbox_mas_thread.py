@@ -45,8 +45,6 @@ def process_single_thread(cdp_page, page_id: str, thread_id: str,
     # 3. Run ADK pipeline
     logger.info(f"Running ADK pipeline for {thread_name}...")
     pipeline_kwargs = {}
-    if msg_result.get("reaction_events"):
-        pipeline_kwargs["reaction_events"] = msg_result["reaction_events"]
     adk_result = run_adk_pipeline(msg_result["messages"], seeker, **pipeline_kwargs)
 
     classification = adk_result.get("classification", "")

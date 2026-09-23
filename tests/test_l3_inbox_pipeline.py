@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import sys
 import unittest
@@ -311,6 +312,37 @@ class TestInboxContracts(unittest.TestCase):
         self.assertEqual(page.mouse.wheels, [(0, 618)])
         self.assertTrue(any("sidebar_scroll_wheel_fallback" in message for message in logger.messages))
 
+    def test_sidebar_scroll_waits_for_virtual_page_after_reaching_dom_end(self):
+        class _Page:
+            def __init__(self):
+                self.mouse = type("Mouse", (), {"move": lambda *_: None, "wheel": lambda *_: None})()
+                self.waits = []
+
+            def evaluate(self, *_args, **_kwargs):
+                return {
+                    "before": 800, "after": 1000, "domMoved": True,
+                    "reachedDomEnd": True, "targetX": 200, "targetY": 300,
+                    "targetHeight": 500, "conversationCardCount": 10,
+                }
+
+            def wait_for_timeout(self, ms):
+                self.waits.append(ms)
+                import time
+                time.sleep(ms / 1000)
+
+        class _Logger:
+            def info(self, _message): pass
+            def warning(self, _message): pass
+
+        snapshot = {"count": 10, "loadingCount": 0, "globalLoadingCount": 0,
+                    "hasContainer": True, "fingerprint": "same"}
+        page = _Page()
+        with patch("fb_pipeline.browser.inbox.scroll_helpers.sidebar_loading_snapshot", side_effect=[snapshot] * 20):
+            scroll_sidebar_and_wait(page, _Logger(), scroll_round=1, timeout_ms=3_000, poll_ms=250)
+        # Three stable polls alone take 750 ms. Reaching the virtual bottom
+        # adds the grace period that lets React append the following page.
+        self.assertGreaterEqual(sum(page.waits), 2_500)
+
     def test_sidebar_reset_uses_tab_aware_conversation_scroller(self):
         # code:test-validation-001:l3-stage2-sidebar-reset
         class _Page:
@@ -383,6 +415,9 @@ class TestInboxContracts(unittest.TestCase):
             def warning(self, msg):
                 self.messages.append(("warning", msg))
 
+            def error(self, msg):
+                self.messages.append(("error", msg))
+
         page = _Page()
         logger = _Logger()
         record_fetch_calls = []
@@ -425,7 +460,7 @@ class TestInboxContracts(unittest.TestCase):
         self.assertTrue(any("scrollIntoView" in script for script in page.evaluate_calls))
         # Discovery/scrolling does not authorize storing a message when this
         # fixture has neither a recipient ID nor actor/time evidence.
-        self.assertEqual(record_fetch_calls, [("1548373332058326", 1, 0)])
+        self.assertEqual(record_fetch_calls, [])
         self.assertTrue(stats["failed_threads"])
 
     # Gate 2: code:test-validation-001:l3-to-l1
@@ -698,48 +733,34 @@ class TestInboxContracts(unittest.TestCase):
             "message_at_approx": 1,
         })
 
-    # code:test-message-history-evidence-001:reaction-separate-from-body
-    def test_persist_stores_crawled_reaction_as_structured_evidence(self):
+    # code:test-message-reaction-annotation-001
+    def test_persist_stores_reaction_annotation_on_target_message(self):
         record = enrich_thread_record(
             build_thread_record("page1", {"name": "User Reaction", "text": "User Reaction\nCảm ơn"}),
             [{
-                "sender": "Unknown", "sender_confidence": "unknown", "text": "Cảm ơn",
+                "sender": "Page", "sender_confidence": "explicit", "text": "Cảm ơn",
                 "timestamp": "9:00 AM", "source_id": "fb-message-2",
                 "raw_timestamp": "9:00 AM", "day_context": "2026-09-19",
                 "time_precision": "minute",
                 "reactions": [{
-                    "actor": "Customer", "emoji": "❤️", "target_type": "message",
-                    "target_message_id": "fb-page-message-1", "observed_at": "2026-09-19 09:01:00",
+                    "actor": "Customer", "actor_role": "Customer", "emoji": "❤️", "target_type": "message",
+                    "target_message_id": "fb-message-2", "observed_at": "2026-09-19 09:01:00",
                     "raw_label": "Customer reacted Love", "parse_confidence": "high",
                 }],
             }],
             extract_user_info, detect_city,
         )
         persist_thread_record(self.conn, record, detect_city)
-        # Same snapshot must not multiply a reaction event.
+        # Same snapshot must keep one compact annotation.
         persist_thread_record(self.conn, record, detect_city)
 
         message = self.conn.execute(
-            "SELECT sender, source_id FROM messages WHERE thread_id=?", (record.thread_id,)
+            "SELECT sender, source_id, reaction_annotation_json FROM messages WHERE thread_id=?", (record.thread_id,)
         ).fetchone()
-        self.assertEqual((message["sender"], message["source_id"]), ("Unknown", "fb-message-2"))
-        reaction = self.conn.execute(
-            """SELECT source_id, actor, emoji, target_type, target_message_id, observed_at,
-                      raw_label, parse_confidence
-               FROM crawled_message_reactions WHERE thread_id=?""",
-            (record.thread_id,),
-        ).fetchone()
-        self.assertEqual(dict(reaction), {
-            "source_id": "fb-message-2", "actor": "Customer", "emoji": "❤️", "target_type": "message",
-            "target_message_id": "fb-page-message-1", "observed_at": "2026-09-19 09:01:00",
-            "raw_label": "Customer reacted Love", "parse_confidence": "high",
-        })
-        self.assertEqual(
-            self.conn.execute(
-                "SELECT COUNT(*) FROM crawled_message_reactions WHERE thread_id=?", (record.thread_id,)
-            ).fetchone()[0],
-            1,
-        )
+        self.assertEqual((message["sender"], message["source_id"]), ("Page", "fb-message-2"))
+        self.assertEqual(json.loads(message["reaction_annotation_json"]), [
+            {"actor": "Seeker", "emoji": "❤️", "count": 1, "confidence": "two_party_rule"},
+        ])
 
     def test_persist_thread_record_writes_all_boundaries(self):
         thread_record = enrich_thread_record(

@@ -57,6 +57,13 @@ def resolve_message_at(label: str | None, anchor=None) -> tuple[str | None, bool
         return None, False
     label = label.replace("\u202f", " ").replace("\u00a0", " ")
     anchor_dt = _coerce_anchor(anchor)
+    # Canonical source timestamps are already converted from Facebook epoch
+    # milliseconds to the application's explicit Asia/Ho_Chi_Minh timezone.
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', label):
+        try:
+            return datetime.strptime(label, ISO_FMT).strftime(ISO_FMT), False
+        except ValueError:
+            return None, False
     us_match = _US_SHORT_DATETIME_RE.match(label)
     if us_match:
         month, day, year, hour, minute, ampm = us_match.groups()

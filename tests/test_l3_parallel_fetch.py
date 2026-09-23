@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -42,6 +42,9 @@ class _Logger:
 
     def debug(self, msg):
         self.lines.append(("debug", msg))
+
+    def critical(self, msg):
+        self.lines.append(("critical", msg))
 
 
 class _Page:
@@ -86,6 +89,17 @@ def _legacy_stats():
 
 
 class TestMessageCounter(unittest.TestCase):
+    def test_worker_drain_does_not_finish_after_120_seconds(self):
+        class SlowWorker:
+            remaining = 300
+            def is_alive(self):
+                return self.remaining > 0
+            def join(self, timeout):
+                self.remaining -= timeout
+        worker = SlowWorker()
+        parallel_fetch._wait_for_worker_drain([worker], _Logger())
+        self.assertEqual(worker.remaining, 0)
+
     def test_add_reaches_target(self):
         counter = MessageCounter(target=5)
         self.assertFalse(counter.add(3))
@@ -107,7 +121,7 @@ class TestWorkerMain(unittest.TestCase):
 
         call_count = {"n": 0}
 
-        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id=""):
+        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id="", discovery_viewport=False):
             call_count["n"] += 1
             raise parallel_fetch.TargetClosedError("tab closed")
 
@@ -176,6 +190,50 @@ class TestWorkerMain(unittest.TestCase):
 class TestRunParallelFetchDispatch(unittest.TestCase):
     """(1) tasks are dispatched to workers BEFORE Stage 1 finishes."""
 
+    def test_86_tasks_are_drained_including_la_pham_at_84(self):
+        def discover(*args, on_task, **kwargs):
+            for ordinal in range(86):
+                on_task(_task('La Pham' if ordinal == 83 else f'User {ordinal}', ordinal))
+            return {'early_exit': False, 'stats': _legacy_stats(), 'existing_message_count': 0}
+
+        def process(page, conn, task, deps, logger, **kwargs):
+            return ThreadResult(task.ordinal, task.record.thread_id, 'persisted', messages_added=1)
+
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = sqlite3.Row
+        setup_database(conn)
+        record_fetch = MagicMock()
+        with patch.object(parallel_fetch, 'discover_threads', side_effect=discover), patch.object(parallel_fetch, 'process_thread_task', side_effect=process):
+            stats = run_parallel_fetch(_Page(), '123', '15d', 1000, conn, _Logger(), record_fetch,
+                ThreadWorkerDeps(None, None, None), workers=3, inbox_url='inbox_url',
+                worker_loop=_make_symmetric_worker_loop(process), assignment_log_dir=None)
+        self.assertEqual(stats['tasks_dispatched'], 86)
+        self.assertEqual(stats['threads_processed'], 86)
+        self.assertEqual(stats['tasks_abandoned'], 0)
+        self.assertEqual(stats['unfinished_tasks'], [])
+        self.assertTrue(stats['fetch_complete'])
+        self.assertEqual(stats['assignments'][83]['inbox_index'], 84)
+        self.assertEqual(stats['assignments'][83]['thread_name'], 'La Pham')
+        record_fetch.assert_called_once()
+        conn.close()
+
+    def test_dead_workers_leave_resumable_manifest_and_no_success_marker(self):
+        def discover(*args, on_task, **kwargs):
+            on_task(_task('La Pham', 83))
+            return {'early_exit': False, 'stats': _legacy_stats(), 'existing_message_count': 0}
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = sqlite3.Row
+        setup_database(conn)
+        marker = MagicMock()
+        with patch.object(parallel_fetch, 'discover_threads', side_effect=discover):
+            stats = run_parallel_fetch(_Page(), '123', '15d', 1000, conn, _Logger(), marker,
+                ThreadWorkerDeps(None, None, None), workers=3, inbox_url='inbox_url',
+                worker_loop=lambda *a, **k: None, assignment_log_dir=None)
+        self.assertFalse(stats['fetch_complete'])
+        self.assertEqual(stats['unfinished_tasks'][0]['record']['thread_name'], 'La Pham')
+        marker.assert_not_called()
+        conn.close()
+
     def test_commits_orchestrator_connection_before_workers_and_stage1(self):
         """A pending PostgreSQL transaction must not block parallel UPSERTs."""
         class _TrackingConnection:
@@ -241,8 +299,8 @@ class TestRunParallelFetchDispatch(unittest.TestCase):
                           *, skip_navigation, force_refresh, refresh_older_than_days=None, allow_early_exit,
                           target_total_messages, on_task):
             on_task(_task("A", 0))
-            on_task(_task("B", 1))
-            on_task(_task("C", 2))
+            on_task(_task("B", 1, psid_hint="22"))
+            on_task(_task("C", 2, psid_hint="33"))
             # Block until a worker has actually received at least one task,
             # proving dispatch happens before Stage 1 (this function) returns.
             self.assertTrue(received_event.wait(timeout=5))
@@ -321,27 +379,39 @@ class TestRunParallelFetchSentinels(unittest.TestCase):
 
 
 def _make_symmetric_worker_loop(fake_process):
-    """A ``worker_loop`` that routes through the SAME (patched) module-level
-    ``process_thread_task`` the orchestrator's own Stage-2 pass uses, so a
-    task's outcome never depends on which "worker" (background thread or the
-    orchestrator itself) happens to drain it. Never touches playwright or a
-    real DB connection.
+    """A minimal ``worker_loop`` with the same queue contract as ``worker_main``
+    (FIFO until the sentinel, hand failures to ``retry_q``, then drain retries
+    — including its own once no peer is alive, since the orchestrator tab never
+    fetches).  Never touches playwright or a real DB connection.
     """
 
     def loop(worker_index, page_id, inbox_url, task_q, result_q, stop_event,
              deps, memory_dir, logger, session_factory=None, connection_factory=None,
-             counter=None):
+             counter=None, retry_q=None, others_alive=None):
+        name = f"worker:{worker_index}"
+
+        def run(task):
+            result = fake_process(None, None, task, deps, logger, is_first_thread=False, page_id=page_id)
+            result.worker = name
+            result.thread_name = task.record.thread_name
+            result.attempt = task.attempt
+            parallel_fetch._requeue_failed(task, result, retry_q, name, logger)
+            result_q.put(result)
+            if counter is not None and counter.add(result.messages_added):
+                stop_event.set()
+
         while True:
             task = task_q.get()
             if task is None:
                 break
             if stop_event.is_set():
                 continue
-            result = fake_process(None, None, task, deps, logger, is_first_thread=False, page_id=page_id)
-            result.worker = f"worker:{worker_index}"
-            result_q.put(result)
-            if counter is not None and counter.add(result.messages_added):
-                stop_event.set()
+            run(task)
+        while True:
+            task = parallel_fetch._next_retry(retry_q, name, allow_own=(not others_alive()) if others_alive else False)
+            if task is None:
+                break
+            run(task)
 
     return loop
 
@@ -355,7 +425,7 @@ class TestRunParallelFetchTargetMessages(unittest.TestCase):
     """
 
     def test_target_reached_stops_and_abandons(self):
-        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id=""):
+        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id="", discovery_viewport=False):
             return ThreadResult(ordinal=task.ordinal, thread_id=task.record.thread_id,
                                  status="persisted", messages_added=5)
 
@@ -394,7 +464,7 @@ class TestRunParallelFetchAggregation(unittest.TestCase):
     """(5) stats aggregation matches scrape_inbox semantics; ordinal order; locate_methods."""
 
     def test_aggregation_keys_and_order(self):
-        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id=""):
+        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id="", discovery_viewport=False):
             if task.ordinal == 1:
                 return ThreadResult(ordinal=1, thread_id="", status="click_verify_failed",
                                      locate_method="sidebar_identity")
@@ -438,7 +508,8 @@ class TestRunParallelFetchAggregation(unittest.TestCase):
         # The failed ordinal was handed off once and failed again on retry.
         self.assertEqual(stats["tasks_requeued"], 1)
         self.assertEqual([f["inbox_index"] for f in stats["failed_threads"]], [2])
-        self.assertEqual(len(record_fetch_calls), 1)
+        self.assertEqual(len(record_fetch_calls), 0)
+        self.assertFalse(stats['fetch_complete'])
         conn.close()
 
 
@@ -483,13 +554,13 @@ class TestRunParallelFetchEarlyExit(unittest.TestCase):
 class TestCliWorkersOne(unittest.TestCase):
     """(6) workers==1 in fetch_messages calls _scrape_inbox and never starts threads."""
 
-    def test_workers_one_never_touches_run_parallel_fetch(self):
+    def test_workers_one_uses_checkpoint_engine_on_orchestrator_tab(self):
         import tools.l5_fetch_fb_messages as cli
 
         def boom(*args, **kwargs):
             raise AssertionError("run_parallel_fetch must not be called when workers=1")
 
-        with patch.object(cli, "run_parallel_fetch", side_effect=boom), \
+        with patch.object(cli, "run_parallel_fetch", return_value={"new_threads": 0, "new_messages": 0, "skipped_threads": 0, "threads_seen": 0, "processed_thread_ids": [], "fetch_complete": True}) as mock_run, \
              patch.object(cli, "attach_to_authorized_session") as mock_attach, \
              patch.object(cli, "_scrape_inbox", return_value={"new_threads": 0, "new_messages": 0,
                                                                 "skipped_threads": 0, "threads_seen": 0,
@@ -504,18 +575,22 @@ class TestCliWorkersOne(unittest.TestCase):
             mock_session.context.pages = [MagicMock()]
             mock_attach.return_value = mock_session
 
-            result = cli.fetch_messages("123", "test_cred", use_cdp=True, workers=1)
+            # QA over an empty in-memory DB cannot verify anything and now fails
+            # the run (fail-closed); this test only checks worker routing.
+            result = cli.fetch_messages("123", "test_cred", use_cdp=True, workers=1, skip_qa=True)
 
         self.assertTrue(result["success"])
-        mock_scrape.assert_called_once()
+        mock_scrape.assert_not_called()
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args.kwargs["workers"], 1)
 
 
 class TestCliWorkersClamp(unittest.TestCase):
-    """(7) --workers clamps 0->1 and values above 3->3."""
+    """(7) --workers preserves worker-0 mode and caps above 3."""
 
     def test_clamp(self):
         import tools.l5_fetch_fb_messages as cli
-        self.assertEqual(cli._clamp_workers(0, _Logger()), 1)
+        self.assertEqual(cli._clamp_workers(0, _Logger()), 0)
         self.assertEqual(cli._clamp_workers(20, _Logger()), 3)
         self.assertEqual(cli._clamp_workers(4, _Logger()), 3)
         self.assertEqual(cli._clamp_workers(1, _Logger()), 1)
@@ -583,7 +658,7 @@ class TestOrchestratorTabClosed(unittest.TestCase):
         page = _ClosablePage()
         orchestrator_calls = {"n": 0}
 
-        def fake_process(p, conn, task, deps, logger, is_first_thread=False, page_id=""):
+        def fake_process(p, conn, task, deps, logger, is_first_thread=False, page_id="", discovery_viewport=False):
             if p is page:
                 orchestrator_calls["n"] += 1
                 raise RuntimeError("Target page, context or browser has been closed")
@@ -593,6 +668,7 @@ class TestOrchestratorTabClosed(unittest.TestCase):
         def fake_discover(p, page_id, time_range, max_threads, conn, logger, record_fetch,
                           *, skip_navigation, force_refresh, refresh_older_than_days=None, allow_early_exit,
                           target_total_messages, on_task):
+            page.close()
             for i in range(20):
                 on_task(_task(f"T{i}", i))
             page.close()  # scheduler navigated/closed our tab during Stage 1
@@ -686,7 +762,7 @@ class TestRequeueAndCircuitBreaker(unittest.TestCase):
         deps = ThreadWorkerDeps(extract_ad_id_labels=None, extract_user_info=None, detect_city=None)
         seen = []
 
-        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id=""):
+        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id="", discovery_viewport=False):
             seen.append((task.record.thread_name, task.attempt, task.failed_by))
             if task.attempt == 1:
                 return ThreadResult(ordinal=task.ordinal, thread_id="", status="click_verify_failed",
@@ -733,7 +809,7 @@ class TestRequeueAndCircuitBreaker(unittest.TestCase):
         task_q, result_q, retry_q = queue.Queue(), queue.Queue(), queue.Queue()
         deps = ThreadWorkerDeps(extract_ad_id_labels=None, extract_user_info=None, detect_city=None)
 
-        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id=""):
+        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id="", discovery_viewport=False):
             return ThreadResult(ordinal=task.ordinal, thread_id="", status="click_verify_failed",
                                 locate_method="sidebar_identity")
 
@@ -763,12 +839,13 @@ class TestRequeueAndCircuitBreaker(unittest.TestCase):
         self.assertTrue(any("retiring" in m for lvl, m in log.lines if lvl == "error"))
         self.assertTrue(session.page.is_closed())
 
-    def test_orchestrator_takes_retries_after_workers_exit(self):
-        """End-to-end: a worker that fails everything hands tasks to the
-        orchestrator, which persists them; final stats count each thread once."""
+    def test_worker0_and_peers_recover_retries(self):
+        """End-to-end: the only worker fails every task once, hands them to
+        ``retry_q`` and — being the last worker alive — retries them itself.
+        The orchestrator tab must never process a task or touch the sidebar."""
         attempts = []
 
-        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id=""):
+        def fake_process(page, conn, task, deps, logger, is_first_thread=False, page_id="", discovery_viewport=False):
             attempts.append((task.ordinal, task.attempt))
             if task.attempt == 1:
                 return ThreadResult(ordinal=task.ordinal, thread_id="", status="click_verify_failed",
@@ -776,40 +853,39 @@ class TestRequeueAndCircuitBreaker(unittest.TestCase):
             return ThreadResult(ordinal=task.ordinal, thread_id=f"tid-{task.ordinal}",
                                  status="persisted", messages_added=1, locate_method="direct_url")
 
-        def worker_loop(worker_index, page_id, inbox_url, task_q, result_q, stop_event,
-                        deps, memory_dir, logger, session_factory=None, connection_factory=None,
-                        counter=None, retry_q=None):
-            while True:
-                task = task_q.get()
-                if task is None:
-                    break
-                r = fake_process(None, None, task, deps, logger)
-                r.worker = f"worker:{worker_index}"
-                r.thread_name = task.record.thread_name
-                r.attempt = task.attempt
-                parallel_fetch._requeue_failed(task, r, retry_q, r.worker, logger)
-                result_q.put(r)
+        worker_loop = _make_symmetric_worker_loop(fake_process)
 
         def fake_discover(page, page_id, time_range, max_threads, conn, logger, record_fetch,
                           *, skip_navigation, force_refresh, refresh_older_than_days=None, allow_early_exit,
                           target_total_messages, on_task):
             for i in range(3):
                 on_task(_task(f"T{i}", i))
-            time.sleep(0.2)  # let the worker fail them before the orchestrator's pass 1
             return {"early_exit": False, "stats": _legacy_stats(), "existing_message_count": 0}
 
         conn = self._conn()
         deps = ThreadWorkerDeps(extract_ad_id_labels=None, extract_user_info=None, detect_city=None)
         log = _Logger()
+        orchestrator_calls = {"n": 0}
+
+        def orchestrator_process(*a, **k):
+            orchestrator_calls["n"] += 1
+            return fake_process(*a, **k)
+
+        reset_mock = MagicMock(return_value={"found": False})
         with patch.object(parallel_fetch, "discover_threads", side_effect=fake_discover), \
-             patch.object(parallel_fetch, "reset_sidebar_to_top", return_value={"found": False}), \
-             patch.object(parallel_fetch, "process_thread_task", side_effect=fake_process):
+             patch.object(parallel_fetch, "reset_sidebar_to_top", reset_mock), \
+             patch.object(parallel_fetch, "process_thread_task", side_effect=orchestrator_process):
             stats = run_parallel_fetch(
                 _Page(), "123", "7d", 50, conn, log, lambda *a, **k: None, deps,
                 workers=2, inbox_url="inbox_url", skip_navigation=True, force_refresh=True,
                 allow_early_exit=True, target_total_messages=None, memory_dir=None,
                 worker_loop=worker_loop, assignment_log_dir=None,
             )
+        self.assertGreater(orchestrator_calls["n"], 0)
+        reset_mock.assert_not_called()
+        self.assertEqual(sorted(attempts), [(0, 1), (0, 2), (1, 1), (1, 2), (2, 1), (2, 2)])
+        self.assertTrue(any(a["worker"] == "worker:0" for a in stats["assignments"]))
+        self.assertEqual(stats["tasks_stranded"], 0)
         self.assertEqual(stats["threads_processed"], 3)
         self.assertEqual(stats["processed_thread_ids"], ["tid-0", "tid-1", "tid-2"])
         self.assertEqual(stats["threads_skipped_click_verify"], 0)
@@ -820,3 +896,14 @@ class TestRequeueAndCircuitBreaker(unittest.TestCase):
         self.assertEqual(len(stats["assignments"]), 6)
         self.assertTrue(any("Stage 2 summary" in m for _, m in log.lines))
         conn.close()
+
+
+def test_quality_reject_detects_evidence_gate_reports():
+    rejected = ThreadResult(
+        ordinal=0, thread_id="thread-1", status="error",
+        error='{"code": "fetch_integrity_failed", "issues": []}',
+    )
+    normal = ThreadResult(ordinal=1, thread_id="thread-2", status="error", error="navigation timeout")
+
+    assert parallel_fetch._is_quality_reject(rejected)
+    assert not parallel_fetch._is_quality_reject(normal)

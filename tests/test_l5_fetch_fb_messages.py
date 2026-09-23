@@ -69,7 +69,7 @@ class TestFetchMessagesCDPDirect(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    @patch('tools.l5_fetch_fb_messages._scrape_inbox')
+    @patch('tools.l5_fetch_fb_messages.run_parallel_fetch')
     @patch('tools.l5_fetch_fb_messages.attach_to_authorized_session')
     @patch('tools.l5_fetch_fb_messages.sync_playwright')
     def test_cdp_direct_calls_scrape_inbox(self, mock_sync_playwright, mock_attach, mock_scrape):
@@ -95,7 +95,7 @@ class TestFetchMessagesCDPDirect(unittest.TestCase):
 
         result = fetch_messages(
             "123", "test_cred", time_range="7d", force_refresh=True, use_cdp=True,
-            target_total_messages=100,
+            target_total_messages=100, skip_qa=True,
         )
 
         self.assertTrue(result["success"])
@@ -144,6 +144,7 @@ class TestFetchMessagesHeadless(unittest.TestCase):
         mock_context.new_page.return_value = mock_page
         url_state = {"url": "https://business.facebook.com/latest/inbox/all?asset_id=123"}
         type(mock_page).url = property(lambda self: url_state["url"])
+        mock_page.is_closed.return_value = False
         mock_page.frames = [MagicMock()]
         mock_page.content.return_value = "<html>Mock DOM</html>"
 
@@ -162,6 +163,23 @@ class TestFetchMessagesHeadless(unittest.TestCase):
                 {"sender": "Customer", "text": "Lớp học có mất phí không?", "htmlStr": "<div>...</div>", "bg": "rgba(235, 235, 235, 1)", "timestamp": "Sat 7:19 PM"},
                 {"sender": "Page", "text": "Dạ hoàn toàn miễn phí ạ", "htmlStr": "<div>...</div>", "bg": "rgb(0, 132, 255)", "timestamp": "Sat 7:19 PM"},
             ]
+
+        # These CLI/persistence tests consume source-verified parser output.
+        # DOM/source binding itself is covered by the parser and worker suites.
+        import hashlib
+        verified_messages = [dict(m, source_id=hashlib.sha256(m['text'].encode()).hexdigest(),
+                                  timestamp=f"Sep 10, 2026 9:{i:02d} AM", day_context="2026-09-10",
+                                  time_precision="date_time", sender_confidence="explicit",
+                                  sender_evidence="source actor") for i, m in enumerate(js_messages)]
+        for target, value in [
+            ('extract_thread_messages', verified_messages),
+            ('verify_thread_switch', ('9876', True)),
+            ('scroll_up_message_panel', 0),
+            ('extract_ad_context', ad_context),
+        ]:
+            patcher = patch('fb_pipeline.browser.inbox.thread_worker.' + target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
         t_name = visible_threads[0].get("name", thread_text.split('\n')[0].strip()) if visible_threads else thread_text.split('\n')[0].strip()
         t_text = visible_threads[0].get("text", thread_text) if visible_threads else thread_text
@@ -190,6 +208,9 @@ class TestFetchMessagesHeadless(unittest.TestCase):
             # parser's DOM script before the generic string-argument branch.
             if "let processedBubbles = new Set()" in script:
                 return js_messages
+            if "targetX:" in script and "conversationCardCount:" in script:
+                return {"before": 0, "after": 0, "domMoved": False,
+                        "targetX": 100, "targetY": 200, "targetHeight": 500, "conversationCardCount": 1}
             if "scrollIntoView" in script and "c.click()" in script:
                 return True
             if isinstance(args, dict) and args.get("threadSelector"):

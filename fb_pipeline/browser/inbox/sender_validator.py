@@ -1,18 +1,10 @@
 import re
 
 def detect_sender(html_str: str, bg_color: str) -> str:
-    """
-    Validates sender detection using exact color-variance heuristics
-    and explicit DOM layout markers.
-    
-    # SENDER DETECTION BUGFIX:
-    Background: We historically used `is_gray` to detect if the background color was not plain gray (meaning it was the Page's blue bubble).
-    However, Facebook's Business Suite now employs transparent `backgroundColor` paired with CSS gradient `backgroundImage` for Page messages.
-    This caused all Page messages to evaluate as 'transparent' -> falls back to Customer!
-    
-    Fix: The frontend JavaScript parser now injects a structural `HAS_BG_IMAGE_INDICATOR_XX` string into `html_str` 
-    whenever the message bubble is styled with `background-image`.
-    This guarantees 100% resilient identification of Page messages directly from the gradient styling.
+    """Legacy colour candidate for diagnostics only.
+
+    Actual attribution and cross-checks use the painted body's position and
+    colour in thread_detail_parser, not this whole-container approximation.
     """
     html_str = html_str or ""
     bg = (bg_color or "").strip()

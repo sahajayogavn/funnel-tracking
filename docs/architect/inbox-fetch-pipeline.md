@@ -1,5 +1,14 @@
 # Inbox Fetch Pipeline — Orchestrator / Worker Design
 
+> **Current execution model (2026-09-22):** Orchestrator = worker 0. The
+> default is one tab performing discovery and detail fetch in the same
+> viewport. With `--workers 2/3`, known-ID tasks are shared with background
+> tabs; worker 0 also drains the backlog. Verified IDs are checkpointed before
+> history extraction. Sidebar lookup uses saved-ID navigation as fallback.
+> This supersedes the idle-orchestrator, direct-URL-first and legacy-one-tab
+> descriptions retained below as design history. See
+> [implementation and validation](../report/inbox-worker0-2026-09-22.md).
+
 **Universal ID:** `doc:inbox-fetch-pipeline-001`
 **Satisfies:** `prd:inbox-parallel-fetch-001` (see [`../PRDs/prd-inbox-parallel-fetch.md`](../PRDs/prd-inbox-parallel-fetch.md))
 **Status:** Phases 1–3 implemented (2026-09-16, unit-tested); Phase 4 live validation pending
@@ -111,6 +120,77 @@ every thread in range; `--refresh-older-than DAYS`
 (`FUNNEL_FETCH_REFRESH_OLDER_THAN`) re-fetches only threads whose marker is
 older than DAYS.
 
+### 1.1b Message evidence and partial admission (code:inbox-sender-evidence-001, 2026-09-21)
+
+Run 12:22 on 2026-09-21 verified every recipient but persisted **0** messages:
+`check_snapshot` demanded `sender_confidence="explicit"` and an ISO
+`day_context`, while the parser only produced `Unknown` actors and
+`"Sun 3:40 PM"` labels, so all 86 threads were quarantined
+(`fetch_evidence_needs_review`). Live DOM (Hung Bui, 31 bubbles, two identical
+reads) shows the evidence Meta actually renders:
+
+| Evidence | DOM | Persisted as |
+|---|---|---|
+| Page message | wrapper with `flex-direction: row-reverse` between the text node and the `.x1fqp7bg` cluster | `sender=Page`, `sender_confidence=structural`, `sender_evidence=layout=row-reverse` |
+| Seeker message | `img[alt="<conversation name>"]` inside the cluster | `sender=Customer`, `structural`, `avatar-alt=<name>` |
+| Explicit label ("You sent", "<name> sent a message") | `aria-label` | `explicit` (unchanged, takes precedence) |
+| Bubble colour | — | diagnostic `sender_candidate` only, never an actor fact |
+| `"3:40 PM"` / `"Sun 3:40 PM"` | Meta uses these forms only for today / the last 7 days | resolved against `observed_at` (browser-local); `day_context` ISO, `timestamp` rewritten to the absolute label, `raw_timestamp` kept, `time_evidence` recorded |
+
+`check_snapshot` accepts `explicit` and `structural`, resolves labels against
+each message's `observed_at`, and does not demand id/actor/day from
+non-conversation rows (`classify_message_kind` ≠ message: ad-reply banners,
+attachments). The worker now admits every fully evidenced message and
+quarantines only the unresolved bubbles (`inbox_fetch_observations`), logging
+`admitted N … quarantined M`; a contradiction (recipient, unstable snapshot,
+duplicate id, non-monotonic order, stored-evidence conflict) still rejects the
+whole thread as before. `extract_thread_messages(page, thread_name=…)` must
+receive the conversation name for the avatar rule.
+
+### Multilingual system rows and QA scope (2026-09-22)
+
+System classification combines DOM evidence with legacy text patterns. A message
+ID, explicit sender, or structural/visual sender prevents banner wording from
+overriding a conversational row. Bound Facebook source messages remain authoritative.
+An unpainted row without human evidence can be a system event when centered, or
+when it is a standalone secondary-text notice with its own Facebook post/ad link.
+Secondary text means font size at most 90% of the median identified body size in
+the same panel, with a different text color. Missing typography baseline does
+not authorize classification. Quotes/replies are excluded from the linked-notice
+rule. Font size or a Facebook URL alone is insufficient. These thresholds are
+heuristics covered by synthetic DOM fixtures, not a claim of live validation.
+
+Preserve the original text, typography evidence and scoped URL in
+`inbox_system_events`; `story_fbid` identifies a post, never an ad. An unresolved
+`Attachment` remains quarantined until source evidence resolves it. Classifying
+a system event does not resolve other quarantined bubbles in that thread.
+
+Fetch completion describes task execution; `fetch_history_complete` separately
+describes thread coverage. QA checks sampled sidebar order and latest messages,
+not full historical coverage. Reports expose `qa_scope` and
+`history_completeness_verified=false`; `summary.pass` counts successful checks
+across QA1 and QA2, not threads. Report partial thread/quarantine counts alongside
+run success, without interpreting `qa_status=passed` as complete history.
+Historical reports are preserved as observations of their original run.
+
+As of 2026-09-23, sidebar-preview content, sender and time disagreements are
+advisory (`soft`, `evidence_source=sidebar_preview`). They retain their mismatch
+reason and evidence, but do not hard-fail a run. Panel/source integrity conflicts
+and QA1 identity/ordering checks retain their blocking behavior.
+
+After successful location, the worker may verify a known recipient through an
+exact normalized panel heading for two consecutive polls when Meta omits
+`selected_item_id`. This requires a unique name across all stored threads for
+the page, bound to the expected canonical PSID identity. Uniqueness is recomputed
+on each attempt; unavailable DB evidence, unknown recipients and duplicate names
+do not qualify. An explicit conflicting page/recipient URL still fails. This
+uniqueness guarantee covers stored identities, not undiscovered Facebook threads.
+The worker passes the verified `(page_id, recipient_id)` through message extraction
+and confirmation reads to the Facebook source validator. When the URL recipient
+is absent, this context supplies it; an explicit conflicting URL is rejected.
+Source participants, viewer, sender, message IDs and direction are still checked
+against that identity. Callers without verified context retain strict URL binding.
+
 ### 1.2 Stage 2 per-thread contract (unchanged semantics, relocated)
 
 1. Locate the card in the sidebar and click it (identity key → PSID → hovercard → name → name+preview).
@@ -160,7 +240,7 @@ output, and `--workers 1` keeps today's behaviour exactly.
  │  │ after Stage 1:      │          └─────┬──────┘ └─────┬──────┘ └─────┬──────┘ │
  │  │  put N sentinels    │                │              │              │        │
  │  │  join queue as      │                ▼              ▼              ▼        │
- │  │  worker 0 (own tab) │        sqlite conn (WAL, busy_timeout) — one per thread│
+ │  │  idle after Stage 1 │        sqlite conn (WAL, busy_timeout) — one per thread│
  │  │  drain result_q     │                                                       │
  │  │  record_fetch       │                                                       │
  │  │  LLM city classify  │                                                       │
@@ -172,7 +252,7 @@ output, and `--workers 1` keeps today's behaviour exactly.
 
 | Role | Thread | Tab role marker | Responsibility |
 | --- | --- | --- | --- |
-| Orchestrator | main | `scan_inbox` (existing) | Stage 1 discovery; task dispatch; stop conditions; stats aggregation; `record_fetch`; post-scrape LLM city classification. After Stage 1 finishes it runs the worker loop itself on its own tab ("worker 0") because that tab already has the full sidebar loaded and is otherwise idle. |
+| Orchestrator | main | `scan_inbox` (existing) | Stage 1 discovery; task dispatch (streamed per sidebar round, not after the full listing); stop conditions; stats aggregation; `record_fetch`; post-scrape LLM city classification. **Its tab is never used to fetch** (changed 2026-09-21, `code:inbox-parallel-fetch-001:orchestrator-idle`): after Stage 1 it stays parked on the inbox and only waits for the worker tabs. At least one worker tab is always started (`workers` is clamped to ≥ 2). |
 | Worker *i* | `threading.Thread` | `scan_inbox_worker:<i>` | Pull `ThreadTask`s FIFO, locate the thread in **its own tab**, run the Stage 2 per-thread contract, persist through its own SQLite connection, push a `ThreadResult`. |
 
 `--workers N` means `N` browser tabs in total: 1 orchestrator + `N-1`
@@ -291,7 +371,7 @@ its DOM is unverified and would need its own anti-fragile spike
 | Event | Behaviour |
 | --- | --- |
 | Worker tab closed / `TargetClosedError` | worker re-attaches a fresh role tab (max 2 re-attaches per run); the in-flight task is re-queued with `attempt+1` if `attempt < 2`, else reported `error`. |
-| Worker thread dies (unhandled) | logged; orchestrator notices via `is_alive()` on join and drains the remaining queue itself. No task is lost silently. |
+| Worker thread dies (unhandled) | logged; the other worker tab keeps draining the queue. A task re-queued by the last worker alive is retried by that same worker (`_next_retry(allow_own=True)`); anything still on `retry_q` after every worker has exited is logged as stranded (`stats["tasks_stranded"]`) — the orchestrator tab never picks it up. |
 | `target_total_messages` reached | `stop_event` set; orchestrator stops enqueueing; workers finish the current task and exit; leftover tasks are counted in `stats["tasks_abandoned"]`. |
 | `Ctrl-C` | `stop_event` set; same as above; role tabs stay open (design of role tabs). |
 | Orchestrator tab lost during Stage 1 | Stage 1 ends early (existing exception path); already-queued tasks are still processed by workers before the run reports failure — partial progress is persisted, not lost as today. |
@@ -367,7 +447,7 @@ one wrong → fall through), overshoot stop, hint uniqueness rule.
 
 | # | Change | File | ID |
 | --- | --- | --- | --- |
-| 3.1 | `run_parallel_fetch(page, page_id, time_range, max_threads, conn, workers, …) -> stats`: spawns workers, runs `discover_threads(on_task=task_q.put)`, sentinels, orchestrator-as-worker-0, join, aggregate. | new `fb_pipeline/inbox/l3_parallel_fetch.py` | `…:orchestrator` |
+| 3.1 | `run_parallel_fetch(page, page_id, time_range, max_threads, conn, workers, …) -> stats`: spawns workers, runs `discover_threads(on_task=task_q.put)`, sentinels, join (orchestrator tab idle), aggregate. | new `fb_pipeline/inbox/l3_parallel_fetch.py` | `…:orchestrator` |
 | 3.2 | `worker_main(worker_index, page_id, inbox_url, task_q, result_q, stop_event, deps)` — own playwright/CDP/tab/conn, re-attach policy, `[worker:i]` log prefix. | `fb_pipeline/inbox/l3_parallel_fetch.py` | `…:worker-main` |
 | 3.3 | Stop conditions (§7) and stats keys. | same | `…:stop-rules` |
 | 3.4 | CLI: `--workers N` (default 3, clamp 1–3: 1 orchestrator + at most 2 worker tabs). `workers == 1` → `scrape_inbox`; else `run_parallel_fetch`. Only valid with `--cdp` (headless Mode 3 launches its own browser and stays sequential in this iteration). | `tools/l5_fetch_fb_messages.py` | `…:cli` |
@@ -411,6 +491,23 @@ never imports threading paths.
 Sequential baseline for 8 threads ≈ 8 × 15 s ≈ 120 s, so run 8 is ≈ 3.7× on Stage 2 at this size (tab bootstrap and the first-task cost dominate); the full 90d measurement (Phase 4 step 4) is still pending.
 
 ## 11. Risks and open questions
+
+### 2026-09-21: source-bound messages and worker-drain correction
+
+The current production Facebook parser reads the message model bound to each
+rendered `data-message-id` node. Admission cross-checks the DOM/model message ID,
+URL Page/recipient, model viewer ID, exact participant set, sender UID,
+`isFromViewer`, body text (including image emoji alt text), and source epoch.
+Missing or unsupported evidence is quarantined; contradictions reject the thread.
+CSS alone and a clock-only label cannot admit a human turn. Epoch milliseconds
+remain in audit evidence; canonical seconds use explicit `Asia/Ho_Chi_Minh`.
+This is an undocumented Facebook surface: schema drift must fail closed.
+
+Stage 2 no longer treats `join(timeout=120)` as completion. Non-daemon workers
+are polled until they exit, including retry draining; the orchestrator stays
+idle. `fetch_complete=false`, failed/partial history counts and `unfinished_tasks`
+make interrupted/retired-worker runs observable, and suppress the success marker.
+See [implementation and validation report](../report/facebook-source-and-worker-drain-2026-09-21.md).
 
 | Risk | Mitigation |
 | --- | --- |

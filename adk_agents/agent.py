@@ -12,8 +12,8 @@ Defines the inbox orchestrator plus 3 route pipelines:
   3. WarmUpPipeline: WarmUpComposer (crafts nurturing messages for dormant seekers)
   4. EventPipeline: EventAdvertiser (city-targeted event notifications)
 
-Uses Google Gemini through Google ADK's native Gemini integration. The shared
-MAS provider configuration is Gemini-only for this deployment.
+Uses the provider selected by the shared MAS LLM configuration, through Google
+ADK native Gemini or LiteLLM-compatible transport.
 
 Run with (from project root):
     .venv/bin/adk run adk_agents/
@@ -26,6 +26,7 @@ import os
 from pathlib import Path
 
 from google.adk.agents import LlmAgent, SequentialAgent
+from google.adk.models.lite_llm import LiteLlm
 from google.adk.tools import AgentTool
 
 from .tools.seeker_tools import lookup_seeker, get_thread_messages
@@ -40,9 +41,9 @@ from fb_pipeline.persistence.l4_llm_trace import adk_before_tool, traced
 ORCHESTRATOR_MAX_LOOPS = 30
 
 # --- Model Configuration ---
-# Native Gemini models are selected without a provider prefix. The MAS setup
-# helper loads GOOGLE_API_KEY and ADK_MODEL from the encoded project .env.
-MODEL_NAME = os.environ.get("ADK_MODEL", "gemini-3.8-flash")
+# Provider and model are loaded by the runner before this module is imported.
+_configured_model = os.environ.get("ADK_MODEL", "gemini-3.8-flash")
+MODEL_NAME = LiteLlm(model=_configured_model) if _configured_model.startswith("openai/") else _configured_model
 
 # code:agent-mas-001:llm-user-agent
 # LiteLLM merges these headers into every provider request. Keep a stable

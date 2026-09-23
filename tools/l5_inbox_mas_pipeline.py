@@ -14,8 +14,7 @@ def run_adk_pipeline(thread_messages: list, seeker_context: dict, feedback: str 
                      trigger: str | None = None, page_id: str | None = None,
                      subject_id: str | None = None, trace_id: str | None = None,
                      now_context: str | None = None,
-                     conversation_state: dict | None = None,
-                     reaction_events: list[dict] | None = None) -> dict:
+                     conversation_state: dict | None = None) -> dict:
     """Run one message-scoped MAS action under one durable trace."""
     subject_id = subject_id or seeker_context.get("thread_id") or seeker_context.get("id") or seeker_context.get("name") or "unknown"
     # code:agent-mas-002:orchestrator-thread-id — the InboxOrchestrator's tools
@@ -27,7 +26,7 @@ def run_adk_pipeline(thread_messages: list, seeker_context: dict, feedback: str 
               dry_run=True, trace_id=trace_id):
         return _run_adk_pipeline(
             thread_messages, seeker_context, feedback, now_context=now_context,
-            conversation_state=conversation_state, reaction_events=reaction_events,
+            conversation_state=conversation_state,
         )
 
 
@@ -36,8 +35,7 @@ def run_adk_care_pipeline(thread_messages: list, seeker_context: dict, *,
                           care_purpose: str, care_brief: dict,
                           feedback: str | None = None, trigger: str | None = None,
                           page_id: str | None = None, subject_id: str | None = None,
-                          trace_id: str | None = None, now_context: str | None = None,
-                          reaction_events: list[dict] | None = None) -> dict:
+                          trace_id: str | None = None, now_context: str | None = None) -> dict:
     """Run one proactive care action through CareOrchestrator.
 
     Eligibility is intentionally established by the caller before this LLM
@@ -53,21 +51,19 @@ def run_adk_care_pipeline(thread_messages: list, seeker_context: dict, *,
               dry_run=True, trace_id=trace_id):
         return _run_adk_care_pipeline(
             thread_messages, seeker_context, care_purpose, care_brief, feedback, now_context=now_context,
-            reaction_events=reaction_events,
         )
 
 
 def _run_adk_pipeline(thread_messages: list, seeker_context: dict, feedback: str | None = None,
                       now_context: str | None = None,
-                      conversation_state: dict | None = None,
-                      reaction_events: list[dict] | None = None) -> dict:
+                      conversation_state: dict | None = None) -> dict:
     from adk_agents.agent import root_agent
     from fb_pipeline.contracts.l1_conversation_state import format_conversation_lines, format_now_context
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
     from google.genai import types
 
-    conversation_text = format_conversation_lines(thread_messages, reaction_events)
+    conversation_text = format_conversation_lines(thread_messages)
     now_context = now_context or format_now_context()
     seeker_text = json.dumps(seeker_context, ensure_ascii=False, indent=2)
     # Knowledge is deliberately not assembled from the inbound city here. The
@@ -139,8 +135,7 @@ def _run_adk_pipeline(thread_messages: list, seeker_context: dict, feedback: str
 
 def _run_adk_care_pipeline(thread_messages: list, seeker_context: dict, care_purpose: str,
                            care_brief: dict, feedback: str | None = None,
-                           now_context: str | None = None,
-                           reaction_events: list[dict] | None = None) -> dict:
+                           now_context: str | None = None) -> dict:
     """Run a fixed, auditable Care workflow without an LLM orchestration loop.
 
     The specialist agents still own language understanding, retrieval, drafting
@@ -157,7 +152,7 @@ def _run_adk_care_pipeline(thread_messages: list, seeker_context: dict, care_pur
     from google.adk.sessions import InMemorySessionService
     from google.genai import types
 
-    conversation_text = format_conversation_lines(thread_messages, reaction_events)
+    conversation_text = format_conversation_lines(thread_messages)
     now_context = now_context or format_now_context()
     seeker_text = json.dumps(seeker_context, ensure_ascii=False, indent=2)
     brief_text = json.dumps(care_brief, ensure_ascii=False, indent=2)

@@ -88,7 +88,7 @@ def test_format_inbox_proposal_is_compact_indented_and_links_to_seeker(monkeypat
     )
 
     assert "🔗 Hồ sơ seeker\n  https://ops.example.org/seekers/thread%20%2F%2042" in text
-    assert "  [2026-09-11 08:45 | Auto_Page]\n    " in text
+    assert "  [2026-09-11 08:45 | Page (automated message)]\n    " in text
     assert "…" in text
     assert "CALL_TO_ACTION" in text
     assert post_text not in text

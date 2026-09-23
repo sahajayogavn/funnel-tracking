@@ -233,7 +233,7 @@ class TestNormalizePreviewForMatch(unittest.TestCase):
 class TestLocateThreadLadderFallThrough(unittest.TestCase):
     """(b) locate_thread falls through L0 -> L1 and reports L1's method."""
 
-    def test_ladder_reports_l1_method_when_l0_fails(self):
+    def test_sidebar_success_does_not_navigate(self):
         task = _make_task()
         page = _DirectPage()
         logger = _Logger()
@@ -256,12 +256,12 @@ class TestLocateThreadLadderFallThrough(unittest.TestCase):
         ) as mock_l1:
             result = locate_thread(page, PAGE_ID, task, logger)
 
-        mock_l0.assert_called_once()
+        mock_l0.assert_not_called()
         mock_l1.assert_called_once()
         self.assertTrue(result.clicked)
         self.assertEqual(result.method, "sidebar_identity")
 
-    def test_ladder_returns_l0_result_without_calling_l1_when_l0_succeeds(self):
+    def test_sidebar_failure_falls_back_to_direct_url(self):
         task = _make_task()
         page = _DirectPage()
         logger = _Logger()
@@ -276,10 +276,11 @@ class TestLocateThreadLadderFallThrough(unittest.TestCase):
             return_value=l0_result,
         ), patch(
             "fb_pipeline.browser.inbox.thread_locator.locate_thread_in_sidebar",
+            return_value=LocateResult(False, "sidebar_identity", 3, "", ""),
         ) as mock_l1:
             result = locate_thread(page, PAGE_ID, task, logger)
 
-        mock_l1.assert_not_called()
+        mock_l1.assert_called_once()
         self.assertTrue(result.clicked)
         self.assertEqual(result.method, "direct_url")
 

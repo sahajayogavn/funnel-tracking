@@ -1,0 +1,11 @@
+{
+  "id": "CHG-008",
+  "screen": "seekers",
+  "element": ".seeker-sidebar-section--recent",
+  "property": "background, border-radius, border, box-shadow",
+  "before_value": "transparent section directly on the dark sidebar",
+  "after_value": "4.5% lightened surface with 10px radius and subtle indigo glow",
+  "token_ref": "--bg-secondary, --accent-indigo",
+  "reason": "Make Recent Messages easier to recognize as its own reading surface without altering message bubbles.",
+  "status": "PENDING"
+}

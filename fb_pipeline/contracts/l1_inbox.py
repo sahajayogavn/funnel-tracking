@@ -26,8 +26,8 @@ class InboxMessage:
 
     Fields are deliberately nullable/unknown-friendly: a browser snapshot
     without a Facebook message id or reply target must not manufacture one.
-    ``reactions`` contains observed reaction dictionaries and is not part of
-    the conversational body sent to MAS.
+    ``reactions`` contains observed reaction dictionaries. Persistence folds
+    message-bound entries into the target message's reaction annotation.
     """
     sender: str
     content: str
@@ -48,6 +48,8 @@ class InboxMessage:
     sender_evidence: str | None = None
     quote_evidence: str | None = None
     reactions: list[dict[str, Any]] = field(default_factory=list)
+    kind: str = ""
+    source_links: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -70,6 +72,11 @@ class ThreadRecord:
     sidebar_identity_key: str = ""
     selected_item_id: str = ""
     fb_url: str = ""
+    # Ephemeral proof from this tab's locator; never populated from DB/cache.
+    identity_discovery_clicked: bool = False
+    # Recomputed by the worker from page-local DB identities on each attempt.
+    heading_identity_unique: bool = False
+    history_complete: bool = True
 
 
 @dataclass

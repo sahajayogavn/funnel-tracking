@@ -388,7 +388,7 @@ export function NetworkGraph() {
                   messages={hoveredNodeDetails.messages.map((message, index) => ({
                     id: index,
                     sender: message.sender === 'Page' || message.sender === 'Auto_Page'
-                      ? (message.sender === 'Auto_Page' ? '@Auto_Page' : 'Page')
+                      ? (message.sender === 'Auto_Page' ? 'Page (automated message)' : 'Page')
                       : (message.sender === 'Customer' ? hoveredNode.name : (message.sender || 'Unknown')),
                     content: message.content,
                     timestamp: message.message_timestamp,

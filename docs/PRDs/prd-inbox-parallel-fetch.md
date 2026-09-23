@@ -1,5 +1,13 @@
 # PRD: Parallel Inbox Fetch (`--workers`)
 
+> **2026-09-22 behavior update:** The orchestrator is worker 0 and fetches
+> details inline during discovery. Fetch defaults to one total tab; `--worker`
+> aliases `--workers`. All modes use the checkpoint engine. Known-ID tasks may
+> be dispatched to worker 1/2; worker 0 drains remaining work after discovery.
+> Sidebar lookup precedes saved-ID URL fallback. This supersedes the earlier
+> idle-orchestrator/default-3 requirements below. See
+> [worker-0 implementation](../report/inbox-worker0-2026-09-22.md).
+
 **Universal ID:** `prd:inbox-parallel-fetch-001`
 **Design:** `doc:inbox-fetch-pipeline-001` — [`../architect/inbox-fetch-pipeline.md`](../architect/inbox-fetch-pipeline.md)
 **Status:** Implemented (Phases 1–3) — live validation (Phase 4) pending
@@ -31,13 +39,13 @@ consume immediately, each extracting thread details in parallel.
 | `prd:inbox-parallel-fetch-001:worker-isolation` | Each worker owns its own Chrome tab (role `scan_inbox_worker:<i>`), Playwright instance and SQLite connection; no Playwright or DB handle is shared across threads. | Must |
 | `prd:inbox-parallel-fetch-001:locate-ladder` | A worker locates a thread by direct URL when a PSID is known, otherwise by sidebar identity match; every locate is verified before extraction (URL, header name, preview). | Must |
 | `prd:inbox-parallel-fetch-001:output-equivalence` | For the same inbox state, `threads`/`messages`/`users` rows persisted with `N` workers are identical to `N=1` (except `last_synced_at`). `inbox_sort_index` equals the Stage 1 ordinal. | Must |
-| `prd:inbox-parallel-fetch-001:fault-tolerance` | Loss of a worker tab re-attaches once and re-queues the in-flight task; a dead worker never loses tasks (orchestrator drains the remainder). | Must |
+| `prd:inbox-parallel-fetch-001:fault-tolerance` | Loss of a worker tab re-attaches once and re-queues the in-flight task; a dead worker never loses tasks (the surviving worker tab drains the remainder; the orchestrator tab never fetches — tasks left with no worker are reported as `tasks_stranded`). | Must |
 | `prd:inbox-parallel-fetch-001:stop-rules` | `--maxThreads`, `--targetMessages`, `--no-early-exit`, cache-hit early exit and `Ctrl-C` behave as today; workers stop after their current task when a stop is signalled. | Must |
 | `prd:inbox-parallel-fetch-001:read-only` | Workers never type, focus the composer, or call `send_reply_via_cdp`; fetching stays read-only (CLAUDE.md §10.3). | Must |
-| `prd:inbox-parallel-fetch-001:orchestrator-joins` | After Stage 1 ends the orchestrator processes tasks on its own tab until the queue is empty. | Should |
+| `prd:inbox-parallel-fetch-001:orchestrator-joins` | After Stage 1 the orchestrator remains idle and waits for all worker tasks and retries to finish. A timed join is only a heartbeat, never a completion deadline. Unfinished tasks are reported with a replayable manifest; incomplete runs cannot stamp success. | Must |
 | `prd:inbox-parallel-fetch-001:observability` | Stats add `workers`, `tasks_dispatched`, `tasks_abandoned`, `locate_methods`, `stage1_ms`, `stage2_ms`, `per_worker`; every worker log line carries `[worker:i]`; tasks/results are logged at `DEBUG` as `logs:inbox-parallel-fetch-001:*`. | Should |
 | `prd:inbox-parallel-fetch-001:speedup` | On a 90d `--refresh` with `--workers 3`, Stage 2 wall time ≤ 1/3 of the `--workers 1` baseline. | Should |
-| `prd:inbox-parallel-fetch-001:post-scrape` | LLM city classification and `record_fetch` run exactly once after all workers have finished, never after an empty scrape. | Must |
+| `prd:inbox-parallel-fetch-001:post-scrape` | `record_fetch` runs only after all workers finish with complete histories and no failed/abandoned/stranded tasks. Partial persistence is reported explicitly. Classification may consume only admitted evidence. | Must |
 
 ## 4. Out of scope
 

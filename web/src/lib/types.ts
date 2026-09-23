@@ -79,33 +79,14 @@ export interface MessageRow {
   replyToMessageId?: string | null;
   quotedSender?: string | null;
   quotedText?: string | null;
+  reactionAnnotationJson?: string | null;
   reactions?: {
-    actor?: string | null;
-    actorRole?: string | null;
-    emoji?: string | null;
-    targetType?: string | null;
-    targetScope?: string | null;
-    targetId?: string | null;
+    actor?: string | null; emoji?: string | null; count?: number | null;
   }[];
   // Sequence captured from Facebook's message panel. It is only a tie-breaker
   // after a Facebook timestamp has been interpreted chronologically.
   seq?: number | null;
   timestamp: string;
-}
-
-/** A crawler observation that may target a message, an entire thread, or an
- * unknown target.  It is deliberately separate from message text. */
-export interface CrawledReactionEvent {
-  id: number;
-  actor: string | null;
-  actorRole: string | null;
-  emoji: string | null;
-  targetType: string | null;
-  targetScope: string | null;
-  targetMessageId: string | null;
-  observedAt: string | null;
-  evidence: string | null;
-  parseConfidence: string | null;
 }
 
 export type JourneyStage =
@@ -131,11 +112,17 @@ export interface TouchPoint {
 export interface SeekerDetail {
   seeker: Seeker;
   messages: MessageRow[];
-  reactionEvents: CrawledReactionEvent[];
   comments: (CommentRow & { postName?: string; postUrl?: string })[];
   adSource: { content: string; matchedPostId?: string; matchedPostName?: string } | null;
   messageCount: number;
   commentCount: number;
+  pendingHistory?: PendingHistory | null;
+}
+
+export interface PendingHistory {
+  observedAt: string;
+  reasons: string[];
+  messages: { sourceId: string | null; content: string; reasons: string[] }[];
 }
 
 export const JOURNEY_STAGES: { key: JourneyStage; label: string; description: string }[] = [

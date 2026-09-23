@@ -36,7 +36,9 @@ _QUOTED_PREFIX_RE = re.compile(r'^\s*(?:\[Quoted Reply/Link\]:\s*)+')
 # Exact-shape banners. Anchored so a genuine customer sentence that merely
 # mentions "quảng cáo" is not swallowed.
 _BANNER_PATTERNS = (
-    re.compile(r'^\S.{0,80}? replied to an ad\.?$', re.IGNORECASE),
+    re.compile(r'^.*(?:resolved this conversation|đã giải quyết cuộc trò chuyện|đã giao cuộc trò chuyện|đã chỉ định cuộc trò chuyện).*$', re.IGNORECASE),
+    re.compile(r'^(?:you can now call each other|giờ đây, các bạn có thể gọi|lead stage set to|trạng thái khách hàng được đặt).*$', re.IGNORECASE),
+    re.compile(r'^\S.{0,80}? replied to an ad\.?(?:\s*View (?:ad|post)\.?)?$', re.IGNORECASE),
     re.compile(r'^\S.{0,80}? replied to a post\.?(?:\s*View post\.?)?$', re.IGNORECASE),
     re.compile(r'^\S.{0,80}? đã trả lời (?:về )?(?:một )?(?:quảng cáo|bài viết)\b.*$', re.IGNORECASE),
     re.compile(r'^Bạn đang phản hồi bình luận', re.IGNORECASE),

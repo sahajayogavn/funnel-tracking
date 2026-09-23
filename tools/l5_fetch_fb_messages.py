@@ -111,6 +111,23 @@ def record_fetch(page_id: str, threads_found: int, messages_found: int, conn: sq
     return shared_record_fetch(page_id, threads_found, messages_found, conn)
 
 
+# code:inbox-fetch-qa-001:loop-stop-scope
+def _fetch_stop_error(stats: dict) -> str | None:
+    """Return a loop-stop error only for unsafe persisted conversation data.
+
+    A worker verification failure or an incomplete fetch is diagnostic and is
+    safe to retry on the next scheduled pass. Fetch QA's sidebar-order check
+    is also diagnostic. The loop must stop only when QA directly finds that
+    the persisted newest message does not match Facebook's message history,
+    or that the message belongs to the other sender (Facebook actor/UID).
+    """
+    qa = stats.get("qa") or {}
+    for row in qa.get("qa2") or []:
+        if row.get("verdict") == "hard":
+            return "fetch_qa_message_history_or_sender_mismatch"
+    return None
+
+
 # code:tool-fbmessages-002:user-extract
 def extract_user_info(messages: list, thread_name: str, ad_context: str = "") -> dict:
     """Extract phone, email, FB URL from message content."""
@@ -278,11 +295,11 @@ def _scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn,
 
 # code:inbox-parallel-fetch-001:cli
 def _clamp_workers(workers: int, log=None) -> int:
-    """Clamp --workers to [1, 3]: one orchestrator plus at most two workers."""
+    """Clamp --workers to [0, 3]: worker 0 is the orchestrator tab itself."""
     log = log or logger
-    if workers < 1:
-        log.warning(f"--workers {workers} is below the minimum; clamping to 1.")
-        return 1
+    if workers < 0:
+        log.warning(f"--workers {workers} is below the minimum; clamping to 0.")
+        return 0
     if workers > MAX_TOTAL_TABS:
         log.warning(f"--workers {workers} exceeds the maximum; clamping to {MAX_TOTAL_TABS}.")
         return MAX_TOTAL_TABS
@@ -297,7 +314,7 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
                    show_browser: bool = True, force_refresh: bool = False, refresh_older_than_days: int | None = None,
                    max_threads: int = 50, use_cdp: bool = False, allow_early_exit: bool = True,
                    target_total_messages: int | None = None, workers: int = 1,
-                   classify_city: bool = False, skip_qa: bool = False) -> dict:
+                   classify_city: bool = False, skip_qa: bool = False, resume_run: str | None = None) -> dict:
     """Public entry point. In ``--cdp`` mode the shared Chrome is coordinated
     with the scheduler through ``l2_activity_lock``: wait for any running
     scheduler browser cycle to finish, then publish ``inbox_fetch_cli`` (kept
@@ -313,10 +330,12 @@ def fetch_messages(page_input: str, credential_id: str, time_range: str = "7d",
         ROLE_FETCH_CLI, ROLE_SCHEDULER_BROWSER, hold_activity, wait_until_idle,
     )
     workers = _clamp_workers(workers)
+    if resume_run and not use_cdp:
+        raise ValueError('--resume requires --cdp')
     page_id = parse_page_id(page_input)
     kwargs = dict(show_browser=show_browser, force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days, max_threads=max_threads,
                   use_cdp=use_cdp, allow_early_exit=allow_early_exit,
-                  target_total_messages=target_total_messages, workers=workers, skip_qa=skip_qa)
+                  target_total_messages=target_total_messages, workers=workers, skip_qa=skip_qa, resume_run=resume_run)
     if not use_cdp:
         result = _fetch_messages_impl(page_input, credential_id, time_range, **kwargs)
     else:
@@ -353,7 +372,7 @@ def _classify_after_fetch(result: dict, page_id: str) -> dict:
 def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = "7d",
                          show_browser: bool = True, force_refresh: bool = False, refresh_older_than_days: int | None = None,
                          max_threads: int = 50, use_cdp: bool = False, allow_early_exit: bool = True,
-                         target_total_messages: int | None = None, workers: int = 1, skip_qa: bool = False) -> dict:
+                         target_total_messages: int | None = None, workers: int = 1, skip_qa: bool = False, resume_run: str | None = None) -> dict:
     page_id = parse_page_id(page_input)
     logger.info(f"Using Page ID: {page_id}, Time Range: {time_range}")
     
@@ -395,32 +414,24 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
                 # The CDP attachment waits only for DOM readiness.  Reload through the
                 # scraper before collecting so Meta has initialized the complete
                 # virtualized sidebar rather than a stale short viewport.
-                if workers <= 1:
-                    stats = _scrape_inbox(
-                        session.page, page_id, time_range, max_threads, conn,
-                        skip_navigation=True,
-                        force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days,
-                        allow_early_exit=allow_early_exit,
-                        target_total_messages=target_total_messages,
-                    )
-                else:
-                    logger.info(f"Parallel fetch: --workers {workers} (1 orchestrator + {workers - 1} worker tabs).")
-                    deps = ThreadWorkerDeps(
-                        extract_ad_id_labels=extract_ad_id_labels,
-                        extract_user_info=extract_user_info,
-                        detect_city=None,
-                        block_gate=block_gate,
-                    )
-                    stats = run_parallel_fetch(
-                        session.page, page_id, time_range, max_threads, conn, logger, record_fetch, deps,
-                        workers=workers,
-                        inbox_url=f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}",
-                        skip_navigation=True,
-                        force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days,
-                        allow_early_exit=allow_early_exit,
-                        target_total_messages=target_total_messages,
-                        memory_dir=memory_dir,
-                    )
+                logger.info(f"Fetch: {workers} tab(s), including orchestrator/worker 0.")
+                deps = ThreadWorkerDeps(
+                    extract_ad_id_labels=extract_ad_id_labels,
+                    extract_user_info=extract_user_info,
+                    detect_city=None,
+                    block_gate=block_gate,
+                )
+                stats = run_parallel_fetch(
+                    session.page, page_id, time_range, max_threads, conn, logger, record_fetch, deps,
+                    workers=workers,
+                    inbox_url=f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}",
+                    skip_navigation=True,
+                    force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days,
+                    allow_early_exit=allow_early_exit,
+                    target_total_messages=target_total_messages,
+                    memory_dir=memory_dir,
+                    resume_run=resume_run,
+                )
 
                 # City/program classification is not part of message
                 # ingestion: see ``fetch_messages`` (opt-in ``--classify-city``,
@@ -432,7 +443,26 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
                     logger.info("Running Fetch QA...")
                     try:
                         from fb_pipeline.inbox.l3_fetch_qa import run_fetch_qa
-                        qa_res = run_fetch_qa(page_id, fetch_started_at, session.page, conn, logger)
+                        # code:inbox-fetch-qa-001:reattach
+                        # The orchestrator tab can be closed from outside
+                        # (Chrome tab discard, an operator closing tabs) while
+                        # Stage 2 drains.  QA needs a live sidebar, so attach a
+                        # fresh inbox tab like a worker would instead of
+                        # reporting a crash as a QA failure.
+                        qa_page = session.page
+                        if qa_page.is_closed():
+                            logger.warning("Orchestrator tab is closed; re-attaching an inbox tab for Fetch QA.")
+                            session = attach_to_authorized_session(
+                                p, page_id, f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}",
+                                prefer_new_tab=False,
+                            )
+                            qa_page = session.page
+                            qa_page.goto(f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}",
+                                         wait_until="networkidle", timeout=60000)
+                            from fb_pipeline.browser.inbox.scroll_helpers import wait_for_inbox_shell, wait_for_initial_threads
+                            wait_for_inbox_shell(qa_page, logger, timeout_ms=30000)
+                            wait_for_initial_threads(qa_page, logger, timeout_ms=30000)
+                        qa_res = run_fetch_qa(page_id, fetch_started_at, qa_page, conn, logger)
                         stats["qa"] = qa_res
                     except Exception as qa_e:
                         logger.error(f"Fetch QA failed: {qa_e}")
@@ -456,9 +486,24 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
                 conn.close()
                 session.close_page()
                 logger.info(f"CDP Direct: Saved to FrankenSQLite. Stats: {stats}")
-                return {"success": not bool(stats.get("failed_threads")), "method": "cdp_direct",
-                        "error": "fetch_verification_failed" if stats.get("failed_threads") else None,
-                        "data": {"stats": stats}}
+                # code:inbox-fetch-qa-001:exit-gate
+                # Only a QA-2 hard reject means the stored conversation's
+                # message history or sender disagrees with Facebook. Worker
+                # verification/incomplete-run and QA-1 sidebar diagnostics
+                # remain visible in stats but must not stop the retry loop.
+                qa_status = (stats.get("qa") or {}).get("qa_status")
+                fetch_error = _fetch_stop_error(stats)
+                if fetch_error:
+                    logger.critical(f"FETCH_STOP_GATE: {fetch_error} (qa_status={qa_status}, "
+                                    f"failed_threads={stats.get('failed_threads')}, "
+                                    f"abandoned={stats.get('tasks_abandoned')}, stranded={stats.get('tasks_stranded')})")
+                elif stats.get("failed_threads") or stats.get("fetch_complete") is False or qa_status == "failed":
+                    logger.warning("FETCH_RETRYABLE_DIAGNOSTIC: qa_status=%s failed_threads=%s "
+                                   "fetch_complete=%s abandoned=%s stranded=%s",
+                                   qa_status, stats.get("failed_threads"), stats.get("fetch_complete"),
+                                   stats.get("tasks_abandoned"), stats.get("tasks_stranded"))
+                return {"success": fetch_error is None, "method": "cdp_direct",
+                        "error": fetch_error, "data": {"stats": stats}}
             except FacebookTemporaryBlockError as e:
                 logger.critical("FACEBOOK_FETCH_SAFETY_GATE: %s", e)
                 _notify_facebook_block(page_id, str(e))
@@ -549,8 +594,8 @@ def _fetch_messages_impl(page_input: str, credential_id: str, time_range: str = 
 
                 context.close()
                 browser.close()
-                return {"success": not bool(stats.get("failed_threads")), "method": "headless_fetch",
-                        "error": "fetch_verification_failed" if stats.get("failed_threads") else None,
+                return {"success": True, "method": "headless_fetch",
+                        "error": None,
                         "data": {"stats": stats}}
             except Exception as e:
                 import traceback
@@ -584,9 +629,10 @@ def main():
                         help="Stop after the page has this many messages in the local database.")
     parser.add_argument("--cdp", action="store_true", help="Scrape directly via CDP connection to Chrome on port 9222 (no cookie export/import).")
     parser.add_argument("--no-early-exit", action="store_true", help="Disable the targeted early-exit algorithm, allowing deep retroactive UI scrolls.")
-    parser.add_argument("--workers", type=int, default=10,
-                        help="Concurrent workers for classify_city_llm (default: 10). For --cdp fetches, this is "
-                             "the total number of tabs and is clamped to [1, 3] (1 orchestrator + at most 2 worker tabs).")
+    parser.add_argument("--workers", "--worker", type=int, default=None,
+                        help="Fetch workers: 0 uses only the orchestrator tab; 1 uses it sequentially; max: 3. "
+                             "For classify_city_llm, default: 10.")
+    parser.add_argument("--resume", default=None, metavar="PATH", help="Resume a parallel-fetch checkpoint using the original range/options.")
     parser.add_argument("--skip-qa", action="store_true", help="Skip the QA check after fetching.")
     parser.add_argument("--classify-city", action="store_true",
                         help="After fetch_messages, run the LLM city/program pass on the threads this run "
@@ -605,13 +651,13 @@ def main():
     
     if args.action == "fetch_messages":
         show_browser_flag = not args.headless
-        workers = _clamp_workers(args.workers, logger)
+        workers = _clamp_workers(args.workers if args.workers is not None else 1, logger)
         result = fetch_messages(args.pageId, args.credential, args.time_range,
                                 show_browser=show_browser_flag, force_refresh=args.refresh, refresh_older_than_days=args.refresh_older_than,
                                 max_threads=args.maxThreads, use_cdp=args.cdp,
                                 allow_early_exit=not args.no_early_exit,
                                 target_total_messages=args.targetMessages,
-                                workers=workers, classify_city=args.classify_city, skip_qa=args.skip_qa)
+                                workers=workers, classify_city=args.classify_city, skip_qa=args.skip_qa, resume_run=args.resume)
     elif args.action == "get_list_unique_user":
         result = get_list_unique_user(page_id, args.time_range)
     elif args.action == "fetch_message_by_user":
@@ -629,7 +675,7 @@ def main():
         conn = get_db_connection()
         llm_result = _post_scrape_llm_city_classify(
             conn, page_id, only_stale=not args.all_users and not args.missing_real_name,
-            only_missing_real_name=args.missing_real_name, workers=args.workers,
+            only_missing_real_name=args.missing_real_name, workers=args.workers if args.workers is not None else 10,
         )
         conn.close()
         result = {"success": True, "action": "classify_city_llm", **llm_result}
@@ -639,8 +685,12 @@ def main():
     print(json.dumps(result, indent=2, ensure_ascii=False))
     
     if not result.get("success", False):
-        if result.get("error") == "fetch_verification_failed":
+        if result.get("error") == "fetch_qa_message_history_or_sender_mismatch":
             sys.exit(76)
+        if result.get("error") in ("fetch_verification_failed", "fetch_qa_failed", "fetch_incomplete"):
+            # Backward compatibility for callers that still return the former
+            # diagnostic errors: do not let them stop the scheduler loop.
+            return
         sys.exit(75 if result.get("error") == "facebook_temporarily_blocked" else 1)
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import type { Seeker, SeekerDetail } from '@/lib/types';
 import { sortFacebookMessages } from '@/lib/funnel-filters';
 import { SeekerJourneyTimeline } from './seeker-journey-timeline';
 import { MessengerMessageList } from './messenger-message-list';
+import { PendingMessageHistory } from './pending-message-history';
 
 const PAGE_ID = '1548373332058326';
 
@@ -21,6 +22,7 @@ const SIDEBAR_CRITICAL_CSS = `
   .seeker-sidebar-journey { margin-bottom:16px; padding:12px; background:rgba(255,255,255,.02); border:1px solid var(--border-subtle); border-radius:10px; }
   .seeker-sidebar-loading { padding:20px; color:var(--text-muted); font-size:12px; text-align:center; }
   .seeker-sidebar-section { margin-bottom:12px; }
+  .seeker-sidebar-section--recent { padding:10px; background:rgba(255,255,255,.045); border:1px solid rgba(129,140,248,.24); border-radius:10px; box-shadow:0 4px 16px rgba(99,102,241,.12),inset 0 1px 0 rgba(255,255,255,.035); }
   .seeker-sidebar-section-title { margin-bottom:8px; color:var(--text-muted); font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
   .seeker-sidebar-comment { padding:8px 10px; margin-bottom:4px; border:1px solid rgba(245,158,11,.1); border-radius:8px; background:rgba(245,158,11,.04); }
   .seeker-sidebar-comment-link { display:inline-block; margin-top:4px; color:#60a5fa; font-size:10px; text-decoration:none; }
@@ -234,8 +236,10 @@ export function SeekerSidebar({
                 )}
               </div>
 
+              {seeker.source === 'dm' && !detail.messages?.length && <p>Chưa có tin nhắn đã xác minh.</p>}
+              <PendingMessageHistory history={detail.pendingHistory} />
               {detail.messages?.length > 0 && (
-                <div className="seeker-sidebar-section">
+                <div className="seeker-sidebar-section seeker-sidebar-section--recent">
                   <div className="seeker-sidebar-section-title">Recent Messages</div>
                   <MessengerMessageList
                     className="sidebar-recent-messages"
@@ -249,7 +253,7 @@ export function SeekerSidebar({
                       .map(message => ({
                         id: message.id,
                         masProposed: message.masProposed,
-                        sender: message.sender === 'Page' || message.sender === 'Auto_Page' ? (message.sender === 'Auto_Page' ? '@Auto_Page' : 'Page') : (message.sender === 'Customer' ? seeker.name : (message.sender || 'Unknown')),
+                        sender: message.sender === 'Page' || message.sender === 'Auto_Page' ? (message.sender === 'Auto_Page' ? 'Page (automated message)' : 'Page') : (message.sender === 'Customer' ? seeker.name : (message.sender || 'Unknown')),
                         content: message.content,
                         timestamp: message.messageTimestamp,
                         eventAt: message.messageAt,

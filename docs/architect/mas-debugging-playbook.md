@@ -1244,3 +1244,73 @@ lại từ đầu.
   [fetch-integrity-audit-2026-09-21.md](../report/fetch-integrity-audit-2026-09-21.md).
   Repeated DOM read chỉ kiểm tra stability; chưa phải hai nguồn độc lập hay
   bảo đảm 100%. Heading/PSID thiếu thì dừng, không khôi phục fallback đoán.
+
+### 2026-09-22 — seeker #14349: observation quarantine stale sau fetch đã xác minh
+
+- **Thread/case:** `/seekers/14349`, Dinh Nguyen Thi, thread
+  `1548373332058326_3684be99173d0160`. Đây là lỗi lifecycle của fetch evidence/UI,
+  không phải reply hoặc suy luận của MAS.
+- **Bằng chứng:** PostgreSQL có 10 `inbox_fetch_observations` từ 05:02–15:24 UTC
+  ngày 21/09, trong khi `threads.fetch_history_complete=1` và fetch xác minh hoàn
+  tất lúc 17:31 UTC. Targeted `--refresh --no-early-exit --maxThreads 10` ngày
+  22/09 persist cả 10 card, không failed/review/partial; QA 10/10, hard 0,
+  soft 0. Thread #14349 giữ 5 canonical turns, actor `explicit`, exact timestamp
+  và Facebook source ID; riêng “Học phí ?” là Customer lúc 08:40:07 UTC.
+- **Nguyên nhân:** `save_unresolved_observation()` ghi observation và đặt
+  `fetch_history_complete=0`, nhưng sau recrawl thành công không có lifecycle
+  xoá observation cũ. `web/src/lib/queries.ts` luôn lấy observation mới nhất
+  theo thread, nên UI tiếp tục hiện “Chờ xác minh” dù evidence canonical mới
+  đã đủ và `fetch_history_complete=1`.
+- **Khắc phục dữ liệu:** sau khi xác minh predicate `fetch_history_complete=1`
+  và `observed_at < fetched_at`, đã xoá 203 observation stale trên 82 threads
+  trong PostgreSQL; không xoá canonical messages hay observation của thread
+  chưa hoàn tất. Thread #14349 còn 0 observation.
+- **Theo dõi:** cần thêm cleanup idempotent vào persistence sau một fetch hoàn
+  tất, cùng regression: observation cũ biến mất sau recrawl verified, nhưng
+  observation còn lại khi `fetch_history_complete=0` hoặc recrawl thất bại.
+
+### 2026-09-22 — reaction Inbox: gắn annotation vào message, không lưu event rời
+
+- **Case:** seeker #14351 hiển thị nhiều dòng `❤ actor: unknown; scope:
+  message` sau fetch. Đây là crawler/UI evidence, không phải MAS đã thả
+  reaction outbound.
+- **Nguyên nhân:** kiến trúc cũ ghi mỗi icon vào `crawled_message_reactions`
+  và reader gửi event rời vào MAS. Khi Facebook chỉ render icon mà không có
+  actor label, UI hiện `unknown`; bubble bên trái/phải chỉ xác định người gửi
+  message, không phải người đã react.
+- **Khắc phục:** migration
+  `db_migrations/2026-09-22_message_reaction_annotations.sql` xoá hẳn bảng
+  cũ và thêm `messages.reaction_annotation_json`. Parser thử hover/tooltip
+  (`thread_detail_parser.py::hoverReactionLabel`) để giữ source evidence;
+  persistence cưỡng chế quy tắc hai người: reaction trên Page là Seeker,
+  reaction trên Customer là Page. `l3_pipeline.py::_reaction_annotations`
+  chỉ gắn reaction có target message thật, group actor/emoji thành `count`.
+  MAS nhận notation `[Reaction on preceding message] Seeker: thả 👍 ×2`, được
+  đánh dấu annotation nên không trở thành lượt hội thoại.
+- **Dữ liệu production:** đã drop `crawled_message_reactions`, xoá 23 rows;
+  không tác động bảng `reactions` (audit outbound).
+- **Kiểm chứng:** regression parser/persistence/conversation/MAS: 113 passed;
+  `cd web && npm run build`: pass.
+
+### 2026-09-23 — “Messenger User” không phải Fetch-QA mismatch
+
+- **Case:** full refresh ngày 22/09, assignment inbox #345, display name
+  `Messenger User`, thread `1548373332058326_c0b3442cb11bc36b`. Đây là
+  ingestion/worker-integrity case, không phải reply hoặc suy luận của MAS.
+- **Bằng chứng:** integrity report `logs/fetch-integrity/conflict-73hvkgw4.json`
+  có 21 bubble `sender=Unknown`; các source evidence chỉ chứa Page ID ở
+  `recipient_id`, `sender_id` và `participants`. Vì vậy validator ghi
+  `source_thread_identity_conflict`, `source_participant_conflict` và
+  `unverified_actor`. Điều này phù hợp với account Meta unavailable/deactivated
+  hoặc bị chặn, nhưng không đủ để suy actor hay persist lịch sử.
+- **Kết luận/gate:** case này xảy ra trước `run_fetch_qa`, không phải QA-1/QA-2,
+  nên không được blanket-exempt chỉ bằng display name. `Messenger User` phải
+  giữ observation/report fail-closed để audit. Loop-level policy hiện tại tại
+  `tools/l5_fetch_fb_messages.py::_fetch_stop_error` chỉ trả exit 76 cho QA-2
+  hard mismatch của message history/sender; failed worker và incomplete run là
+  `FETCH_RETRYABLE_DIAGNOSTIC`, do đó case này không chặn vòng fetch tiếp theo.
+- **Kiểm chứng:** `pytest tests/test_l5_fetch_fb_messages.py
+  tests/test_fetch_integrity.py tests/test_l3_parallel_fetch.py -q` →
+  **69 passed**. Chỉ thêm bypass nếu Meta render một marker unavailable rõ ràng
+  trong DOM/source contract; test phải chứng minh marker đó và rằng không có
+  message canonical nào được persist.

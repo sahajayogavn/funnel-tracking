@@ -155,6 +155,8 @@ def scroll_sidebar_and_wait(page, logger, scroll_round: int,
     pre_snapshot = sidebar_loading_snapshot(page)
     pre_count = pre_snapshot["count"]
     pre_fingerprint = pre_snapshot["fingerprint"]
+    initial_count = pre_count
+    initial_fingerprint = pre_fingerprint
 
     try:
         scroll_info = page.evaluate(r'''(config) => {
@@ -192,6 +194,12 @@ def scroll_sidebar_and_wait(page, logger, scroll_round: int,
                 before = scroller.scrollTop;
                 const delta = Math.max(160, Math.floor(scroller.clientHeight * 0.8));
                 scroller.scrollTop = Math.min(scroller.scrollTop + delta, scroller.scrollHeight);
+                // Setting scrollTop is normally sufficient, but this Inbox
+                // variant only asks React to fetch the next virtual page when
+                // its scroll listener receives an event.  In particular, the
+                // final small move to the current bottom otherwise leaves the
+                // same 8--10 recycled cards on screen forever.
+                scroller.dispatchEvent(new Event('scroll', {bubbles: true}));
                 after = scroller.scrollTop;
             } else if (conversationCards.length > 0) {
                 // Keep this DOM-only fallback for list variants that do expose
@@ -202,6 +210,7 @@ def scroll_sidebar_and_wait(page, logger, scroll_round: int,
                 before,
                 after,
                 domMoved: before >= 0 && after > before,
+                reachedDomEnd: before >= 0 && after >= (scroller.scrollHeight - scroller.clientHeight - 1),
                 targetX: rect ? Math.max(24, Math.min(window.innerWidth - 24, rect.left + rect.width / 2)) : null,
                 targetY: rect ? Math.max(80, Math.min(window.innerHeight - 24, rect.top + Math.min(rect.height / 2, 240))) : null,
                 targetHeight: rect ? rect.height : 0,
@@ -246,6 +255,11 @@ def scroll_sidebar_and_wait(page, logger, scroll_round: int,
     stagnant_loading_polls = 0
     observed_count = pre_count
     observed_fingerprint = pre_fingerprint
+    recovery_wheels_sent = 0
+    # The virtual list may take longer than the usual three 250ms stable
+    # polls to append its next page after we reach the current DOM bottom.
+    # Do not mistake that brief pagination gap for a completed scroll.
+    bottom_page_grace_ms = 2_500 if scroll_info.get("reachedDomEnd") else 0
 
     while True:
         snapshot = sidebar_loading_snapshot(page)
@@ -269,6 +283,24 @@ def scroll_sidebar_and_wait(page, logger, scroll_round: int,
                 f"sidebar_scroll_wait round={scroll_round} loading={effective_loading} "
                 f"count={snapshot['count']} elapsed_ms={elapsed_ms}"
             )
+            # A programmatic scroll can move the virtual container and show
+            # Meta's loading marker, yet its pagination reducer may only run
+            # after a trusted wheel input.  This is precisely the state seen
+            # in production: scrollTop advances, then the same cards and a
+            # spinner remain forever. Nudge the actual list after it has been
+            # static for two seconds, and once again later if necessary.
+            if (stagnant_loading_polls in (8, 40)
+                    and scroll_info.get("targetX") is not None):
+                try:
+                    page.mouse.move(scroll_info["targetX"], scroll_info["targetY"])
+                    page.mouse.wheel(0, max(720, min(1400, int(scroll_info.get("targetHeight") or 0) * 2)))
+                    recovery_wheels_sent += 1
+                    logger.warning(
+                        f"sidebar_scroll_loading_recovery round={scroll_round} "
+                        f"attempt={recovery_wheels_sent} elapsed_ms={elapsed_ms}"
+                    )
+                except Exception as exc:
+                    logger.warning(f"sidebar_scroll_loading_recovery_failed round={scroll_round}: {exc}")
             # Facebook can leave one loading marker rendered after card
             # pagination has stopped. Bound that static state independently
             # of the broader scroll timeout.
@@ -280,6 +312,7 @@ def scroll_sidebar_and_wait(page, logger, scroll_round: int,
                 )
                 snapshot["elapsed_ms"] = elapsed_ms
                 snapshot["stalled"] = True
+                snapshot["recovery_wheels_sent"] = recovery_wheels_sent
                 return snapshot
         else:
             stagnant_loading_polls = 0
@@ -294,13 +327,18 @@ def scroll_sidebar_and_wait(page, logger, scroll_round: int,
             else:
                 stable_polls += 1
 
-            if stable_polls >= 3:
+            if stable_polls >= 3 and elapsed_ms >= bottom_page_grace_ms:
                 reason = "stable_after_loading" if saw_loading else "no_change"
                 logger.info(
                     f"sidebar_scroll_complete round={scroll_round} "
                     f"count={snapshot['count']} reason={reason} elapsed_ms={elapsed_ms}"
                 )
                 snapshot["elapsed_ms"] = elapsed_ms
+                snapshot["progressed"] = (
+                    snapshot["count"] != initial_count
+                    or snapshot["fingerprint"] != initial_fingerprint
+                )
+                snapshot["dom_moved"] = bool(scroll_info.get("domMoved"))
                 return snapshot
 
         if elapsed_ms >= timeout_ms:
@@ -309,6 +347,11 @@ def scroll_sidebar_and_wait(page, logger, scroll_round: int,
                 f"count={snapshot['count']} loading={effective_loading} elapsed_ms={elapsed_ms}"
             )
             snapshot["elapsed_ms"] = elapsed_ms
+            snapshot["progressed"] = (
+                snapshot["count"] != initial_count
+                or snapshot["fingerprint"] != initial_fingerprint
+            )
+            snapshot["dom_moved"] = bool(scroll_info.get("domMoved"))
             return snapshot
 
         page.wait_for_timeout(poll_ms)

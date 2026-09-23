@@ -1,8 +1,8 @@
-"""Single Gemini configuration and transport for MAS LLM work.
+"""Provider configuration and transport for MAS LLM work.
 
 The project `.env` is the source of truth.  This deployment intentionally
-uses Google Gemini only: callers must not inherit an old OpenAI-compatible
-endpoint/key from the shell.
+uses the selected provider from the encoded project `.env`; callers must not
+inherit a stale provider endpoint or key from the shell.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import requests
 
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_OPENAI_COMPATIBLE_MODEL = "gpt-5.6-terra"
 
 
 class IncompleteGeminiResponse(RuntimeError):
@@ -20,15 +21,22 @@ class IncompleteGeminiResponse(RuntimeError):
 
 
 def get_llm_config() -> dict[str, str]:
-    """Load the sole allowed provider from the encoded project `.env`."""
+    """Load the active provider from the encoded project `.env`."""
     from tools.env_manager import load_credentials
 
     credentials = load_credentials(prefer_environment=False)
     provider = (credentials.get("LLM_PROVIDER") or "google").strip().lower()
+    if provider in {"openai", "openai-compatible", "openai_compatible"}:
+        api_key = (credentials.get("OPENAI_COMPATIBLE_KEY") or "").strip()
+        api_base = (credentials.get("OPENAI_COMPATIBLE_URL") or "").strip().rstrip("/")
+        models = (credentials.get("OPENAI_COMPATIBLE_MODELS") or DEFAULT_OPENAI_COMPATIBLE_MODEL).strip()
+        model = models.split(",", 1)[0].strip()
+        if not api_key or not api_base or not model:
+            raise RuntimeError("OpenAI-compatible credentials missing: configure OPENAI_COMPATIBLE_URL, OPENAI_COMPATIBLE_KEY, and OPENAI_COMPATIBLE_MODELS.")
+        return {"provider": "openai-compatible", "api_key": api_key, "api_base": api_base, "model": model}
     if provider not in {"google", "gemini"}:
         raise RuntimeError(
-            "This deployment is Gemini-only. Set LLM_PROVIDER=google and "
-            "configure GOOGLE_API_KEY in the project .env."
+            "Unsupported LLM_PROVIDER. Use google or openai-compatible."
         )
 
     api_key = (credentials.get("GOOGLE_API_KEY") or "").strip()
@@ -42,28 +50,55 @@ def get_llm_config() -> dict[str, str]:
 
 
 def setup_llm_env() -> dict[str, str]:
-    """Make Google ADK use the same project `.env` configuration.
+    """Make Google ADK use the selected project `.env` configuration.
 
     Removing legacy variables is deliberate: a process launched from an old
     shell must not silently route an MAS call to a different provider.
     """
     config = get_llm_config()
-    os.environ["GOOGLE_API_KEY"] = config["api_key"]
-    os.environ["ADK_MODEL"] = config["model"]
-    os.environ.pop("OPENAI_API_BASE", None)
-    os.environ.pop("OPENAI_API_KEY", None)
+    if config["provider"] == "google":
+        os.environ["GOOGLE_API_KEY"] = config["api_key"]
+        os.environ["ADK_MODEL"] = config["model"]
+        os.environ.pop("OPENAI_API_BASE", None)
+        os.environ.pop("OPENAI_API_KEY", None)
+    else:
+        os.environ["OPENAI_API_KEY"] = config["api_key"]
+        os.environ["OPENAI_API_BASE"] = config["api_base"]
+        os.environ["ADK_MODEL"] = f"openai/{config['model']}"
+        os.environ.pop("GOOGLE_API_KEY", None)
     return config
 
 
 def generate_text(*, config: dict[str, str], system_prompt: str, user_prompt: str,
                   temperature: float, max_tokens: int, timeout: int) -> tuple[str, dict[str, Any]]:
-    """Call native Gemini ``generateContent`` and return text plus safe usage.
+    """Call the selected provider and return text plus safe usage.
 
     The API key goes in ``x-goog-api-key`` rather than the URL so trace logs
     can store the endpoint without exposing a credential.
     """
+    if config.get("provider") == "openai-compatible":
+        response = requests.post(
+            f"{config['api_base']}/chat/completions",
+            json={"model": config["model"], "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}],
+                "temperature": temperature, "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"}},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {config['api_key']}"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        body = response.json()
+        text = str((body.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
+        if not text:
+            raise ValueError("OpenAI-compatible response contained no text choice")
+        usage = body.get("usage") or {}
+        return text, {"prompt_tokens": usage.get("prompt_tokens"),
+                      "completion_tokens": usage.get("completion_tokens"),
+                      "total_tokens": usage.get("total_tokens"),
+                      "finish_reason": (body.get("choices") or [{}])[0].get("finish_reason")}
     if config.get("provider") != "google":
-        raise RuntimeError("MAS LLM calls are Gemini-only for this deployment.")
+        raise RuntimeError("Unsupported MAS LLM provider.")
     model = config["model"].removeprefix("models/")
     url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
     payload = {

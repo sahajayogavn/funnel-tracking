@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import date, datetime, timezone
 from urllib.parse import parse_qs, urlparse
@@ -12,6 +13,17 @@ _MONTHS = {
     "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12,
     "december": 12,
 }
+
+
+def _observed_local(observed_at: str | None) -> datetime:
+    """The crawl moment in the browser's local zone (Meta renders labels in it)."""
+    try:
+        parsed = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return datetime.now()
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone().replace(tzinfo=None)
 
 
 def _normalise_day_context(value: str | None) -> str | None:
@@ -53,43 +65,110 @@ def _normalise_day_context(value: str | None) -> str | None:
 
 def verify_thread_switch(page, logger, name: str, prev_fb_url: str, pre_click_fingerprint: str,
                          is_first_thread: bool, thread_record) -> tuple[str, bool]:
-    """Reject unbound/mismatched navigation, including the first thread.
+    """Verify two stable polls using recipient URL and panel/selected card.
 
-    URL identity and a matching rendered heading must coexist in one poll.
-    A name, changed text, hovercard link or arbitrary sidebar link alone does
-    not bind a conversation to a Page-scoped recipient ID (PSID).
+    For a known uniquely named recipient, an exact panel heading also works
+    when Meta omits the URL recipient. Explicit URL conflicts still fail.
+    First-contact discovery and duplicate names require the URL recipient.
     """
     target = str(getattr(thread_record, "selected_item_id", "") or "").strip()
     page_id = str(getattr(thread_record, "page_id", "") or "").strip()
-    if not target.isdigit() or not page_id.isdigit():
+    discovering = not target and getattr(thread_record, "identity_discovery_clicked", False) is True
+    if not page_id.isdigit() or (not target.isdigit() and not discovering):
         logger.warning("thread_switch_failed reason=missing_numeric_page_or_recipient_id")
         return "", False
+    stable_candidate = ""
     for _ in range(20):
         try:
-            snapshot = page.evaluate('''() => ({
+            snapshot = page.evaluate('''() => {
+                const cards = Array.from(document.querySelectorAll(
+                    'div._5_n1, div[role="listitem"], a[role="link"][href*="selected_item_id"]'
+                )).filter(el => !el.closest('[role="tablist"]'));
+                const selectedCards = cards.map(card => {
+                    let node = card;
+                    let selected = false;
+                    // Meta puts its selection state on different wrappers in
+                    // different Inbox variants.  Do not walk all the way to
+                    // the list root: its state would apply to every card.
+                    for (let depth = 0; node && depth < 3; depth++, node = node.parentElement) {
+                        if (node.getAttribute('aria-selected') === 'true'
+                            || node.getAttribute('aria-current') === 'page') {
+                            selected = true;
+                            break;
+                        }
+                    }
+                    if (!selected) {
+                        selected = Array.from(card.querySelectorAll('[aria-selected="true"], [aria-current="page"]')).length > 0;
+                    }
+                    return {text: (card.innerText || '').trim(), selected};
+                }).filter(card => card.selected).slice(0, 3);
+                return {
                 url: location.href,
                 headings: Array.from(document.querySelectorAll(
                     'div[role="main"] h2[dir="auto"], div[role="main"] h1, '
-                    + 'div[role="main"] h3, div[role="main"] [role="heading"]'
-                )).filter(el => el.getClientRects().length).map(el => el.innerText.trim())
-            })''')
+                    + 'div[role="main"] h3, div[role="main"] [role="heading"], div._4ik4._4ik5'
+                )).filter(el => el.getClientRects().length && !el.closest(
+                    'div._5_n1, [role="listitem"], [role="tablist"], '
+                    + '[data-pagelet="GenericBizInboxThreadListViewBody"], '
+                    + '[data-pagelet="BizP13NInboxUinifiedThreadListView"]'
+                )).map(el => el.innerText.trim()),
+                selectedCards,
+                };
+            }''')
             parsed_url = urlparse(snapshot["url"])
-            qs = parse_qs(parsed_url.query)
+            qs = parse_qs(parsed_url.query, keep_blank_values=True)
+            candidate_values = qs.get("selected_item_id", [])
+            candidate = candidate_values[0] if len(candidate_values) == 1 else ""
             identity_matches = (parsed_url.hostname == "business.facebook.com"
-                                and qs.get("selected_item_id") == [target]
+                                and candidate.isdigit()
+                                and (discovering or candidate == target)
                                 and qs.get("asset_id") == [page_id])
             expected_name = " ".join(name.casefold().split())
             heading_matches = expected_name and any(
                 " ".join(str(value).casefold().split()) == expected_name
                 for value in snapshot.get("headings", [])
             )
-            if identity_matches and heading_matches:
-                logger.info("thread_switch_verified method=exact_page_recipient_and_heading")
-                return target, True
+            selected_card_matches = expected_name and any(
+                " ".join(str(card.get("text", "")).partition("\n")[0].casefold().split()) == expected_name
+                for card in snapshot.get("selectedCards", [])
+                if isinstance(card, dict)
+            )
+            heading_fallback = (
+                getattr(thread_record, "heading_identity_unique", False) is True
+                and target.isdigit() and heading_matches
+                and parsed_url.hostname == "business.facebook.com"
+                and qs.get("asset_id") == [page_id]
+                and "selected_item_id" not in qs
+            )
+            verified_candidate = target if heading_fallback else candidate
+            if heading_fallback or (identity_matches and (heading_matches or selected_card_matches)):
+                if stable_candidate == verified_candidate:
+                    thread_record.selected_item_id = verified_candidate
+                    logger.info("thread_switch_verified method=" + (
+                        "unique_name_and_panel" if heading_fallback else
+                        "discovered_psid_and_panel" if discovering
+                        else ("exact_page_recipient_and_panel" if heading_matches
+                              else "exact_page_recipient_and_selected_sidebar_card")))
+                    return verified_candidate, True
+                stable_candidate = verified_candidate
+            else:
+                stable_candidate = ""
         except Exception:
-            pass
+            stable_candidate = ""
         page.wait_for_timeout(500)
-    logger.warning("thread_switch_failed reason=identity_or_rendered_heading_unverified")
+    # Keep enough rendered evidence to diagnose future Meta layout changes
+    # without weakening the identity contract.  The values are already
+    # customer-visible Inbox labels and are intentionally truncated.
+    diagnostic = {
+        "url": (snapshot.get("url", "") if isinstance(locals().get("snapshot"), dict) else "")[:500],
+        "expected_name": name,
+        "headings": (snapshot.get("headings", []) if isinstance(locals().get("snapshot"), dict) else [])[:8],
+        "selected_cards": (snapshot.get("selectedCards", []) if isinstance(locals().get("snapshot"), dict) else [])[:3],
+    }
+    logger.warning(
+        "thread_switch_failed reason=identity_or_rendered_heading_unverified "
+        f"snapshot={json.dumps(diagnostic, ensure_ascii=False)}"
+    )
     return "", False
 
 
@@ -207,7 +286,8 @@ def scroll_up_message_panel(page, logger, name: str) -> int:
     return prev_msg_count
 
 
-def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dict]:
+def extract_thread_messages(page, *, observed_at: str | None = None, thread_name: str | None = None,
+                            verified_identity: tuple[str, str] | None = None) -> list[dict]:
     """Extract raw Inbox events without collapsing evidence into ``text``.
 
     ``text`` remains the backwards-compatible message body for the current
@@ -220,7 +300,7 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
     # at the timestamp displayed beside the target message.  Supplying this
     # outside the page script also makes replay fixtures deterministic.
     observed_at = observed_at or datetime.now(timezone.utc).isoformat()
-    raw_messages = page.evaluate(r'''(observedAt) => {
+    raw_messages = page.evaluate(r'''async ({observedAt, threadName}) => {
         let region = document.querySelector(
             'div[aria-label*="Message list container"], ' +
             'div[role="region"][aria-label*="message"]'
@@ -366,24 +446,48 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
             return bubbleTargetId || null;
         }
 
-        function parseReaction(img, bubble, targetId) {
+        async function hoverReactionLabel(img) {
+            // Meta places the actor list in a portal tooltip only after hover.
+            // Use real bubbling pointer/mouse events and wait briefly for that
+            // portal; absence is an unknown actor, never a bubble-side guess.
+            const visibleLabels = () => Array.from(document.querySelectorAll('[role="tooltip"], [aria-live="polite"], [aria-live="assertive"]'))
+                .filter(node => node.getClientRects().length)
+                .map(node => (node.getAttribute('aria-label') || node.innerText || '').trim())
+                .filter(Boolean);
+            const before = new Set(visibleLabels());
+            for (const eventName of ['pointerover', 'mouseover', 'mouseenter']) {
+                img.dispatchEvent(new MouseEvent(eventName, {bubbles: true, view: window}));
+            }
+            await new Promise(resolve => setTimeout(resolve, 120));
+            // A stale tooltip from the preceding icon is not actor evidence
+            // for this one. Prefer only labels created/changed by this hover.
+            return visibleLabels().filter(label => !before.has(label)).join(' | ');
+        }
+
+        function reactionActors(label) {
+            const match = (label || '').match(/^(.+?)\s+(?:reacted|đã thả cảm xúc|đã bày tỏ cảm xúc)\b/i);
+            if (!match) return [];
+            return match[1].split(/\s*,\s*|\s+(?:and|và)\s+/i)
+                .map(actor => actor.trim()).filter(actor => actor && !/\b\d+\s+(?:others?|người khác)\b/i.test(actor));
+        }
+
+        async function parseReaction(img, bubble, targetId) {
             let emoji = (img.getAttribute('alt') || '').trim();
             if (!emoji || !['❤', '❤️', '👍', '😆', '😂', '😮', '😢', '😡', 'Like', 'Love', 'Haha', 'Wow', 'Sad', 'Angry'].includes(emoji)) return null;
             let evidence = evidenceText(img, bubble);
             let label = evidence.match(/aria-label=([^|]+)/i);
             let observed = label ? label[1].trim() : '';
-            let actor = 'unknown';
-            let actorRole = 'unknown';
-            let actorMatch = observed.match(/^(.+?)\s+(?:reacted|đã thả cảm xúc|đã bày tỏ cảm xúc)\b/i);
-            if (actorMatch) {
-                actor = actorMatch[1].trim();
-                if (/^(you|bạn)$/i.test(actor)) actorRole = 'Page';
-            }
+            const hoverLabel = await hoverReactionLabel(img);
+            observed = [observed, hoverLabel].filter(Boolean).join(' | ');
             let control = reactionControl(img, bubble);
             let resolvedTarget = reactionTargetId(control, targetId);
             let targetType = /(?:conversation|thread|cuộc trò chuyện)/i.test(observed)
                 ? 'thread' : (resolvedTarget ? 'message' : 'unknown');
             let targetMessageId = targetType === 'message' ? resolvedTarget : null;
+            const actors = reactionActors(observed);
+            const actorRows = actors.length ? actors : ['unknown'];
+            return actorRows.map(actor => {
+            let actorRole = /^(you|bạn)$/i.test(actor) ? 'Page' : 'unknown';
             let parseConfidence = actor !== 'unknown' && targetType !== 'unknown' ? 'explicit'
                 : (actor !== 'unknown' || targetType !== 'unknown' ? 'partial' : 'unknown');
             return {
@@ -407,6 +511,7 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
                 target_scope: targetType,
                 evidence: observed || evidence || null,
             };
+            });
         }
 
         function explicitSender(node, stopAt, bodySegments = []) {
@@ -434,6 +539,106 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
             if (pageMatch) return {sender: 'Page', evidence};
             if (customerMatch) return {sender: 'Customer', evidence};
             return {sender: null, evidence: evidence || null};
+        }
+
+        function visualSender(node, bubble, region, segments) {
+            // Measure the painted body, never the first coloured descendant
+            // (which may belong to a quote, link preview, or reaction).
+            let paint = null;
+            for (let current = node; current && current !== region; current = current.parentElement) {
+                if (segments.filter(s => current.contains(s.node)).length > 1) break;
+                const style = getComputedStyle(current);
+                const bg = style.backgroundColor;
+                if ((bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)') || style.backgroundImage !== 'none') {
+                    paint = {node: current, color: bg, image: style.backgroundImage};
+                    break;
+                }
+                if (current === bubble) break;
+            }
+            const target = paint ? paint.node : node;
+            const rect = target.getBoundingClientRect(), lane = region.getBoundingClientRect();
+            const left = rect.left - lane.left, right = lane.right - rect.right;
+            const delta = left - right;
+            const measurable = lane.width > 0 && rect.width > 0 && rect.width < lane.width * 0.9;
+            const side = measurable && Math.abs(delta) > Math.max(24, lane.width * 0.08)
+                ? (delta > 0 ? 'right' : 'left') : 'center';
+            let centered = false;
+            for (let current = node; current && current !== region; current = current.parentElement) {
+                if (segments.filter(s => current.contains(s.node)).length > 1) break;
+                const style = getComputedStyle(current);
+                if (style.textAlign === 'center' ||
+                    (style.display.includes('flex') && style.justifyContent === 'center')) centered = true;
+                if (current === bubble) break;
+            }
+            const evidence = {side, color: paint?.color || null, image: paint?.image || null,
+                centered: centered && side === 'center', painted: !!paint};
+            // Compare typography with identified message bodies in this panel,
+            // not a fixed pixel size (zoom/theme/locale can change it).
+            const bodyStyles = Array.from(region.querySelectorAll('.x1y1aw1k'))
+                .filter(el => el.closest('[data-message-id], [data-messageid]') &&
+                    !isReplyOrQuote(el, region) && el.getClientRects().length)
+                .map(el => getComputedStyle(el));
+            const sizes = bodyStyles.map(s => parseFloat(s.fontSize)).filter(Number.isFinite).sort((a,b) => a-b);
+            const baseline = sizes.length ? sizes[Math.floor(sizes.length / 2)] : null;
+            const ownStyle = getComputedStyle(node);
+            evidence.font_size = parseFloat(ownStyle.fontSize) || null;
+            evidence.body_font_size = baseline;
+            evidence.secondary_text = !!baseline && evidence.font_size <= baseline * 0.9 &&
+                bodyStyles.some(s => s.color !== ownStyle.color);
+            evidence.standalone = segments.length === 1 && !isReplyOrQuote(node, bubble);
+            return {sender: paint && side !== 'center' ? (side === 'right' ? 'Page' : 'Customer') : null,
+                evidence};
+        }
+
+        function eventLinks(node, bubble, segments) {
+            let root = node;
+            for (let current = node; current; current = current.parentElement) {
+                if (segments.filter(s => current.contains(s.node)).length > 1) break;
+                root = current;
+                if (current === bubble) break;
+            }
+            // Only links in this bubble: never scan the conversation/sidebar.
+            const links = Array.from(root.querySelectorAll('a[href]')).filter(a => !isReplyOrQuote(a, bubble))
+                .map(a => ({url: a.href, label: (a.innerText || '').trim()}));
+            for (const element of [root, ...root.querySelectorAll('[data-ad-id], [data-post-id]')]) {
+                if (isReplyOrQuote(element, bubble)) continue;
+                for (const attr of ['data-ad-id', 'data-post-id']) {
+                    const id = element.getAttribute(attr);
+                    if (id && /^\d+$/.test(id)) links.push({
+                        url: attr === 'data-ad-id' ? 'https://www.facebook.com/ads/?ad_id=' + id
+                            : 'https://www.facebook.com/permalink.php?story_fbid=' + id,
+                        evidence: attr + '=' + id,
+                    });
+                }
+            }
+            return links;
+        }
+
+        function structuralSender(bubble, stopAt, expectedName, startNode) {
+            // code:inbox-sender-evidence-001:structural
+            // Meta lays out the Page's own messages right-aligned inside a
+            // `flex-direction: row-reverse` wrapper and shows the seeker's
+            // avatar (img alt = conversation name) beside incoming clusters.
+            // Both are DOM structure Meta renders for the actor, not colour
+            // or prose heuristics, so they are persisted as `structural`
+            // evidence (distinct from an explicit "You sent" label).
+            // The reversed wrapper sits between the text node and the
+            // cluster (`.x1fqp7bg`), so walk up from the segment itself.
+            for (let current = startNode || bubble; current && current !== stopAt; current = current.parentElement) {
+                if (window.getComputedStyle(current).flexDirection === 'row-reverse') {
+                    return {sender: 'Page', evidence: 'layout=row-reverse'};
+                }
+            }
+            let norm = value => (value || '').toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+            if (expectedName) {
+                for (let img of Array.from(bubble.querySelectorAll('img[alt]'))) {
+                    let alt = img.getAttribute('alt') || '';
+                    if (norm(alt) === norm(expectedName)) {
+                        return {sender: 'Customer', evidence: 'avatar-alt=' + alt.trim()};
+                    }
+                }
+            }
+            return {sender: null, evidence: null};
         }
 
         function directBodyText(container, bubble) {
@@ -626,8 +831,8 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
                     : null;
                 for (let img of allImgs) {
                     if (!textImgs.includes(img)) {
-                        let reaction = parseReaction(img, el, bubbleSourceId);
-                        if (reaction) reactions.push(reaction);
+                        let parsed = await parseReaction(img, el, bubbleSourceId);
+                        if (parsed) reactions.push(...parsed);
                     }
                 }
 
@@ -647,12 +852,18 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
                 // so makes an attribution claim the DOM did not establish.
                 for (let segment of bodySegments) {
                     let senderInfo = explicitSender(segment.node, el, bodySegments);
+                    let structural = structuralSender(el, region, threadName, segment.node);
+                    let visual = visualSender(segment.node, el, region, bodySegments);
                     let segmentIndex = bodySegments.indexOf(segment);
                     results.push({
                         htmlStr, bg, text: segment.text, body: segment.text,
+                        visual_sender: visual.sender, visual_evidence: visual.evidence,
+                        source_links: eventLinks(segment.node, el, bodySegments),
                         sender: senderInfo.sender,
                         sender_confidence: senderInfo.sender ? 'explicit' : 'unknown',
                         sender_evidence: senderInfo.evidence,
+                        structural_sender: structural.sender,
+                        structural_evidence: structural.evidence,
                         source_id: bodySourceIds[segmentIndex],
                         reply_to_message_id: replyTarget,
                         quoted_sender: quoteSenderInfo.sender,
@@ -667,11 +878,14 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
                 // structured event rather than manufacturing an emoji text.
                 if (!bodySegments.length && reactions.length) {
                     let senderInfo = explicitSender(el, htmlContainer);
+                    let structural = structuralSender(el, region, threadName);
                     results.push({
                         htmlStr, bg, text: '', body: '', source_id: bubbleSourceId,
                         sender: senderInfo.sender,
                         sender_confidence: senderInfo.sender ? 'explicit' : 'unknown',
                         sender_evidence: senderInfo.evidence,
+                        structural_sender: structural.sender,
+                        structural_evidence: structural.evidence,
                         reply_to_message_id: null,
                         quoted_sender: quoteSenderInfo.sender,
                         quoted_sender_confidence: quoteSenderInfo.confidence,
@@ -682,8 +896,19 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
             }
         }
         return results;
-    }''', observed_at)
+    }''', {"observedAt": observed_at, "threadName": thread_name or ""})
 
+    from fb_pipeline.contracts.l1_message_time import resolve_message_at
+
+    observed_local = _observed_local(observed_at)
+    from fb_pipeline.contracts.l1_message_kind import classify_message_kind, KIND_SYSTEM_BANNER
+    from fb_pipeline.persistence.l4_inbox_events import source_target
+    color_sides = {}
+    for raw in raw_messages:
+        visual = raw.get("visual_evidence") or {}
+        if raw.get("visual_sender"):
+            key = (visual.get("color"), visual.get("image"))
+            color_sides.setdefault(key, set()).add(raw["visual_sender"])
     final_messages = []
     for raw in raw_messages:
         text = (raw.get("body") if raw.get("body") is not None else raw.get("text") or "").replace('\u200b', '').strip()
@@ -692,33 +917,75 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
             continue
             
         low_text = text.lower()
-        # Filter out Facebook system boundary messages that lack proper bubble styling
-        if "assigned this conversation" in low_text or "đã giao cuộc trò chuyện" in low_text or "đã chỉ định cuộc trò chuyện" in low_text:
+        # Keep operational banners as System events. UI controls themselves
+        # are not events and still stay out of the parser output.
+        if low_text in ("learn more", "tìm hiểu thêm", "close", "đóng", "previous", "next", "trước", "tiếp", "improve ai response"):
             continue
-        if "resolved this conversation" in low_text or "đã giải quyết cuộc trò chuyện" in low_text:
-            continue
-        if "you can now call each other" in low_text or "giờ đây, các bạn có thể gọi" in low_text:
-            continue
-        if "lead stage set to" in low_text or "trạng thái khách hàng được đặt" in low_text: # Lead stage notifications
-            continue
-        if low_text.strip() == "learn more" or low_text.strip() == "tìm hiểu thêm": # Frequently embedded ad CTA button text
-            continue
-        if low_text.strip() in ("close", "đóng", "previous", "next", "trước", "tiếp", "improve ai response"): # System/UI buttons
-            continue
+
         if "previous\n[quoted reply/link]: close\n[quoted reply/link]: next" in low_text:
             continue
 
         raw_sender_confidence = raw.get("sender_confidence")
         explicit_sender = raw.get("sender") if raw_sender_confidence == "explicit" else None
-        # Sender colour/alignment is not evidence of identity.  Preserve it
-        # only as a diagnostic candidate; downstream must treat the actor as
-        # unknown unless Facebook exposed an explicit self/page signal.
+        structural_sender = raw.get("structural_sender")
+        # Bubble colour is not evidence of identity.  Preserve it only as a
+        # diagnostic candidate.  Layout/avatar structure (see
+        # structuralSender) is DOM evidence and is persisted as `structural`.
         sender_candidate = detect_sender(raw.get("htmlStr", ""), raw.get("bg", ""))
-        sender = explicit_sender or "Unknown"
-        sender_confidence = "explicit" if explicit_sender else "unknown"
+        sender_evidence = raw.get("sender_evidence")
+        visual = raw.get("visual_evidence") or {}
+        visual_sender = raw.get("visual_sender")
+        kind = classify_message_kind(text)
+        human_evidence = bool(raw.get("source_id") or explicit_sender or structural_sender or visual_sender)
+        if kind == KIND_SYSTEM_BANNER and human_evidence:
+            # A person can type the same words as a banner. A painted side
+            # bubble remains that person's message.
+            kind = "message"
+        # A centred, unpainted operational row is a system event. Preserve
+        # it (including ad/post links) separately from conversational turns.
+        linked_notice = (visual.get("secondary_text") and visual.get("standalone")
+                         and not raw.get("quoted_text") and not raw.get("reply_to_message_id")
+                         and any(source_target(link.get("url"))[0] in {"ad", "post"}
+                                 for link in raw.get("source_links") or []))
+        structural_notice = (not human_evidence and not visual.get("painted")
+                             and (visual.get("centered") or linked_notice))
+        if kind == KIND_SYSTEM_BANNER or structural_notice:
+            kind = KIND_SYSTEM_BANNER
+            sender, sender_confidence = "System", "structural"
+            sender_evidence = "system-row:" + json.dumps(visual, sort_keys=True)
+        elif visual_sender:
+            sides = color_sides.get((visual.get("color"), visual.get("image")), set())
+            conflict = len(sides) > 1 or (explicit_sender and explicit_sender != visual_sender)
+            sender, sender_confidence = ("Unknown", "unknown") if conflict else (visual_sender, "structural")
+            sender_evidence = "visual:" + json.dumps({**visual, "conflict": bool(conflict)}, sort_keys=True)
+        elif explicit_sender:
+            sender, sender_confidence = explicit_sender, "explicit"
+        elif structural_sender:
+            sender, sender_confidence = structural_sender, "structural"
+            sender_evidence = raw.get("structural_evidence")
+        else:
+            sender, sender_confidence = "Unknown", "unknown"
         raw_day_context = raw.get("day_context")
         day_context = _normalise_day_context(raw_day_context)
         time_precision = raw.get("time_precision", "unknown")
+        timestamp = raw.get("timestamp", "")
+        time_evidence = None
+        # code:inbox-msg-abs-time-001:relative-label
+        # Meta renders a bare clock only for today and "<Weekday> <clock>"
+        # only for the last seven days; older bubbles carry a full date.
+        # Such a label therefore resolves to exactly one calendar day
+        # relative to the moment it was observed, which is recorded as
+        # evidence.  Labels that are ambiguous stay unresolved.
+        if not day_context and time_precision == "date_time" and timestamp:
+            stamp, approximate = resolve_message_at(timestamp, observed_local)
+            if stamp and not approximate:
+                resolved = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+                day_context = resolved.date().isoformat()
+                time_precision = "date_time"
+                time_evidence = f"label={timestamp!r} resolved_against_observed_at={observed_local.isoformat(sep=' ', timespec='minutes')}"
+                # Store an absolute label so every later resolution
+                # (persistence, cross-checks) reads the same instant.
+                timestamp = resolved.strftime("%b %-d, %Y, %-I:%M %p")
         # A non-ISO day label is evidence, not a resolved calendar day.  Keep
         # the label in raw_timestamp/timestamp, but make the uncertainty
         # machine-readable for persistence and downstream formatters.
@@ -729,16 +996,20 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
         print(f"DEBUG_COLOR_VAL text='{low_text[:20]}' bg='{raw.get('bg', '')}' sender='{sender}' confidence='{sender_confidence}' candidate='{sender_candidate}'", flush=True)
         final_messages.append({
             "sender": sender,
+            "kind": kind,
+            "source_links": raw.get("source_links") or [],
             "text": text,
             "body": text,
             "sender_confidence": sender_confidence,
             "sender_candidate": sender_candidate,
-            "sender_evidence": raw.get("sender_evidence"),
+            "sender_evidence": sender_evidence,
             "source_id": raw.get("source_id"),
-            "timestamp": raw.get("timestamp", ""),
+            "timestamp": timestamp,
             "raw_timestamp": raw.get("raw_timestamp") or raw.get("timestamp", ""),
             "day_context": day_context,
             "time_precision": time_precision,
+            "time_evidence": time_evidence,
+            "observed_at": observed_at,
             "reply_to_message_id": raw.get("reply_to_message_id"),
             "quoted_sender": raw.get("quoted_sender") or "unknown",
             "quoted_sender_confidence": raw.get("quoted_sender_confidence") or (
@@ -749,7 +1020,8 @@ def extract_thread_messages(page, *, observed_at: str | None = None) -> list[dic
             "reactions": reactions,
         })
 
-    return final_messages
+    from .facebook_message_source import reconcile_source
+    return reconcile_source(page, final_messages, observed_at, verified_identity=verified_identity)
 
 
 def extract_ad_id_labels(page) -> list:

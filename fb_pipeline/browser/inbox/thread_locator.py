@@ -264,31 +264,14 @@ def locate_thread_direct(page, page_id: str, task, logger) -> LocateResult:
 
 
 def locate_thread(page, page_id: str, task, logger, absolute_top: float = 0) -> LocateResult:
-    """Run the full locate ladder: L0 direct-URL, falling through to L1
-    sidebar identity locate. Returns whichever step's ``LocateResult`` won
-    (or L1's failure result if both steps fail).
-
-    # code:inbox-parallel-fetch-001:locator-direct
-    """
-    l0_result = locate_thread_direct(page, page_id, task, logger)
-    if l0_result.clicked:
-        return l0_result
-
-    l1_result = locate_thread_in_sidebar(page, task, logger, absolute_top=absolute_top)
-    # Retrospective [2026-09-16]: when L0 already navigated this tab to the
-    # target PSID but was rejected on a soft check, the sidebar click in L1
-    # produces no URL change, so verify_thread_switch would report
-    # "no_url_change". Reporting prev_fb_url="" lets the caller treat the PSID
-    # already in the URL as the confirmed switch (it *is* the target PSID).
-    if l1_result.clicked:
-        psid = _task_psid(task)
-        try:
-            current = getattr(page, "url", "") or ""
-        except Exception:
-            current = ""
-        if psid and psid == _selected_item_id_from_url(current) and l1_result.prev_fb_url == psid:
-            l1_result.prev_fb_url = ""
-    return l1_result
+    """Try the sidebar first; navigate by the saved Facebook ID on failure."""
+    sidebar = locate_thread_in_sidebar(page, task, logger, absolute_top=absolute_top)
+    if sidebar.clicked:
+        return sidebar
+    if _task_psid(task):
+        logger.info(f"Sidebar lookup failed for '{task.record.thread_name}'; falling back to saved conversation URL.")
+        return locate_thread_direct(page, page_id, task, logger)
+    return sidebar
 
 
 def _task_psid(task) -> str:
@@ -303,7 +286,7 @@ def _selected_item_id_from_url(url: str) -> str:
         return ""
 
 
-def locate_thread_in_sidebar(page, task_or_record, logger, absolute_top: float = 0) -> LocateResult:
+def locate_thread_in_sidebar(page, task_or_record, logger, absolute_top: float = 0, *, visible_only: bool = False) -> LocateResult:
     """Jump to the Stage 1 scroll hint, then find and click the thread card
     by identity (identity key -> PSID -> hovercard -> name -> name+preview),
     retrying against a virtualized sidebar list.
@@ -321,7 +304,8 @@ def locate_thread_in_sidebar(page, task_or_record, logger, absolute_top: float =
 
     name = thread_record.thread_name
 
-    if abs_top > 0:
+    thread_record.identity_discovery_clicked = False
+    if abs_top > 0 and not visible_only:
         jump_target = max(0, int(abs_top) - 150)
         try:
             page.evaluate(f'''(pos) => {{
@@ -367,7 +351,7 @@ def locate_thread_in_sidebar(page, task_or_record, logger, absolute_top: float =
     except Exception:
         target_time_parsed = None
     click_lookup_started = time.monotonic()
-    while not clicked and click_attempts < 150:
+    while not clicked and click_attempts < (3 if visible_only else 150):
         elapsed_click_wait_ms = int((time.monotonic() - click_lookup_started) * 1000)
         if elapsed_click_wait_ms >= MAX_THREAD_LOADING_WAIT_MS:
             logger.warning(
@@ -378,7 +362,17 @@ def locate_thread_in_sidebar(page, task_or_record, logger, absolute_top: float =
         click_attempts += 1
         try:
             clicked = page.evaluate(r'''({sidebarIdentityKey, threadSelector, targetName, targetSelectedItemId, targetPreviewText, targetFbUrl}) => {
-                let candidates = Array.from(document.querySelectorAll(threadSelector));
+                let candidates = Array.from(document.querySelectorAll(threadSelector))
+                    .filter(c => c.getClientRects().length && !c.closest('[role="tablist"]'));
+                // First-contact discovery cannot choose between namesakes by
+                // taking the first card. Require one visible name match; a
+                // later identity-bearing observation can resolve ambiguity.
+                if (!targetSelectedItemId) {
+                    const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                    const named = candidates.filter(c => norm((c.innerText || '').split('\n')[0]) === norm(targetName));
+                    if (named.length !== 1) return false;
+                    candidates = named;
+                }
                 function pickTimeToken(lines) {
                     for (let i = lines.length - 1; i >= 1; i--) {
                         const token = (lines[i] || '').trim();
@@ -479,13 +473,14 @@ def locate_thread_in_sidebar(page, task_or_record, logger, absolute_top: float =
 
                 // If multiple name matches, fallback to preview text resolving
                 let norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-                for (let mc of matchCandidates) {
+                const previewMatches = matchCandidates.filter(mc => {
                     let preLines = mc.lines.slice(1).join(' ');
-                    if (!targetPreviewText || norm(preLines).includes(norm(targetPreviewText)) || norm(targetPreviewText).includes(norm(preLines))) {
-                        mc.c.scrollIntoView({block: "center"});
-                        mc.c.click();
-                        return true;
-                    }
+                    return targetPreviewText && (norm(preLines).includes(norm(targetPreviewText)) || norm(targetPreviewText).includes(norm(preLines)));
+                });
+                if (previewMatches.length === 1) {
+                    previewMatches[0].c.scrollIntoView({block: "center"});
+                    previewMatches[0].c.click();
+                    return true;
                 }
 
                 return false;
@@ -580,6 +575,7 @@ def locate_thread_in_sidebar(page, task_or_record, logger, absolute_top: float =
                 except Exception as e:
                     logger.error(f"Error executing progressive sidebar scroll: {e}")
 
+    thread_record.identity_discovery_clicked = bool(clicked)
     if not clicked:
         logger.warning(f"Failed to verify click for thread '{name}' in Stage 2 after {click_attempts} scroll attempts.")
 

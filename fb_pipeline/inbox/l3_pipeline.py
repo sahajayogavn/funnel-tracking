@@ -149,7 +149,8 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
     # from corrupting the ad record, that would leak another seeker's messages
     # into Signal 3 for every later classification using this ad.
     ad_context = sanitize_ad_content(ad_context)
-    db_msgs = [{"sender": m.get("sender"), "content": m.get("text", "")} for m in js_messages]
+    db_msgs = [{"sender": m.get("sender"), "content": m.get("text", "")} for m in js_messages
+               if (m.get("kind") or classify_message_kind(m.get("text", ""))) == KIND_MESSAGE]
     user_info = extract_user_info(db_msgs, thread_record.thread_name, ad_context)
     # Classification is intentionally deferred to one batch + independent
     # verification pass after crawling. This local fallback must never make a
@@ -185,6 +186,8 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
                 sender_evidence=msg.get("sender_evidence") or None,
                 quote_evidence=msg.get("quote_evidence") or None,
                 reactions=reactions,
+                kind=msg.get("kind") or classify_message_kind(text),
+                source_links=list(msg.get("source_links") or []),
             )
         )
 
@@ -216,6 +219,7 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
         thread_lines=thread_record.thread_lines,
         dom_index=thread_record.dom_index,
         sidebar_time_text=thread_record.sidebar_time_text,
+        history_complete=thread_record.history_complete,
         sidebar_timestamp_ms=thread_record.sidebar_timestamp_ms,
         sidebar_time_kind=thread_record.sidebar_time_kind,
         sidebar_time_source=thread_record.sidebar_time_source,
@@ -232,88 +236,91 @@ def enrich_thread_record(thread_record: ThreadRecord, js_messages: list, extract
     )
 
 
-def _persist_crawled_reactions(cursor, thread_id: str, reactions: list[dict],
-                               message_source_id: str | None = None) -> None:
-    """Persist browser-observed reactions without attributing missing facts.
+def _reaction_annotations(messages: list[InboxMessage]) -> dict[str, list[dict]]:
+    """Group observed reactions by their *message* target for one snapshot.
 
-    This intentionally writes a separate evidence table from the legacy
-    ``reactions`` table, which tracks the application's own outbound actions.
-    A reaction attached by the DOM to a bubble is not proof that the bubble's
-    sender performed it, so target and actor are copied only from the parser's
-    structured observation and otherwise remain ``unknown``/NULL.
+    Inbox is operated as a two-person conversation: a reaction on a Page turn
+    is from the Seeker, and a reaction on a Seeker turn is from the Page.
+    This is a product rule, deliberately stronger than Facebook's often
+    incomplete hover tooltip. Unbound/thread reactions have no message to
+    annotate and are discarded.
     """
-    for reaction in reactions or []:
-        if not isinstance(reaction, dict):
-            continue
-        # The enclosing message source id is a direct DOM association, not an
-        # actor/target inference. It remains a source reference only; target
-        # fields below stay unknown unless the parser observed them explicitly.
-        source_id = (
-            reaction.get("source_id") or message_source_id or ""
-        ).strip() or None
-        actor = (reaction.get("actor") or "unknown").strip() or "unknown"
-        emoji = (reaction.get("emoji") or "unknown").strip() or "unknown"
-        target_type = (reaction.get("target_type") or "unknown").strip() or "unknown"
-        target_message_id = (reaction.get("target_message_id") or "").strip() or None
-        observed_at = (reaction.get("observed_at") or "").strip() or None
-        occurred_at = (reaction.get("occurred_at") or "").strip() or None
-        raw_label = (reaction.get("raw_label") or "").strip() or None
-        parse_confidence = (reaction.get("parse_confidence") or "unknown").strip() or "unknown"
-        actor_role = (reaction.get("actor_role") or "unknown").strip() or "unknown"
-        target_scope = (reaction.get("target_scope") or target_type).strip() or "unknown"
-        evidence = (reaction.get("evidence") or "").strip() or None
-
-        # The key is a snapshot evidence fingerprint, not an invented Facebook
-        # id.  It permits different people/emojis on the same target while
-        # making an unchanged re-crawl idempotent.
-        key_material = json.dumps(
-            {
-                "source_id": source_id,
-                "actor": actor,
-                "emoji": emoji,
-                "target_type": target_type,
-                "target_message_id": target_message_id,
-                "observed_at": observed_at,
-                "occurred_at": occurred_at,
-                "raw_label": raw_label,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        reaction_key = hashlib.sha256(key_material.encode("utf-8")).hexdigest()
-        cursor.execute(
-            """INSERT INTO crawled_message_reactions
-               (thread_id, reaction_key, source_id, actor, actor_role, emoji, target_type,
-                target_message_id, target_scope, observed_at, occurred_at, raw_label,
-                evidence, parse_confidence)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(thread_id, reaction_key) DO UPDATE SET
-                   actor=excluded.actor, actor_role=excluded.actor_role,
-                   target_type=excluded.target_type, target_message_id=excluded.target_message_id,
-                   target_scope=excluded.target_scope, observed_at=excluded.observed_at,
-                   occurred_at=excluded.occurred_at, raw_label=excluded.raw_label,
-                   evidence=excluded.evidence, parse_confidence=excluded.parse_confidence""",
-            (
-                thread_id,
-                reaction_key,
-                source_id,
-                actor,
-                actor_role,
-                emoji,
-                target_type,
-                target_message_id,
-                target_scope,
-                observed_at,
-                occurred_at,
-                raw_label,
-                evidence,
-                parse_confidence,
-            ),
-        )
+    grouped: dict[str, dict[tuple[str, str, str], dict]] = {}
+    target_senders = {
+        str(message.source_id).strip(): (message.sender or "Unknown").strip()
+        for message in messages if message.source_id
+    }
+    for message in messages:
+        for reaction in message.reactions or []:
+            if not isinstance(reaction, dict):
+                continue
+            target = str(reaction.get("target_message_id") or "").strip()
+            if (reaction.get("target_type") or "message") != "message" or not target:
+                continue
+            target_sender = target_senders.get(target, "")
+            if target_sender in {"Page", "Auto_Page"}:
+                label, confidence = "Seeker", "two_party_rule"
+            elif target_sender in {"Customer", "Seeker"}:
+                label, confidence = "Page", "two_party_rule"
+            else:
+                # No target actor means the two-party rule cannot be applied;
+                # retain explicit hover identity if there is one rather than
+                # arbitrarily choosing a participant.
+                role = str(reaction.get("actor_role") or "unknown").strip()
+                actor = str(reaction.get("actor") or "unknown").strip() or "unknown"
+                label = "Page" if role.casefold() == "page" or actor.casefold() in {"you", "bạn"} else (
+                    "Seeker" if role.casefold() == "customer" else actor
+                )
+                confidence = str(reaction.get("parse_confidence") or "unknown").strip() or "unknown"
+            emoji = str(reaction.get("emoji") or "unknown").strip() or "unknown"
+            bucket = grouped.setdefault(target, {})
+            key = (label, emoji, confidence)
+            item = bucket.setdefault(key, {"actor": label, "emoji": emoji, "count": 0, "confidence": confidence})
+            item["count"] += 1
+    return {target: list(items.values()) for target, items in grouped.items()}
 
 
 # code:bug-inbox-thread-name-001:persist-valid-fb-name
+# code:inbox-msg-order-001:resequence
+def resequence_thread_by_time(cursor, thread_id: str) -> int:
+    """Make ``seq`` follow message time, keeping insertion order as tie-break.
+
+    New rows are appended after the largest overlap with what is stored, so a
+    turn admitted on a later crawl (e.g. a media-only bubble) lands *after*
+    newer messages.  Every reader of a conversation (Fetch QA, MAS history,
+    the dashboard) orders by ``seq``, so the newest row must be the latest
+    message.  Rows without an exact time inherit the time of the nearest
+    earlier timed row so an untimed bubble never jumps.  Returns the number
+    of rows whose ``seq`` changed.
+    """
+    cursor.execute(
+        "SELECT id, seq, message_at, time_precision FROM messages WHERE thread_id=? ORDER BY seq, id",
+        (thread_id,),
+    )
+    rows = [tuple(r) for r in cursor.fetchall()]
+    if len(rows) < 2:
+        return 0
+    keyed = []
+    carried = None
+    for position, (row_id, seq, message_at, precision) in enumerate(rows):
+        exact = message_at if (precision == "date_time" and message_at) else None
+        if exact is not None:
+            carried = str(exact)[:19].replace("T", " ")
+        keyed.append((carried or "", position, row_id))
+    ordered = sorted(keyed)
+    changes = [(new_seq, row_id) for new_seq, (_, _, row_id) in enumerate(ordered)
+               if rows[[r[0] for r in rows].index(row_id)][1] != new_seq]
+    if not changes:
+        return 0
+    # Two passes: the UNIQUE(thread_id, sender, content, message_timestamp, seq)
+    # constraint could otherwise collide half-way through the renumbering.
+    for new_seq, row_id in changes:
+        cursor.execute("UPDATE messages SET seq=? WHERE id=?", (-(new_seq + 1), row_id))
+    for new_seq, row_id in changes:
+        cursor.execute("UPDATE messages SET seq=? WHERE id=?", (new_seq, row_id))
+    return len(changes)
+
+
 def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city=None) -> dict:
     # The display name can change between crawls.  A valid name read from the
     # live conversation must replace a previously persisted navigation label
@@ -350,9 +357,12 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
         s = re.sub(r'(\[Quoted Reply/Link\]:\s*)+$', '', s.strip())
         return re.sub(r'\s+', '', s.lower())
 
-    # `Auto_Page` only exists in legacy rows created by a former content-based
-    # sender heuristic. Treat it as Page for *matching those legacy rows*, but
-    # never create or infer it for a newly observed message.
+    # `Auto_Page` is the Page speaking through an Inbox automation.  Today it
+    # comes only from Meta's own creator label on the bound message model
+    # (facebook_message_source, creatorType == automated_response); legacy rows
+    # carry it from a former content-based heuristic.  Either way it is the
+    # same side as Page for *matching rows*, and persistence never infers it
+    # from wording.
     def _normalize_sender(s):
         s = _normalize(s)
         return "page" if s == "auto_page" else s
@@ -404,18 +414,11 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     # Inbox includes operational rows (assignment, labels, etc.) in its DOM.
     # They are not conversation messages and must neither be saved nor affect
     # overlap/sequence calculation for the actual message timeline.
-    # Reactions can arrive on an already persisted bubble or without a body
-    # bubble in the current viewport. Persist them independently before the
-    # conversational-body filter below; otherwise pure reaction observations
-    # disappear at the normalizer boundary.
-    for msg in thread_record.messages:
-        _persist_crawled_reactions(
-            cursor, thread_record.thread_id, msg.reactions, msg.source_id
-        )
+    reaction_annotations = _reaction_annotations(thread_record.messages)
 
     conversation_messages = [
         msg for msg in thread_record.messages
-        if msg.content and classify_message_kind(msg.content) == KIND_MESSAGE
+        if msg.content and (msg.kind or classify_message_kind(msg.content)) == KIND_MESSAGE
     ]
 
     # Only conversational bodies participate in message identity.  A
@@ -490,7 +493,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
                    sender_confidence=?, raw_timestamp=?, day_context=?,
                    time_precision=?, reply_to_message_id=?, quoted_sender=?,
                    quoted_sender_confidence=?, quoted_text=?, sender_evidence=?,
-                   quote_evidence=?
+                   quote_evidence=?, reaction_annotation_json=?
                WHERE id=?""",
             (
                 msg.sender or "Unknown",
@@ -508,6 +511,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
                 msg.quoted_text,
                 msg.sender_evidence,
                 msg.quote_evidence,
+                json.dumps(reaction_annotations.get(source_id, []), ensure_ascii=False),
                 existing_id,
             ),
         )
@@ -548,8 +552,8 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
                 message_at, message_at_approx, source_id, sender_confidence,
                 raw_timestamp, day_context, time_precision, reply_to_message_id,
                 quoted_sender, quoted_sender_confidence, quoted_text, sender_evidence,
-                quote_evidence)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                quote_evidence, reaction_annotation_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 thread_record.thread_id,
                 sender_to_save,
@@ -570,6 +574,7 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
                 msg.quoted_text,
                 msg.sender_evidence,
                 msg.quote_evidence,
+                json.dumps(reaction_annotations.get(_observed_source_id(msg), []), ensure_ascii=False),
             )
         )
         if cursor.rowcount > 0:
@@ -578,6 +583,20 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
             # re-scraped "replied to an ad." banner must not.
             if msg.sender == "Customer" and msg_kind == KIND_MESSAGE:
                 new_customer_message_added = True
+    # A refresh can see an existing target bubble but no reactions. Clear its
+    # previous annotation only for bubbles actually present in this snapshot;
+    # never use a missing viewport row as evidence that its reactions vanished.
+    visible_source_ids = {
+        _observed_source_id(msg) for msg in conversation_messages if _observed_source_id(msg)
+    }
+    for source_id in visible_source_ids:
+        cursor.execute(
+            "UPDATE messages SET reaction_annotation_json=? WHERE thread_id=? AND source_id=?",
+            (json.dumps(reaction_annotations.get(source_id, []), ensure_ascii=False),
+             thread_record.thread_id, source_id),
+        )
+    resequence_thread_by_time(cursor, thread_record.thread_id)
+
     # Prefer the last real DOM message.  The sidebar can instead reflect an
     # operational event such as an assignment banner, which must not make an
     # old conversation look newly active or reorder the Inbox snapshot.
@@ -601,6 +620,11 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
     # no new message was inserted: the marker is what lets the next Stage 1
     # skip the thread without opening it.  A detail-only refresh (no sidebar
     # token) leaves the previous marker untouched.
+    # code:inbox-sync-skip-001:incomplete-history-marker
+    # Record the sidebar card even when some bubbles were quarantined: the
+    # marker is what lets Stage 1 see "unchanged since the last look" and
+    # bound re-opens of a permanently incomplete thread to once per day
+    # instead of every cycle.  ``fetch_history_complete`` keeps the truth.
     fetched_token = (thread_record.sidebar_time_text or "").strip() or None
     fetched_kind = sidebar_time.get("kind") if fetched_token else None
     fetched_preview = normalize_preview_text(thread_record.preview_text) if fetched_token else None
@@ -637,6 +661,18 @@ def persist_thread_record(conn, thread_record: EnrichedThreadRecord, detect_city
         fetched_preview,
         fetched_token,
     ))
+
+    cursor.execute("UPDATE threads SET fetch_history_complete=? WHERE id=?",
+                   (int(thread_record.history_complete), thread_record.thread_id))
+
+    system_messages = [m for m in thread_record.messages
+                       if (m.kind or classify_message_kind(m.content)) == "system_banner"]
+    if system_messages:
+        from dataclasses import asdict
+        from fb_pipeline.persistence.l4_inbox_events import save_system_events
+        save_system_events(conn, thread_record, [
+            {**asdict(m), "text": m.content, "body": m.content} for m in system_messages
+        ])
 
     for aid in thread_record.ad_ids:
         cursor.execute('''

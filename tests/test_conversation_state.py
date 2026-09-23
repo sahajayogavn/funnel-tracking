@@ -262,24 +262,11 @@ def test_format_conversation_lines_preserves_structured_reaction_separately():
     text = format_conversation_lines([{
         **_m("Page", "Mời bạn tham gia lớp", "2026-09-19 09:00:00", 1),
         "reactions": [{
-            "emoji": "LOVE", "actor": "Customer", "target_type": "message", "target_id": "fb-message-9",
+            "emoji": "LOVE", "actor": "Seeker", "count": 2,
         }],
     }])
     assert "[2026-09-19 09:00 | Page] Mời bạn tham gia lớp" in text
-    assert "[2026-09-19 09:00 | Reaction metadata] emoji: LOVE; actor: Customer; target: message/fb-message-9" in text
-
-
-def test_format_conversation_lines_keeps_thread_reaction_event_out_of_message_body():
-    text = format_conversation_lines(
-        [_m("Customer", "Dạ", "2026-09-19 09:00:00", 1)],
-        [{
-            "emoji": "👍", "actor": "Lan", "target_type": "thread",
-            "target_message_id": None, "observed_at": "2026-09-19T09:01:00+07:00",
-        }],
-    )
-    assert "[2026-09-19 09:00 | Customer] Dạ" in text
-    assert "[Reaction event metadata] emoji: 👍; actor: Lan; target: thread/unknown" in text
-    assert "not a message body" in text
+    assert "[2026-09-19 09:00 | Reaction on preceding message] Seeker: thả LOVE ×2" in text
 
 
 def test_format_conversation_lines_keeps_sender_and_time_uncertainty_visible():
@@ -318,3 +305,16 @@ def test_quote_cannot_create_a_customer_question_or_phone_signal():
 
 def test_format_now_context_vietnamese_weekday():
     assert format_now_context(NOW).startswith("Bây giờ là Thứ Năm 17/09/2026 14:00")
+
+
+# code:test-validation-001:automated-page-turn
+def test_format_conversation_lines_labels_inbox_automation_as_page_automated_message():
+    text = format_conversation_lines([
+        _m("Customer", "Tôi muốn đăng ký khóa học", "2026-09-19 09:00:00", 1),
+        {**_m("Auto_Page", "Xin chào, bạn để lại Họ tên và số điện thoại nhé", "2026-09-19 09:00:07", 2),
+         "sender_confidence": "explicit"},
+        {**_m("Page", "Cảm ơn bạn đã đăng ký", "2026-09-19 12:00:00", 3), "sender_confidence": "explicit"},
+    ])
+    assert "[2026-09-19 09:00 | Page (automated message)] Xin chào" in text
+    assert "[2026-09-19 12:00 | Page] Cảm ơn" in text
+    assert "Auto_Page" not in text

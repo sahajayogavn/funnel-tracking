@@ -17,6 +17,7 @@ from .inbox.scroll_helpers import (
 from .inbox.thread_list_parser import (
     extract_visible_threads,
     is_conversation_name,
+    is_ignored_inbox_name,
     parse_sidebar_time_token,
     is_thread_older_than_range,
     validate_quick_fetch_cache,
@@ -45,6 +46,11 @@ from .inbox.constants import (
 )
 
 MAX_IDLE_SIDEBAR_NO_PROGRESS_MS = 120_000
+# A single no-change result is common while Meta fetches the next virtual
+# page.  Two consecutive results after the helper's pagination grace period
+# mean neither the scrollbar nor the cards progressed, so continuing would
+# only re-read the same viewport.
+MAX_CONSECUTIVE_STAGNANT_SIDEBAR_SCROLLS = 3
 
 
 # code:inbox-thread-identity-001:stage1-psid
@@ -87,13 +93,14 @@ def _parse_day(parsed_at, utime_ms=None):
 def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn, logger,
                      record_fetch, *, skip_navigation: bool = False, force_refresh: bool = False, refresh_older_than_days: int | None = None,
                      allow_early_exit: bool = True, target_total_messages: int | None = None,
-                     on_task: Callable[[ThreadTask], None]) -> dict:
+                     on_task: Callable[[ThreadTask], bool | None]) -> dict:
     """Stage 1: discover conversation threads top-down in the sidebar and
     dispatch a ``ThreadTask`` for every one that needs Stage 2 processing.
 
     ``on_task`` is invoked, in Inbox order, once for every discovered thread
     that is not a "skip" (already-synced) card, at the end of each
-    visible-cards round, before the next sidebar scroll.
+    visible-cards round, before the next sidebar scroll. Returning False
+    stops discovery without marking it complete (quality gate/target stop).
 
     Returns a dict:
     - Early-exit cases (cache hit, or the message target already met):
@@ -105,9 +112,19 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
     # code:inbox-parallel-fetch-001:discover
     """
     from fb_pipeline.inbox.l3_pipeline import build_thread_record, canonical_thread_id, normalize_preview_text
-    from fb_pipeline.inbox.l3_sync_decision import FETCH, SKIP, decide_by_fetched_marker, is_out_of_order
+    from fb_pipeline.inbox.l3_sync_decision import (
+        FETCH, SKIP, decide_by_fetched_marker, is_out_of_order, previous_fetch_incomplete,
+    )
 
     inbox_url = f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}"
+
+    # code:inbox-sync-skip-001:previous-run-complete
+    # "Two clean cards => everything below is clean" only holds when the
+    # previous run finished.  After an aborted run, cards below the abort
+    # point were never re-marked, so keep scanning the whole range.
+    if allow_early_exit and not force_refresh and previous_fetch_incomplete(page_id, conn):
+        logger.warning("Previous fetch for this page did not complete; early exit disabled for this run.")
+        allow_early_exit = False
 
     if not skip_navigation:
         logger.info(f"Navigating to {inbox_url}")
@@ -175,6 +192,7 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
     stats = {
         "new_threads": 0, "new_messages": 0, "skipped_threads": 0, "threads_seen": 0,
         "threads_processed": 0, "threads_skipped_duplicate": 0, "threads_skipped_cutoff": 0,
+        "cards_skipped_messenger_user": 0,
         "processed_thread_ids": [],
         "threads_skipped_click_verify": 0,
         "threads_psid_resolved": 0,
@@ -201,6 +219,8 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
             return {"early_exit": True, "stats": stats}
 
     collected_threads = []
+    interrupted = False
+    stagnant_sidebar_scrolls = 0
 
     while not reached_date_limit:
         scroll_round += 1
@@ -217,6 +237,10 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
         round_tasks = []
         for vt in visible_threads:
             name = (vt.get("name") or "").strip()
+            if is_ignored_inbox_name(name):
+                stats["cards_skipped_messenger_user"] += 1
+                logger.info("Stage1 skip reason=operator_excluded_messenger_user")
+                continue
             # Keep a Python-side guard as well as the DOM parser guard. This
             # prevents a navigation label from being persisted if a caller
             # supplies a visible-thread payload from a different parser.
@@ -303,11 +327,11 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
 
             if row and not force_refresh:
                 cursor.execute(
-                    "SELECT fetched_sidebar_token, fetched_preview_norm, fetched_at, fetched_sidebar_utime_ms "
+                    "SELECT fetched_sidebar_token, fetched_preview_norm, fetched_at, fetched_sidebar_utime_ms, fetch_history_complete "
                     "FROM threads WHERE id = ?",
                     (thread_record.thread_id,),
                 )
-                marker = cursor.fetchone() or (None, None, None, None)
+                marker = cursor.fetchone() or (None, None, None, None, 1)
                 decision = decide_by_fetched_marker(
                     token_now=vt.get("sidebarTimeText", ""),
                     source_now=vt.get("sidebarTimeSource", ""),
@@ -317,6 +341,7 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
                     fetched_at=marker[2],
                     utime_now_ms=vt.get("sidebarTimestampMs"),
                     fetched_utime_ms=marker[3],
+                    history_complete=bool(marker[4]),
                     out_of_order=out_of_order,
                     refresh_older_than_days=refresh_older_than_days,
                 )
@@ -416,8 +441,18 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
         # Dispatch every non-skip thread found in this round before the next
         # sidebar scroll (whether the round ended naturally or via the
         # cutoff/early-exit breaks above).
+        conn.commit()
         for task in round_tasks:
-            on_task(task)
+            keep_discovering = on_task(task)
+            # Worker 0 may resolve a provisional card to its canonical ID.
+            # Remember both keys so the overlapping next viewport cannot
+            # dispatch the same conversation again under the newly found ID.
+            if task.record.selected_item_id:
+                processed_thread_keys.add(task.record.selected_item_id)
+            if keep_discovering is False:
+                interrupted = True
+                reached_date_limit = True
+                break
 
         # Stage 1 may have updated ``inbox_sort_index`` for cache-hit rows.
         # In parallel mode those same rows can be UPSERTed by Stage 2 as soon
@@ -449,6 +484,22 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
         scroll_result = scroll_sidebar_and_wait(page, logger, scroll_round=scroll_round, timeout_ms=60000)
         stats["sidebar_scrolls"] += 1
         stats["sidebar_wait_ms"] += scroll_result.get("elapsed_ms", 0)
+        if scroll_result.get("progressed"):
+            stagnant_sidebar_scrolls = 0
+        else:
+            stagnant_sidebar_scrolls += 1
+            logger.warning(
+                "sidebar_scroll_no_progress "
+                f"round={scroll_round} consecutive={stagnant_sidebar_scrolls} "
+                f"dom_moved={scroll_result.get('dom_moved')}"
+            )
+            if stagnant_sidebar_scrolls >= MAX_CONSECUTIVE_STAGNANT_SIDEBAR_SCROLLS:
+                interrupted = True
+                logger.error(
+                    "Stopping Stage 1: sidebar did not advance after three guarded "
+                    "pagination attempts; leaving this fetch incomplete for retry."
+                )
+                break
 
     # END STAGE 1
     conn.commit()
@@ -462,6 +513,7 @@ def discover_threads(page, page_id: str, time_range: str, max_threads: int, conn
         "early_exit": False,
         "stats": stats,
         "existing_message_count": existing_message_count,
+        "interrupted": interrupted,
     }
 
 def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, logger,
@@ -469,74 +521,17 @@ def scrape_inbox(page, page_id: str, time_range: str, max_threads: int, conn, lo
                  skip_navigation: bool = False, force_refresh: bool = False, refresh_older_than_days: int | None = None,
                  allow_early_exit: bool = True,
                  target_total_messages: int | None = None) -> dict:
-    tasks: list[ThreadTask] = []
-    discovery = discover_threads(
+    # Shared engine preserves checkpoint/resume and worker-0 semantics even
+    # for the non-CDP browser path. No background tab is created here.
+    from fb_pipeline.inbox.l3_parallel_fetch import run_parallel_fetch
+    return run_parallel_fetch(
         page, page_id, time_range, max_threads, conn, logger, record_fetch,
-        skip_navigation=skip_navigation, force_refresh=force_refresh, refresh_older_than_days=refresh_older_than_days,
-        allow_early_exit=allow_early_exit, target_total_messages=target_total_messages,
-        on_task=tasks.append,
+        ThreadWorkerDeps(extract_ad_id_labels_arg, extract_user_info, detect_city),
+        workers=1, inbox_url=f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}",
+        skip_navigation=skip_navigation, force_refresh=force_refresh,
+        refresh_older_than_days=refresh_older_than_days, allow_early_exit=allow_early_exit,
+        target_total_messages=target_total_messages,
     )
-
-    if discovery["early_exit"]:
-        return discovery["stats"]
-
-    stats = discovery["stats"]
-    existing_message_count = discovery["existing_message_count"]
-
-    # Avoid writing tens of thousands of PII-bearing log lines during an
-    # archive import. The total and per-thread Stage 2 logs remain auditable.
-    logger.info(f"Stage 2 will extract details for {len(tasks)} threads.")
-
-    # STAGE 2
-    if len(tasks) > 0:
-        logger.info("Resetting sidebar scroll to top for Stage 2...")
-        try:
-            # code:fb-inbox-scroll-001:stage2-reset
-            # Use the same tab-aware virtual-list resolver as Stage 1.
-            scroll_reset_info = reset_sidebar_to_top(page, logger)
-            if scroll_reset_info.get("found") and scroll_reset_info.get("after") != 0:
-                logger.warning("Stage 2 sidebar reset did not reach scrollTop=0; continuing with guarded click retries.")
-        except Exception as e:
-            logger.warning(f"Failed to run Stage 2 scroll reset: {e}")
-
-        page.wait_for_timeout(1500)
-
-        deps = ThreadWorkerDeps(
-            extract_ad_id_labels=extract_ad_id_labels_arg,
-            extract_user_info=extract_user_info,
-            detect_city=detect_city,
-        )
-
-        for i, task in enumerate(tasks):
-            if (target_total_messages is not None
-                    and existing_message_count + stats["new_messages"] >= target_total_messages):
-                logger.info(
-                    f"Reached total message target ({existing_message_count + stats['new_messages']}/"
-                    f"{target_total_messages}). Stopping Stage 2."
-                )
-                break
-            name = task.record.thread_name
-            logger.info(f"Syncing thread '{name}' (#{i+1}/{len(tasks)})...")
-
-            result = process_thread_task(page, conn, task, deps, logger, is_first_thread=(i == 0))
-
-            if result.status in {"error", "click_verify_failed", "locate_failed"}:
-                stats.setdefault("failed_threads", []).append({
-                    "thread_id": result.thread_id, "thread_name": name,
-                    "status": result.status, "error": result.error,
-                })
-
-            if result.status == "click_verify_failed":
-                stats["threads_skipped_click_verify"] += 1
-            elif result.status == "persisted":
-                stats["new_messages"] += result.messages_added
-                stats["threads_processed"] += 1
-                stats["processed_thread_ids"].append(result.thread_id)
-            # "no_messages" -> no stats change, matching the original `continue`
-            # (a warning was already logged inside process_thread_task).
-
-    record_fetch(page_id, stats["new_threads"] + stats["skipped_threads"], stats["new_messages"], conn)
-    return stats
 
 scrape_inbox_ui = scrape_inbox
 

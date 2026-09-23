@@ -21,10 +21,9 @@ export interface MessengerMessage {
   quotedSender?: string | null;
   quotedText?: string | null;
   replyToMessageId?: string | null;
-  /** Observed reactions are separate events, not prose written by sender. */
+  /** Reactions are annotations attached to this target message. */
   reactions?: {
-    actor?: string | null; actorRole?: string | null; emoji?: string | null;
-    targetType?: string | null; targetScope?: string | null; targetId?: string | null;
+    actor?: string | null; emoji?: string | null; count?: number | null;
   }[];
 }
 
@@ -127,13 +126,13 @@ export function MessengerMessageList({
           ? message.reactions.map(reaction => ({
             emoji: reaction.emoji || '•',
             actor: reaction.actor || null,
-            targetScope: reaction.targetScope || reaction.targetType || null,
+            count: reaction.count || 1,
             // A missing actor is evidence of uncertainty, not a label we can
             // replace with the bubble sender.
-            label: `${reaction.emoji || '•'} — ${reaction.actor || 'người phản ứng chưa xác định'} · ${reaction.targetScope || reaction.targetType || 'mục tiêu chưa xác định'}`,
+            label: `${reaction.actor || 'người phản ứng chưa xác định'} thả ${reaction.emoji || '•'} ×${reaction.count || 1}`,
           }))
           : legacyReactions.map(emoji => ({
-            emoji, actor: null, targetScope: null,
+            emoji, actor: null, count: 1,
             label: `${emoji} — actor/target không có trong dữ liệu cũ`,
           }));
 
@@ -159,7 +158,7 @@ export function MessengerMessageList({
                   {reactions.map((reaction, reactionIndex) => (
                     <span key={`${reaction.label}-${reactionIndex}`} title={reaction.label}>
                       <span aria-hidden="true">{reaction.emoji}</span>{' '}
-                      <small>{reaction.actor || 'unknown'} · {reaction.targetScope || 'unknown'}</small>
+                      <small>{reaction.actor || 'unknown'} · ×{reaction.count}</small>
                     </span>
                   ))}
                 </div>
