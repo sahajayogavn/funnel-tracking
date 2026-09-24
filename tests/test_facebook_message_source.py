@@ -6,6 +6,7 @@ import pytest
 from fb_pipeline.browser.inbox.facebook_message_source import source_messages, reconcile_source, SOURCE_SCRIPT
 from fb_pipeline.contracts.l1_fetch_integrity import check_snapshot, INCOMPLETE_REASONS
 from fb_pipeline.contracts.l1_message_time import resolve_message_at
+from tests.chrome_path import local_chrome
 
 
 OBSERVED = '2026-09-21T12:00:00+00:00'
@@ -146,7 +147,7 @@ def test_source_epoch_refines_minute_label_but_never_overrides_a_conflict():
 def test_source_script_reads_only_node_bound_model():
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, executable_path='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+        browser = p.chromium.launch(headless=True, executable_path=local_chrome())
         page = browser.new_page()
         page.set_content('<div role="region" aria-label="message history"><div data-message-id="mid.1"><img alt="🌺">Hello</div></div><div data-message-id="outside">Other person</div>')
         page.evaluate('''() => {document.querySelector('[data-message-id]').__reactFiber$test = {return: {memoizedProps: {
@@ -253,7 +254,7 @@ def test_schema_drift_is_one_hard_diagnosed_issue_not_a_wall_of_missing_models()
 def test_source_script_reports_region_and_prop_keys_for_unbound_nodes():
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, executable_path='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+        browser = p.chromium.launch(headless=True, executable_path=local_chrome())
         page = browser.new_page()
         page.set_content('<div role="region" aria-label="message history"><div data-message-id="mid.1">Hello</div></div>')
         page.evaluate('''() => {document.querySelector('[data-message-id]').__reactFiber$test = {memoizedProps: {threadKey: 1, secretToken: 'SECRETVALUE'},

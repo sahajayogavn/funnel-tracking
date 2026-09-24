@@ -470,7 +470,8 @@ def test_draft_new_message_on_next_tick_rejected_and_cleared(database, browser, 
 def test_real_dom_recipient_and_draft_no_enter():
     from pathlib import Path
     from playwright.sync_api import sync_playwright
-    chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    from tests.chrome_path import local_chrome
+    chrome = local_chrome()
     if not Path(chrome).exists(): pytest.skip("Local Chrome required")
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, executable_path=chrome)

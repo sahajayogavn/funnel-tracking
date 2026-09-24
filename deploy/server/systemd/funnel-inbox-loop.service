@@ -1,0 +1,25 @@
+# Universal ID: code:server-deploy-001:inbox-loop-service
+# fetch -> classify -> MAS every 15 minutes. Exit 75 (Facebook temporary block)
+# and 76 (fetch QA mismatch) stop the loop on purpose and must be root-caused
+# before restarting, so they are excluded from automatic restarts.
+[Unit]
+Description=Funnel Tracking inbox fetch/classify/MAS loop
+Requires=funnel-cdp-browser.service
+After=funnel-cdp-browser.service
+
+[Service]
+Type=simple
+Environment=TZ=Asia/Ho_Chi_Minh
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=@PROJECT_ROOT@
+Environment=FUNNEL_PAGE_ID=1548373332058326
+ExecStart=@PROJECT_ROOT@/tools/run_inbox_mas_loop.sh pipeline
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=75 76
+StandardOutput=append:@PROJECT_ROOT@/logs/services/inbox-loop.log
+StandardError=inherit
+
+[Install]
+WantedBy=default.target

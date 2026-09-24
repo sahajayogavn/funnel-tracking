@@ -1,0 +1,26 @@
+# Universal ID: code:server-deploy-001:cdp-browser-service
+# Head mode renders on the server desktop (DISPLAY/XAUTHORITY are imported into
+# the user manager by the GNOME session), so the operator can log in to Facebook
+# over RustDesk. Set CDP_DISPLAY_MODE=headless in an override once logged in if
+# no desktop session is available.
+[Unit]
+Description=Funnel Tracking Chrome for CDP (port 9222)
+
+[Service]
+Type=simple
+Environment=TZ=Asia/Ho_Chi_Minh
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=@PROJECT_ROOT@
+Environment=CDP_DISPLAY_MODE=head
+# The server desktop is dedicated to this bot: keep the window on-screen so it
+# is visible over RustDesk (the Mac default parks it off-screen).
+Environment=CDP_WINDOW_POSITION=0,0
+ExecStart=@PROJECT_ROOT@/tools/start_cdp_browser.sh run
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:@PROJECT_ROOT@/logs/cdp_browser.log
+StandardError=inherit
+
+[Install]
+WantedBy=default.target

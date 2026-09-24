@@ -1,0 +1,24 @@
+# Universal ID: code:server-deploy-001:hitl-execution-service
+# Executes only human-approved actions (WebUI/Telegram). Draft-only by default:
+# the draft is filled in the recipient tab and the operator presses Enter.
+[Unit]
+Description=Funnel Tracking human-approved DM executor (draft-only)
+Requires=funnel-cdp-browser.service
+After=funnel-cdp-browser.service
+
+[Service]
+Type=simple
+Environment=TZ=Asia/Ho_Chi_Minh
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=@PROJECT_ROOT@
+Environment=FUNNEL_PAGE_ID=1548373332058326
+Environment=FUNNEL_HITL_INTERVAL_SECONDS=15
+ExecStart=@PROJECT_ROOT@/tools/run_hitl_execution_loop.sh live --draft-only
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:@PROJECT_ROOT@/logs/services/hitl-execution.log
+StandardError=inherit
+
+[Install]
+WantedBy=default.target

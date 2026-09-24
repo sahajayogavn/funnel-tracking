@@ -16,14 +16,14 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 from fb_pipeline.browser.inbox.thread_detail_parser import extract_thread_messages
+from tests.chrome_path import local_chrome
 
 
-_MACOS_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 
 @pytest.fixture(scope="module")
 def dom_page():
-    executable = os.environ.get("PARSER_TEST_CHROME", _MACOS_CHROME)
+    executable = local_chrome()
     if not Path(executable).exists():
         pytest.skip("DOM parser regressions require local Chrome; set PARSER_TEST_CHROME")
 

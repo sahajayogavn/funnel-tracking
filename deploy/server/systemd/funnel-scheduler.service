@@ -1,0 +1,21 @@
+# Universal ID: code:server-deploy-001:scheduler-service
+# Proactive care route: 08:30 daily bundle, session/attendance pollers,
+# registration-SLA alerts (notifications first; drafts need human approval).
+[Unit]
+Description=Funnel Tracking MAS scheduler (care route)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=TZ=Asia/Ho_Chi_Minh
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=@PROJECT_ROOT@
+ExecStart=@PROJECT_ROOT@/.venv/bin/python tools/l5_scheduler.py --page-id 1548373332058326 --routes care --care-time 08:30 --live
+Restart=on-failure
+RestartSec=60
+StandardOutput=append:@PROJECT_ROOT@/logs/services/scheduler.log
+StandardError=inherit
+
+[Install]
+WantedBy=default.target

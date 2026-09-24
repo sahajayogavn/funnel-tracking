@@ -18,6 +18,7 @@ from fb_pipeline.browser.l3_inbox import discover_threads
 from fb_pipeline.inbox.l3_pipeline import canonical_thread_id, normalize_preview_text
 from fb_pipeline.inbox.l3_sync_decision import FETCH, SKIP, decide_by_fetched_marker, is_out_of_order
 from fb_pipeline.persistence.l4_sqlite_store import setup_database
+from tests.chrome_path import local_chrome
 
 NOW = datetime(2026, 9, 21, 10, 0, 0)  # Monday
 
@@ -293,7 +294,6 @@ class TestStage1FetchedMarker(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Browser-executed extractor: timestamp is read from the card tail
 # ---------------------------------------------------------------------------
-_MACOS_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 
 @pytest.fixture(scope="module")
@@ -301,7 +301,7 @@ def dom_page():
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 
-    executable = os.environ.get("PARSER_TEST_CHROME", _MACOS_CHROME)
+    executable = local_chrome()
     if not Path(executable).exists():
         pytest.skip("DOM extractor test requires local Chrome; set PARSER_TEST_CHROME")
     with sync_playwright() as playwright:

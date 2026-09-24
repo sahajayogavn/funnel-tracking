@@ -1,0 +1,21 @@
+# Universal ID: code:server-deploy-001:web-service
+[Unit]
+Description=Funnel Tracking web dashboard (Next.js, port 9995)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=TZ=Asia/Ho_Chi_Minh
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=@PROJECT_ROOT@/web
+Environment=NODE_ENV=production
+Environment=PORT=9995
+ExecStart=@PROJECT_ROOT@/web/node_modules/.bin/next start --port 9995
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:@PROJECT_ROOT@/logs/services/web.log
+StandardError=inherit
+
+[Install]
+WantedBy=default.target
