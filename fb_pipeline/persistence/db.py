@@ -16,6 +16,8 @@ Universal ID: code:postgres-cutover-001:python-db-boundary
 from __future__ import annotations
 
 import atexit
+import base64
+import binascii
 import os
 import re
 import sqlite3
@@ -26,13 +28,14 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 
 POSTGRES_SCHEMES = ("postgres://", "postgresql://")
 _pool_lock = threading.Lock()
 _pool: Any | None = None
 _pool_url: str | None = None
+PROJECT_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 
 def close_postgres_pool() -> None:
@@ -48,6 +51,36 @@ def close_postgres_pool() -> None:
 atexit.register(close_postgres_pool)
 
 
+def _decode_env_value(value: str) -> str:
+    """Decode one project `.env` value the way ``tools.env_manager`` does.
+
+    The project `.env` stores Base64-encoded values.  ``validate=True`` keeps a
+    plaintext value such as ``postgresql://...`` from being mangled, because
+    non-alphabet characters make it undecodable and it is returned unchanged.
+    """
+    try:
+        return base64.b64decode(value.encode("utf-8"), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return value
+
+
+# code:postgres-cutover-001:decoded-env
+def load_project_env(env_path: Path | None = None) -> None:
+    """Load the encoded project `.env` into ``os.environ`` without overriding.
+
+    ``python-dotenv`` alone would export the raw Base64 text, so a direct
+    ``DATABASE_URL`` lookup saw ``cG9zdGdyZXNxbDov...`` instead of a
+    ``postgresql://`` URL and silently fell back to SQLite (and
+    ``FUNNEL_REQUIRE_POSTGRES`` read as ``MQ==`` instead of ``1``).
+    """
+    path = env_path or PROJECT_ENV_PATH
+    if not path.exists():
+        return
+    for key, value in dotenv_values(path).items():
+        if value is not None and key not in os.environ:
+            os.environ[key] = _decode_env_value(value)
+
+
 def database_url() -> str | None:
     """Return the configured URL, loading this project's non-overriding .env.
 
@@ -55,7 +88,7 @@ def database_url() -> str | None:
     This keeps an explicitly exported process value authoritative while making
     the configured cutover URL available to every legacy connection factory.
     """
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
+    load_project_env()
     url = os.environ.get("DATABASE_URL", "").strip() or None
     is_postgres_url = bool(url and url.lower().startswith(POSTGRES_SCHEMES))
     if os.environ.get("FUNNEL_REQUIRE_POSTGRES", "").lower() in {"1", "true", "yes", "on"} and not is_postgres_url:
@@ -118,15 +151,21 @@ def _pg_row_factory(cursor: Any) -> Callable[[Sequence[Any]], PgRow]:
     return make_row
 
 
-def _replace_qmarks(sql: str) -> str:
-    """Translate qmark parameters without touching SQL string literals."""
+def _replace_qmarks(sql: str, escape_percent: bool = False) -> str:
+    """Translate qmark parameters without touching SQL string literals.
+
+    With ``escape_percent`` every literal ``%`` (e.g. ``LIKE 'API error:%'``)
+    becomes ``%%``: psycopg parses ``%`` as a placeholder marker whenever
+    parameters are bound, even inside quoted literals.
+    """
+    pct = "%%" if escape_percent else "%"
     out: list[str] = []
     quote: str | None = None
     i = 0
     while i < len(sql):
         char = sql[i]
         if quote:
-            out.append(char)
+            out.append(pct if char == "%" else char)
             if char == quote:
                 if i + 1 < len(sql) and sql[i + 1] == quote:  # SQL escaped quote
                     out.append(sql[i + 1])
@@ -138,19 +177,21 @@ def _replace_qmarks(sql: str) -> str:
             out.append(char)
         elif char == "?":
             out.append("%s")
+        elif char == "%":
+            out.append(pct)
         else:
             out.append(char)
         i += 1
     return "".join(out)
 
 
-def translate_sql(sql: str) -> str:
+def translate_sql(sql: str, escape_percent: bool = False) -> str:
     """Translate the safe, recurrent SQLite subset used by runtime callers.
 
     Complex DDL is intentionally not translated here: PostgreSQL schema is
     owned by the migration artifact and must not silently drift at startup.
     """
-    translated = _replace_qmarks(sql)
+    translated = _replace_qmarks(sql, escape_percent)
     # PostgreSQL cannot infer a bound parameter used only as ``? IS NULL``.
     # Optional legacy filters use it with text identifiers (page/thread/etc.).
     translated = re.sub(r"%s\s+IS\s+NULL", "%s::text IS NULL", translated, flags=re.I)
@@ -237,7 +278,7 @@ def _pragma_table_info(sql: str) -> str | None:
     )
 
 
-def _translate_metadata_sql(sql: str) -> str:
+def _translate_metadata_sql(sql: str, escape_percent: bool = False) -> str:
     pragma = _pragma_table_info(sql)
     if pragma:
         return pragma
@@ -247,10 +288,10 @@ def _translate_metadata_sql(sql: str) -> str:
         return re.sub(
             r"SELECT\s+1\s+FROM\s+sqlite_master\s+WHERE\s+type\s*=\s*'table'\s+AND\s+name\s*=\s*%s",
             "SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = %s",
-            _replace_qmarks(sql),
+            _replace_qmarks(sql, escape_percent),
             flags=re.I,
         )
-    return translate_sql(sql)
+    return translate_sql(sql, escape_percent)
 
 
 class PgCursor:
@@ -261,7 +302,8 @@ class PgCursor:
         self._returns_id = False
 
     def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] | None = None):
-        translated = _translate_metadata_sql(sql)
+        # psycopg only interprets ``%`` when parameters are bound.
+        translated = _translate_metadata_sql(sql, escape_percent=params is not None)
         # SQLite's BEGIN IMMEDIATE is a writer-lock acquisition. PostgreSQL's
         # MVCC has no equivalent database-wide lock; normal BEGIN paired with
         # conditional UPDATE/row locks is the safe portable transaction start.
@@ -277,7 +319,7 @@ class PgCursor:
         return self
 
     def executemany(self, sql: str, params_seq: Sequence[Sequence[Any]]):
-        self._cursor.executemany(_translate_metadata_sql(sql), params_seq)
+        self._cursor.executemany(_translate_metadata_sql(sql, escape_percent=True), params_seq)
         self._lastrowid = None
         self._returns_id = False
         return self
@@ -291,6 +333,11 @@ class PgCursor:
             value = self._cursor.fetchone()
             self._lastrowid = int(value[0]) if value else None
         return self._lastrowid
+
+    def __iter__(self) -> Iterator[Any]:
+        # ``sqlite3.Cursor`` is iterable (``for row in conn.execute(...)``);
+        # ``__getattr__`` does not forward dunder lookups, so delegate here.
+        return iter(self._cursor)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._cursor, name)

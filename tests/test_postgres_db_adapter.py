@@ -241,3 +241,54 @@ def test_postgres_adapter_action_queue_dialect_on_dedicated_scratch_db(monkeypat
         conn.execute("DROP TABLE IF EXISTS adapter_queue_test")
         conn.commit()
         conn.close()
+
+
+# code:test-validation-001:persistence
+def test_database_url_decodes_base64_project_env(monkeypatch, tmp_path):
+    """The encoded project .env must yield a real postgresql:// URL, not SQLite."""
+    import base64
+    url = "postgresql://app:secret@10.0.1.42:5432/funnel_tracking"
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"DATABASE_URL={base64.b64encode(url.encode()).decode()}\n"
+        f"FUNNEL_REQUIRE_POSTGRES={base64.b64encode(b'1').decode()}\n"
+    )
+    monkeypatch.setattr(db, "PROJECT_ENV_PATH", env_file)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("FUNNEL_REQUIRE_POSTGRES", raising=False)
+
+    assert db.database_url() == url
+    assert db.using_postgres()
+    assert os.environ["FUNNEL_REQUIRE_POSTGRES"] == "1"
+
+
+def test_database_url_keeps_plaintext_and_exported_values(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("DATABASE_URL=postgresql://from-file@db:5432/x\n")
+    monkeypatch.setattr(db, "PROJECT_ENV_PATH", env_file)
+    monkeypatch.delenv("FUNNEL_REQUIRE_POSTGRES", raising=False)
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert db.database_url() == "postgresql://from-file@db:5432/x"
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://exported@db:5432/y")
+    assert db.database_url() == "postgresql://exported@db:5432/y"
+
+
+# code:test-validation-001:persistence
+def test_translate_sql_escapes_literal_percent_only_when_params_are_bound():
+    sql = "SELECT 1 FROM users WHERE page_id = ? AND proof LIKE 'API error:%' AND note LIKE '50% off'"
+    bound = db.translate_sql(sql, escape_percent=True)
+    assert bound == "SELECT 1 FROM users WHERE page_id = %s AND proof LIKE 'API error:%%' AND note LIKE '50%% off'"
+    # Without parameters psycopg does not parse '%', so '%%' would be literal.
+    assert "LIKE 'API error:%'" in db.translate_sql("SELECT 1 WHERE p LIKE 'API error:%'")
+
+
+# code:test-validation-001:persistence
+def test_pg_cursor_is_iterable_like_sqlite_cursor():
+    class FakePsycopgCursor:
+        def __iter__(self):
+            return iter([("a",), ("b",)])
+
+    cursor = db.PgCursor(FakePsycopgCursor(), connection=None)
+    assert [row[0] for row in cursor] == ["a", "b"]

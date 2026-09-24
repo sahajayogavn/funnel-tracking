@@ -13,7 +13,7 @@ import logging
 import os
 import traceback
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional, Tuple
 
@@ -178,36 +178,34 @@ def _append_tool_event(call_id: Optional[int], event: dict[str, Any]) -> None:
     if not call_id:
         return
     try:
-        conn = get_db_connection()
-        row = conn.execute("SELECT response_json FROM llm_calls WHERE id = ?", (call_id,)).fetchone()
-        raw = row[0] if row else None
-        try:
-            payload = json.loads(raw) if raw else {}
-        except (TypeError, json.JSONDecodeError):
-            payload = {"unparseable_response_json": raw}
-        events = payload.setdefault("tool_calls", [])
-        events.append(_jsonable(event))
-        conn.execute("UPDATE llm_calls SET response_json = ? WHERE id = ?", (_json_dumps(payload, "{}"), call_id))
-        conn.commit()
-        conn.close()
+        with closing(get_db_connection()) as conn:
+            row = conn.execute("SELECT response_json FROM llm_calls WHERE id = ?", (call_id,)).fetchone()
+            raw = row[0] if row else None
+            try:
+                payload = json.loads(raw) if raw else {}
+            except (TypeError, json.JSONDecodeError):
+                payload = {"unparseable_response_json": raw}
+            events = payload.setdefault("tool_calls", [])
+            events.append(_jsonable(event))
+            conn.execute("UPDATE llm_calls SET response_json = ? WHERE id = ?", (_json_dumps(payload, "{}"), call_id))
+            conn.commit()
     except Exception as exc:
         logger.warning("Failed to append tool trace event for call_id=%s: %s", call_id, exc)
 
 
 def _safe_insert(kwargs: dict[str, Any]) -> Optional[int]:
     try:
-        conn = get_db_connection()
-        conn.execute("PRAGMA busy_timeout=5000;")
-        columns = ", ".join(kwargs.keys())
-        placeholders = ", ".join(["?"] * len(kwargs))
-        cursor = conn.execute(
-            f"INSERT INTO llm_calls ({columns}) VALUES ({placeholders}) RETURNING id",
-            tuple(kwargs.values()),
-        )
-        call_id = cursor.fetchone()[0]
-        conn.commit()
-        conn.close()
-        return call_id
+        with closing(get_db_connection()) as conn:
+            conn.execute("PRAGMA busy_timeout=5000;")
+            columns = ", ".join(kwargs.keys())
+            placeholders = ", ".join(["?"] * len(kwargs))
+            cursor = conn.execute(
+                f"INSERT INTO llm_calls ({columns}) VALUES ({placeholders}) RETURNING id",
+                tuple(kwargs.values()),
+            )
+            call_id = cursor.fetchone()[0]
+            conn.commit()
+            return call_id
     except Exception as exc:
         logger.warning("Failed to insert llm trace: %s", exc)
         return None
@@ -217,15 +215,14 @@ def _safe_update(call_id: int, updates: dict[str, Any]) -> None:
     if not call_id:
         return
     try:
-        conn = get_db_connection()
-        conn.execute("PRAGMA busy_timeout=5000;")
-        set_clause = ", ".join([f"{key} = ?" for key in updates])
-        conn.execute(
-            f"UPDATE llm_calls SET {set_clause} WHERE id = ?",
-            tuple(updates.values()) + (call_id,),
-        )
-        conn.commit()
-        conn.close()
+        with closing(get_db_connection()) as conn:
+            conn.execute("PRAGMA busy_timeout=5000;")
+            set_clause = ", ".join([f"{key} = ?" for key in updates])
+            conn.execute(
+                f"UPDATE llm_calls SET {set_clause} WHERE id = ?",
+                tuple(updates.values()) + (call_id,),
+            )
+            conn.commit()
     except Exception as exc:
         logger.warning("Failed to update llm trace for call_id=%s: %s", call_id, exc)
 
@@ -349,12 +346,15 @@ def end_call(call_id: Optional[int], response_text: Optional[str] = None,
         "status": status,
     }
     try:
-        conn = get_db_connection()
-        row = conn.execute("SELECT started_at FROM llm_calls WHERE id = ?", (call_id,)).fetchone()
-        if row and row[0]:
-            started = datetime.fromisoformat(row[0])
-            updates["duration_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
-        conn.close()
+        with closing(get_db_connection()) as conn:
+            row = conn.execute("SELECT started_at FROM llm_calls WHERE id = ?", (call_id,)).fetchone()
+            if row and row[0]:
+                started = datetime.fromisoformat(str(row[0]))
+                # PostgreSQL stores started_at as ``timestamp without time
+                # zone`` (UTC session); treat a naive value as UTC.
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                updates["duration_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
     except Exception as exc:
         logger.warning("Could not calculate LLM call duration: %s", exc)
     _safe_update(call_id, updates)
@@ -366,25 +366,23 @@ def mark_sanitized(cleaned: str, call_id: Optional[int] = None) -> None:
         trace_id = _trace_id.get()
         if not call_id and not trace_id:
             return
-        conn = get_db_connection()
-        current_id = call_id
-        if not current_id and _last_call_trace_id.get() == trace_id:
-            current_id = _last_call_id.get()
-        if not current_id:
-            row = conn.execute(
-                "SELECT id FROM llm_calls WHERE trace_id = ? ORDER BY seq_in_trace DESC, id DESC LIMIT 1",
-                (trace_id,),
-            ).fetchone() if trace_id else None
-            current_id = row[0] if row else None
-        if not current_id:
-            conn.close()
-            return
-        row = conn.execute("SELECT status FROM llm_calls WHERE id = ?", (current_id,)).fetchone()
-        current_status = row[0] if row else "ok"
-        status = "sanitized_empty" if not (cleaned or "").strip() else ("error" if current_status == "error" else "ok")
-        conn.execute("UPDATE llm_calls SET sanitized_text = ?, status = ? WHERE id = ?", (cleaned or "", status, current_id))
-        conn.commit()
-        conn.close()
+        with closing(get_db_connection()) as conn:
+            current_id = call_id
+            if not current_id and _last_call_trace_id.get() == trace_id:
+                current_id = _last_call_id.get()
+            if not current_id:
+                row = conn.execute(
+                    "SELECT id FROM llm_calls WHERE trace_id = ? ORDER BY seq_in_trace DESC, id DESC LIMIT 1",
+                    (trace_id,),
+                ).fetchone() if trace_id else None
+                current_id = row[0] if row else None
+            if not current_id:
+                return
+            row = conn.execute("SELECT status FROM llm_calls WHERE id = ?", (current_id,)).fetchone()
+            current_status = row[0] if row else "ok"
+            status = "sanitized_empty" if not (cleaned or "").strip() else ("error" if current_status == "error" else "ok")
+            conn.execute("UPDATE llm_calls SET sanitized_text = ?, status = ? WHERE id = ?", (cleaned or "", status, current_id))
+            conn.commit()
     except Exception as exc:
         logger.warning("Failed to mark sanitized LLM output: %s", exc)
 
@@ -394,13 +392,12 @@ def link_outcome(outcome_type: str, outcome_ref: Any) -> None:
         trace_id = _trace_id.get()
         if not trace_id:
             return
-        conn = get_db_connection()
-        conn.execute(
-            "UPDATE llm_calls SET outcome_type = ?, outcome_ref = ? WHERE trace_id = ?",
-            (outcome_type, str(outcome_ref), trace_id),
-        )
-        conn.commit()
-        conn.close()
+        with closing(get_db_connection()) as conn:
+            conn.execute(
+                "UPDATE llm_calls SET outcome_type = ?, outcome_ref = ? WHERE trace_id = ?",
+                (outcome_type, str(outcome_ref), trace_id),
+            )
+            conn.commit()
     except Exception as exc:
         logger.warning("Failed to link LLM outcome: %s", exc)
 
